@@ -135,3 +135,4 @@
 /src/tests/ZrO2_bulk/dr filter=lfs diff=lfs merge=lfs -text
 /src/tests/run_tests filter=lfs diff=lfs merge=lfs -text
 /src/tests/tests filter=lfs diff=lfs merge=lfs -text
+*.md filter=lfs diff=lfs merge=lfs -text
