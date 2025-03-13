@@ -1,3 +1,21 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:dcb49c80731fcaad8faefd9f53ba82c1091bc8baab322ab32bec8e753ede7f8f
-size 336
+4 S 
+ Al N 
+1 1 1.556 0.898357 0 4 2 4 4 4
+1 2 1.556 0.898357 1.90263 4 1 3 3 3
+1 1 1.556 -0.898357 2.491 4 2 2 2 4
+1 2 1.556 -0.898357 4.39363 4 1 1 1 3
+0 0 0
+1.556 -2.69507 0
+1.556 2.69507 0
+0 0 4.982
+# materials
+1 AlN wz binary 1 CRY AlN 1.0 AlN_wz_cf.data 0.0 0.0
+
+
+ao=3.112
+co=4.982
+uo=0.3819
+a=3.112000
+c=4.982000
+u=.3819
+|ezz|=0

@@ -1,3 +1,21 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:70d7afed041906bb95812f437ac8a75a4da0a662d45595f2a499f11ab1552b96
-size 832
+# Output from Statix 7.0 - 2003  - Generic Format (Dimensions in Angstroems)
+# 
+# No. of atoms; periodicity
+           6   S
+# 
+# Atom types
+  Si O 
+# 
+# Atom No., type index, cartesian coordinates, and bond map
+    1     1      0.000000     0.000000     0.000000     4     2     3     4     6
+    2     2      0.925000     0.925000     0.925000     2     1     5
+    3     2      2.775000     2.775000     0.925000     2     1     5
+    4     2      2.775000     0.925000     2.775000     2     1     5
+    5     1      1.850000     1.850000     1.850000     4     2     3     4     6
+    6     2      0.925000     2.775000     2.775000     2     1     5
+# 
+# Cell units
+     0.000000     0.000000     0.000000
+     3.700000     3.700000     0.000000
+     3.700000     0.000000     3.700000
+     0.000000     3.700000     3.700000

@@ -1,3 +1,11 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:13c9823a3bad6eab12304a0557683b10325b419ca321c5f657789fe44411a8fe
-size 83
+'../../../bulk/'
+prim_cell.gen
+T
+1.d0 0.d0 0.d0
+LK
+8
+16
+0.3d0
+1.2d0
+kpoints
+0 0 0 

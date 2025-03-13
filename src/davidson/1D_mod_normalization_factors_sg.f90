@@ -1,3 +1,20 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:026b513a89087697c2d59c417fd649ae3cd5ec7aefa5791c7c6a06245efd2f48
-size 707
+!=============================================================================
+!
+!  1. Module normalization_factors_sg1D
+!
+!=============================================================================
+
+MODULE normalization_factors_sg1D
+
+  !===========================================================================
+  !
+  ! Contains vectors used to calculate the normalization
+  ! and backtransformation of k.p / Schroedinger states.
+  !
+  !===========================================================================
+
+  REAL( KIND(0.0D0) ), DIMENSION( : ), POINTER :: diag_kpV, norm_kpV
+
+  !===========================================================================
+
+END MODULE normalization_factors_sg1D

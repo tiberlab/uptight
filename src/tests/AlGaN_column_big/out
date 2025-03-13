@@ -1,3 +1,388 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:c253b9e11df536b405bd196b67c34b8f7392407af8d7ddd472b06eab3e3dbc87
-size 11207
+ (main) non relativistic calculation
+ (main) n. spins:           1
+
+Open file : temp_noH.gen ...
+ (read gen) found           3 symbol(s):
+ N   Al  Ga 
+ hydro type =           0
+ (read gen) structure read
+ (make str) inverse lattice vectors
+   1.00000000000000       0.000000000000000E+000  0.000000000000000E+000
+  0.000000000000000E+000   1.00000000000000       0.000000000000000E+000
+  0.000000000000000E+000  0.000000000000000E+000   1.00000000000000     
+ (make str) Read-in           2 material information
+ (main) check input nn_list
+ (main) read material database:
+
+***
+
+READ THE MATERIAL FILES
+
+
+Open file : /home/pecchia/projects/uptight/branches/tibercad/bulk/GaN_wz.data ...
+
+Reading data from file ...
+ Reading ETB orbitals ...
+ Reading ETB couplings ...
+
+Open file : /home/pecchia/projects/uptight/branches/tibercad/bulk/GaN_wz.data ...
+
+Reading data from file ...
+ Reading ETB orbitals ...
+ Reading ETB couplings ...
+
+Open file : /home/pecchia/projects/uptight/branches/tibercad/bulk/AlN_wz.data ...
+
+Reading data from file ...
+ Reading ETB orbitals ...
+ Reading ETB couplings ...
+ (main) setup states and couplings:
+
+***
+
+READ THE REFERENCE STATES AND COUPLINGS
+
+Open file : /home/pecchia/projects/uptight/branches/tibercad/bulk/states.data ...
+
+Reading data from the states file ...
+
+ (main) set max order in each material:
+ (main) init ions
+ (main) materials info:
+ ==========================================
+ Material           1
+ Material Name= GaN                 
+ Material type= binary              
+ Material cystal= wurtzite            
+ Is random alloy= F
+ n_parents=           1
+ =======================================
+ parent           1 name= GaN                 
+ parent           1 type= binary              
+ parent           1 crystal= wurtzite            
+ database=GaN_wz.data
+ n. ions=           2
+ n. pairs=           1
+ content=   1.00000000000000     
+ ----------------------------------------
+ ion= Ga
+ N. of orbitals=          10
+  1  s       4.684923
+  2  px     11.384923
+  3  py     11.384923
+  4  pz     11.384923
+  5  s*     34.985523
+  6  dxy    28.343623
+  7  dyz    28.343623
+  8  dzx    28.343623
+  9  dx2y2  26.924623
+ 10  dz2r2  26.924623
+ spin-orbit couplings
+ p  4.100000000000000E-002
+ d  0.000000000000000E+000
+ offset= -6.517700000000000E-002
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ----------------------------------------
+ ion= N 
+ N. of orbitals=          10
+  1  s      -9.003077
+  2  px      1.997423
+  3  py      1.997423
+  4  pz      1.997423
+  5  s*     28.117223
+  6  dxy    27.878123
+  7  dyz    27.878123
+  8  dzx    27.878123
+  9  dx2y2  29.344623
+ 10  dz2r2  29.344623
+ spin-orbit couplings
+ p  3.500000000000000E-003
+ d  0.000000000000000E+000
+ offset= -6.517700000000000E-002
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ........................................
+ pair name=N Ga
+ pair order=           1
+ reference distance=   1.95400000000000     
+ N. of pair couplings=          21
+  1   sss   -2.549500  3.650000
+  2   sps    3.921000  4.910000
+  3   ss*s  -2.086000  1.980000
+  4   sds   -3.907200  1.020000
+  5   pss    4.048900  4.910000
+  6   pps    4.742900  4.090000
+  7   ps*s   2.086100  1.050000
+  8   pds   -1.900700  1.240000
+  9   s*ss  -3.756900  1.980000
+ 10   s*ps   4.291100  1.050000
+ 11   s*s*s -3.999700  0.000000
+ 12   s*ds  -2.096300  4.320000
+ 13   dss   -1.225200  1.020000
+ 14   dps   -1.328600  1.240000
+ 15   ds*s  -1.755300  4.320000
+ 16   dds   -1.201600  2.000000
+ 17   ppp   -1.430200  3.350000
+ 18   pdp    2.276100  1.020000
+ 19   dpp    3.219500  1.020000
+ 20   ddp    6.075700  2.000000
+ 21   ddd   -4.443600  2.000000
+ max n.n. order=           1
+ =======================================
+ Material           2
+ Material Name= AlGaN               
+ Material type= ternary             
+ Material cystal= wurtzite            
+ Is random alloy= F
+ n_parents=           2
+ =======================================
+ parent           1 name= GaN                 
+ parent           1 type= binary              
+ parent           1 crystal= wurtzite            
+ database=GaN_wz.data
+ n. ions=           2
+ n. pairs=           1
+ content=  0.800000000000000     
+ ----------------------------------------
+ ion= Ga
+ N. of orbitals=          10
+  1  s       4.684923
+  2  px     11.384923
+  3  py     11.384923
+  4  pz     11.384923
+  5  s*     34.985523
+  6  dxy    28.343623
+  7  dyz    28.343623
+  8  dzx    28.343623
+  9  dx2y2  26.924623
+ 10  dz2r2  26.924623
+ spin-orbit couplings
+ p  4.100000000000000E-002
+ d  0.000000000000000E+000
+ offset= -6.517700000000000E-002
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ----------------------------------------
+ ion= N 
+ N. of orbitals=          10
+  1  s      -9.003077
+  2  px      1.997423
+  3  py      1.997423
+  4  pz      1.997423
+  5  s*     28.117223
+  6  dxy    27.878123
+  7  dyz    27.878123
+  8  dzx    27.878123
+  9  dx2y2  29.344623
+ 10  dz2r2  29.344623
+ spin-orbit couplings
+ p  3.500000000000000E-003
+ d  0.000000000000000E+000
+ offset= -6.517700000000000E-002
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ........................................
+ pair name=N Ga
+ pair order=           1
+ reference distance=   1.95400000000000     
+ N. of pair couplings=          21
+  1   sss   -2.549500  3.650000
+  2   sps    3.921000  4.910000
+  3   ss*s  -2.086000  1.980000
+  4   sds   -3.907200  1.020000
+  5   pss    4.048900  4.910000
+  6   pps    4.742900  4.090000
+  7   ps*s   2.086100  1.050000
+  8   pds   -1.900700  1.240000
+  9   s*ss  -3.756900  1.980000
+ 10   s*ps   4.291100  1.050000
+ 11   s*s*s -3.999700  0.000000
+ 12   s*ds  -2.096300  4.320000
+ 13   dss   -1.225200  1.020000
+ 14   dps   -1.328600  1.240000
+ 15   ds*s  -1.755300  4.320000
+ 16   dds   -1.201600  2.000000
+ 17   ppp   -1.430200  3.350000
+ 18   pdp    2.276100  1.020000
+ 19   dpp    3.219500  1.020000
+ 20   ddp    6.075700  2.000000
+ 21   ddd   -4.443600  2.000000
+ =======================================
+ parent           2 name= AlN                 
+ parent           2 type= binary              
+ parent           2 crystal= wurtzite            
+ database=AlN_wz.data
+ n. ions=           2
+ n. pairs=           1
+ content=  0.200000000000000     
+ ----------------------------------------
+ ion= Al
+ N. of orbitals=          10
+  1  s       5.125415
+  2  px     10.589415
+  3  py     10.589415
+  4  pz     10.589415
+  5  s*     34.056715
+  6  dxy    28.956515
+  7  dyz    28.956515
+  8  dzx    28.956515
+  9  dx2y2  27.738815
+ 10  dz2r2  27.738815
+ spin-orbit couplings
+ p  7.000000000000000E-003
+ d  0.000000000000000E+000
+ offset= -0.947385000000000     
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ----------------------------------------
+ ion= N 
+ N. of orbitals=          10
+  1  s      -9.919085
+  2  px      1.220515
+  3  py      1.220515
+  4  pz      1.220515
+  5  s*     27.877915
+  6  dxy    28.612515
+  7  dyz    28.612515
+  8  dzx    28.612515
+  9  dx2y2  29.485815
+ 10  dz2r2  29.485815
+ spin-orbit couplings
+ p  3.500000000000000E-003
+ d  0.000000000000000E+000
+ offset= -0.947385000000000     
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ........................................
+ pair name=N Al
+ pair order=           1
+ reference distance=   1.90300000000000     
+ N. of pair couplings=          21
+  1   sss   -2.626100  3.550000
+  2   sps    3.754600  4.710000
+  3   ss*s  -1.877300  1.050000
+  4   sds   -3.848300  1.120000
+  5   pss    3.926900  4.710000
+  6   pps    4.311700  3.560000
+  7   ps*s   1.832800  1.360000
+  8   pds   -2.130600  2.020000
+  9   s*ss  -2.912700  1.050000
+ 10   s*ps   4.068000  1.360000
+ 11   s*s*s -4.494000  0.000000
+ 12   s*ds  -2.189700  4.700000
+ 13   dss   -1.033100  1.120000
+ 14   dps   -1.247000  2.020000
+ 15   ds*s  -1.555900  4.700000
+ 16   dds   -1.079100  2.000000
+ 17   ppp   -1.284200  2.250000
+ 18   pdp    2.534200  1.050000
+ 19   dpp    3.162900  1.050000
+ 20   ddp    6.420100  2.000000
+ 21   ddd   -4.501200  2.000000
+ max n.n. order=           1
+ =======================================
+ averaged ion properties:
+ ----------------------------------------
+ ion= N 
+ N. of orbitals=          10
+  1  s      -9.186279
+  2  px      1.842041
+  3  py      1.842041
+  4  pz      1.842041
+  5  s*     28.069361
+  6  dxy    28.025001
+  7  dyz    28.025001
+  8  dzx    28.025001
+  9  dx2y2  29.372861
+ 10  dz2r2  29.372861
+ spin-orbit couplings
+ p  3.500000000000001E-003
+ d  0.000000000000000E+000
+ offset= -6.517700000000000E-002
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ----------------------------------------
+ ion= Ga
+ N. of orbitals=          10
+  1  s       4.773021
+  2  px     11.225821
+  3  py     11.225821
+  4  pz     11.225821
+  5  s*     34.799761
+  6  dxy    28.466201
+  7  dyz    28.466201
+  8  dzx    28.466201
+  9  dx2y2  27.087461
+ 10  dz2r2  27.087461
+ spin-orbit couplings
+ p  3.420000000000000E-002
+ d  0.000000000000000E+000
+ offset= -0.241618600000000     
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ ----------------------------------------
+ ion= Al
+ N. of orbitals=          10
+  1  s       4.773021
+  2  px     11.225821
+  3  py     11.225821
+  4  pz     11.225821
+  5  s*     34.799761
+  6  dxy    28.466201
+  7  dyz    28.466201
+  8  dzx    28.466201
+  9  dx2y2  27.087461
+ 10  dz2r2  27.087461
+ spin-orbit couplings
+ p  3.420000000000000E-002
+ d  0.000000000000000E+000
+ offset= -0.241618600000000     
+ strain band coupling=  0.000000000000000E+000
+ strain band splitting=  0.000000000000000E+000
+ (main) init ion valences
+ (main) structure info:
+ n_basis=        8125
+ n_dg=           0
+ periodic= F
+ directions=no 
+ start=  0.000000000000000E+000  0.000000000000000E+000  0.000000000000000E+000
+ primitive vectors=
+   1.00000000000000       0.000000000000000E+000  0.000000000000000E+000
+  0.000000000000000E+000   1.00000000000000       0.000000000000000E+000
+  0.000000000000000E+000  0.000000000000000E+000   1.00000000000000     
+ (main) Build Nearest Neighbour Table
+ (main) check neighbour list
+ (main) treat dangling bonds
+ (main) write gen
+ SAVING GEN FILE
+
+Open file : out.gen ...
+ GEN FILE SAVED
+ (main) init n_st
+ (main) compute H
+ (TB ham) Initializations
+ atom a =         1000
+ atom a =         2000
+ atom a =         3000
+ atom a =         4000
+ atom a =         5000
+ atom a =         6000
+ atom a =         7000
+ atom a =         8000
+ (TB_ham) Hamiltonian dim=        81250
+ (TB_ham) non zero values=      2525270
+ (TB_ham) non zero indeces=     2606520
+ (TB_ham) on site zeros=         698750
+ (TB_ham) off site zeros=        647680
+ (TB_ham) dangling zeros=             0
+ (main) make full matrix Hermitian
+ (main) check if hermetian
+ (main) lanczos diagonalization
+
+Open file : eigv.dat ...
+
+Open file : eigvec.dat ...
+ (main) write mo file
+ number of points:          92          92         182
+ Memory required:    12323584 bytes

@@ -1,3 +1,553 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:13729dd7ebb4ae911f3c2fb308e5e59538ed943b4474df297809a9f1114bfea8
-size 14725
+interface feast
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!! DOUBLE PRECISION !!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+!!!!!!!!!!!!! RCI
+
+subroutine dfeast_rci(ijob,N,Ze,work,workc,Aq,Sq,feastparam,epsout,loop,Emin,Emax,M0,lambda,q,mode,res,info)
+  integer :: ijob,N,M0
+  complex(kind=(kind(1.0d0))) :: Ze
+  double precision, dimension(N,*) ::work
+  complex(kind=(kind(1.0d0))), dimension(N,*):: workc
+  double precision, dimension(M0,*) ::Aq,Sq
+  integer,dimension(64) :: feastparam
+  double precision :: epsout 
+  integer :: loop
+  double precision :: Emin,Emax
+  double precision,dimension(*)  :: lambda
+  double precision,dimension(N,*):: q
+  integer :: mode
+  double precision,dimension(*) :: res
+  integer :: info
+end subroutine dfeast_rci
+
+subroutine zfeast_rci(ijob,N,Ze,work,workc,zAq,zSq,feastparam,epsout,loop,Emin,Emax,M0,lambda,q,mode,res,info)
+  integer :: ijob,N,M0
+  complex(kind=(kind(1.0d0))) :: Ze
+  complex(kind=(kind(1.0d0))),dimension(N,*):: work,workc
+  complex(kind=(kind(1.0d0))),dimension(M0,*):: zAq,zSq
+  integer,dimension(64) :: feastparam
+  double precision :: epsout 
+  integer :: loop
+  double precision :: Emin,Emax
+  double precision,dimension(*)  :: lambda
+  complex(kind=(kind(1.0d0))),dimension(N,*):: q
+  integer :: mode
+  double precision,dimension(*) :: res
+  integer :: info
+end subroutine zfeast_rci
+
+
+!!!!!!!!!! DENSE
+
+subroutine dfeast_dge(UPLO,N,A,LDA,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N,LDA,LDB
+double precision,dimension(LDA,*):: A
+double precision,dimension(LDB,*):: B
+integer,dimension(64) :: feastparam
+double precision :: epsout 
+integer :: loop
+double precision :: Emin,Emax
+integer :: M0
+double precision,dimension(*)  :: E
+double precision,dimension(N,*):: X
+integer :: mode
+double precision,dimension(*)    :: res
+integer :: info
+end subroutine dfeast_dge
+
+
+
+subroutine dfeast_dst(UPLO,N,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N,LDA
+double precision,dimension(LDA,*):: A
+integer,dimension(64) :: feastparam
+double precision :: epsout 
+integer :: loop
+double precision :: Emin,Emax
+integer :: M0
+double precision,dimension(*)  :: E
+double precision,dimension(N,*):: X
+integer :: mode
+double precision,dimension(*)    :: res
+integer :: info
+end subroutine dfeast_dst
+
+
+
+
+subroutine zfeast_dge(UPLO,N,A,LDA,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+  character(len=1) :: UPLO
+  integer :: N,LDA,LDB
+  complex(kind=(kind(1.0d0))),dimension(LDA,*):: A
+  complex(kind=(kind(1.0d0))),dimension(LDB,*):: B
+  integer,dimension(64) :: feastparam
+  double precision :: epsout 
+  integer :: loop
+  double precision :: Emin,Emax
+  integer :: M0
+  double precision,dimension(*)  :: E
+  complex(kind=(kind(1.0d0))),dimension(N,*):: X
+  integer :: mode
+  double precision,dimension(*)    :: res
+  integer :: info
+end subroutine zfeast_dge
+
+
+subroutine zfeast_dst(UPLO,N,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+  character(len=1) :: UPLO
+  integer :: N,LDA
+  complex(kind=(kind(1.0d0))),dimension(LDA,*):: A
+  integer,dimension(64) :: feastparam
+  double precision :: epsout 
+  integer :: loop
+  double precision :: Emin,Emax
+  integer :: M0
+  double precision,dimension(*)  :: E
+  complex(kind=(kind(1.0d0))),dimension(N,*):: X
+  integer :: mode
+  double precision,dimension(*)    :: res
+  integer :: info
+end subroutine zfeast_dst
+
+!!!!!!!!!! BANDED
+
+
+
+  subroutine dfeast_bge(UPLO,N,kla,A,LDA,klb,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,LDB,kla,klb
+    double precision,dimension(LDA,*):: A
+    double precision,dimension(LDB,*):: B
+    integer,dimension(64) :: feastparam
+    double precision :: epsout 
+    integer :: loop
+    double precision :: Emin,Emax
+    integer :: M0
+    double precision,dimension(*)  :: E
+    double precision,dimension(N,*):: X
+    integer :: mode
+    double precision,dimension(*)    :: res
+    integer :: info
+  end subroutine dfeast_bge
+
+
+  subroutine dfeast_bst(UPLO,N,kla,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,kla
+    double precision,dimension(LDA,*):: A
+    integer,dimension(64) :: feastparam
+    double precision :: epsout 
+    integer :: loop
+    double precision :: Emin,Emax
+    integer :: M0
+    double precision,dimension(*)  :: E
+    double precision,dimension(N,*):: X
+    integer :: mode
+    double precision,dimension(*)    :: res
+    integer :: info
+  end subroutine dfeast_bst
+
+
+
+  subroutine zfeast_bge(UPLO,N,kla,A,LDA,klb,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,LDB,kla,klb
+    complex(kind=(kind(1.0d0))),dimension(LDA,*):: A
+    complex(kind=(kind(1.0d0))),dimension(LDB,*):: B
+    integer,dimension(64) :: feastparam
+    double precision :: epsout 
+    integer :: loop
+    double precision :: Emin,Emax
+    integer :: M0
+    double precision,dimension(*)  :: E
+    complex(kind=(kind(1.0d0))),dimension(N,*):: X
+    integer :: mode
+    double precision,dimension(*)    :: res
+    integer :: info
+end subroutine zfeast_bge
+
+
+  subroutine zfeast_bst(UPLO,N,kla,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,kla
+    complex(kind=(kind(1.0d0))),dimension(LDA,*):: A
+    integer,dimension(64) :: feastparam
+    double precision :: epsout 
+    integer :: loop
+    double precision :: Emin,Emax
+    integer :: M0
+    double precision,dimension(*)  :: E
+    complex(kind=(kind(1.0d0))),dimension(N,*):: X
+    integer :: mode
+    double precision,dimension(*)    :: res
+    integer :: info
+end subroutine zfeast_bst
+
+
+
+
+
+!!!!!!!!!! SPARSE
+
+subroutine dfeast_sge(UPLO,N,sa,isa,jsa,sb,isb,jsb,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+double precision,dimension(*),target:: sa,sb
+integer,dimension(*),target:: isa,jsa,isb,jsb
+integer,dimension(64) :: feastparam
+double precision :: epsout 
+integer :: loop
+double precision :: Emin,Emax
+integer :: M0
+double precision,dimension(*)  :: E
+double precision,dimension(N,*):: X
+integer :: mode
+double precision,dimension(*)    :: res
+integer :: info
+end subroutine dfeast_sge
+
+
+
+subroutine dfeast_sst(UPLO,N,sa,isa,jsa,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+double precision,dimension(*),target:: sa
+integer,dimension(*),target:: isa,jsa
+integer,dimension(64) :: feastparam
+double precision :: epsout 
+integer :: loop
+double precision :: Emin,Emax
+integer :: M0
+double precision,dimension(*)  :: E
+double precision,dimension(N,*):: X
+integer :: mode
+double precision,dimension(*)    :: res
+integer :: info
+end subroutine dfeast_sst
+
+
+
+subroutine zfeast_sge(UPLO,N,sa,isa,jsa,sb,isb,jsb,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+complex(kind=kind(1.0d0)),dimension(*),target:: sa,sb
+integer,dimension(*),target:: isa,jsa,isb,jsb
+integer,dimension(64) :: feastparam
+double precision :: epsout 
+integer :: loop
+double precision :: Emin,Emax
+integer :: M0
+double precision,dimension(*)  :: E
+complex(kind=kind(1.0d0)),dimension(N,*):: X
+integer :: mode
+double precision,dimension(*)    :: res
+integer :: info
+end subroutine zfeast_sge
+
+
+
+subroutine zfeast_sst(UPLO,N,sa,isa,jsa,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+complex(kind=kind(1.0d0)),dimension(*),target:: sa
+integer,dimension(*),target:: isa,jsa
+integer,dimension(64) :: feastparam
+double precision :: epsout 
+integer :: loop
+double precision :: Emin,Emax
+integer :: M0
+double precision,dimension(*)  :: E
+complex(kind=kind(1.0d0)),dimension(N,*):: X
+integer :: mode
+double precision,dimension(*)    :: res
+integer :: info
+end subroutine zfeast_sst
+
+
+
+
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!! SINGLE PRECISION !!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+
+
+!!!!!!!!!!!!! RCI
+
+subroutine sfeast_rci(ijob,N,Ze,work,workc,Aq,Sq,feastparam,epsout,loop,Emin,Emax,M0,lambda,q,mode,res,info)
+  integer :: ijob,N,M0
+  complex  :: Ze
+  real, dimension(N,*) ::work
+  complex , dimension(N,*):: workc
+  real, dimension(M0,*) ::Aq,Sq
+  integer,dimension(64) :: feastparam
+  real :: epsout 
+  integer :: loop
+  real :: Emin,Emax
+  real,dimension(*)  :: lambda
+  real,dimension(N,*):: q
+  integer :: mode
+  real,dimension(*) :: res
+  integer :: info
+end subroutine sfeast_rci
+
+subroutine cfeast_rci(ijob,N,Ze,work,workc,zAq,zSq,feastparam,epsout,loop,Emin,Emax,M0,lambda,q,mode,res,info)
+  integer :: ijob,N,M0
+  complex  :: Ze
+  complex ,dimension(N,*):: work,workc
+  complex ,dimension(M0,*):: zAq,zSq
+  integer,dimension(64) :: feastparam
+  real :: epsout 
+  integer :: loop
+  real :: Emin,Emax
+  real,dimension(*)  :: lambda
+  complex ,dimension(N,*):: q
+  integer :: mode
+  real,dimension(*) :: res
+  integer :: info
+end subroutine cfeast_rci
+
+
+!!!!!!!!!! DENSE
+
+subroutine sfeast_dge(UPLO,N,A,LDA,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N,LDA,LDB
+real,dimension(LDA,*):: A
+real,dimension(LDB,*):: B
+integer,dimension(64) :: feastparam
+real :: epsout 
+integer :: loop
+real :: Emin,Emax
+integer :: M0
+real,dimension(*)  :: E
+real,dimension(N,*):: X
+integer :: mode
+real,dimension(*)    :: res
+integer :: info
+end subroutine sfeast_dge
+
+
+
+subroutine sfeast_dst(UPLO,N,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N,LDA
+real,dimension(LDA,*):: A
+integer,dimension(64) :: feastparam
+real :: epsout 
+integer :: loop
+real :: Emin,Emax
+integer :: M0
+real,dimension(*)  :: E
+real,dimension(N,*):: X
+integer :: mode
+real,dimension(*)    :: res
+integer :: info
+end subroutine sfeast_dst
+
+
+
+
+subroutine cfeast_dge(UPLO,N,A,LDA,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+  character(len=1) :: UPLO
+  integer :: N,LDA,LDB
+  complex ,dimension(LDA,*):: A
+  complex ,dimension(LDB,*):: B
+  integer,dimension(64) :: feastparam
+  real :: epsout 
+  integer :: loop
+  real :: Emin,Emax
+  integer :: M0
+  real,dimension(*)  :: E
+  complex ,dimension(N,*):: X
+  integer :: mode
+  real,dimension(*)    :: res
+  integer :: info
+end subroutine cfeast_dge
+
+
+subroutine cfeast_dst(UPLO,N,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+  character(len=1) :: UPLO
+  integer :: N,LDA
+  complex ,dimension(LDA,*):: A
+  integer,dimension(64) :: feastparam
+  real :: epsout 
+  integer :: loop
+  real :: Emin,Emax
+  integer :: M0
+  real,dimension(*)  :: E
+  complex ,dimension(N,*):: X
+  integer :: mode
+  real,dimension(*)    :: res
+  integer :: info
+end subroutine cfeast_dst
+
+!!!!!!!!!! BANDED
+
+
+
+  subroutine sfeast_bge(UPLO,N,kla,A,LDA,klb,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,LDB,kla,klb
+    real,dimension(LDA,*):: A
+    real,dimension(LDB,*):: B
+    integer,dimension(64) :: feastparam
+    real :: epsout 
+    integer :: loop
+    real :: Emin,Emax
+    integer :: M0
+    real,dimension(*)  :: E
+    real,dimension(N,*):: X
+    integer :: mode
+    real,dimension(*)    :: res
+    integer :: info
+  end subroutine sfeast_bge
+
+
+  subroutine sfeast_bst(UPLO,N,kla,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,kla
+    real,dimension(LDA,*):: A
+    integer,dimension(64) :: feastparam
+    real :: epsout 
+    integer :: loop
+    real :: Emin,Emax
+    integer :: M0
+    real,dimension(*)  :: E
+    real,dimension(N,*):: X
+    integer :: mode
+    real,dimension(*)    :: res
+    integer :: info
+  end subroutine sfeast_bst
+
+
+
+  subroutine cfeast_bge(UPLO,N,kla,A,LDA,klb,B,LDB,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,LDB,kla,klb
+    complex ,dimension(LDA,*):: A
+    complex ,dimension(LDB,*):: B
+    integer,dimension(64) :: feastparam
+    real :: epsout 
+    integer :: loop
+    real :: Emin,Emax
+    integer :: M0
+    real,dimension(*)  :: E
+    complex ,dimension(N,*):: X
+    integer :: mode
+    real,dimension(*)    :: res
+    integer :: info
+end subroutine cfeast_bge
+
+
+  subroutine cfeast_bst(UPLO,N,kla,A,LDA,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+    character(len=1) :: UPLO
+    integer :: N,LDA,kla
+    complex ,dimension(LDA,*):: A
+    integer,dimension(64) :: feastparam
+    real :: epsout 
+    integer :: loop
+    real :: Emin,Emax
+    integer :: M0
+    real,dimension(*)  :: E
+    complex ,dimension(N,*):: X
+    integer :: mode
+    real,dimension(*)    :: res
+    integer :: info
+end subroutine cfeast_bst
+
+
+
+
+
+!!!!!!!!!! SPARSE
+
+subroutine sfeast_sge(UPLO,N,sa,isa,jsa,sb,isb,jsb,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+real,dimension(*),target:: sa,sb
+integer,dimension(*),target:: isa,jsa,isb,jsb
+integer,dimension(64) :: feastparam
+real :: epsout 
+integer :: loop
+real :: Emin,Emax
+integer :: M0
+real,dimension(*)  :: E
+real,dimension(N,*):: X
+integer :: mode
+real,dimension(*)    :: res
+integer :: info
+end subroutine sfeast_sge
+
+
+
+subroutine sfeast_sst(UPLO,N,sa,isa,jsa,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+real,dimension(*),target:: sa
+integer,dimension(*),target:: isa,jsa
+integer,dimension(64) :: feastparam
+real :: epsout 
+integer :: loop
+real :: Emin,Emax
+integer :: M0
+real,dimension(*)  :: E
+real,dimension(N,*):: X
+integer :: mode
+real,dimension(*)    :: res
+integer :: info
+end subroutine sfeast_sst
+
+
+
+subroutine cfeast_sge(UPLO,N,sa,isa,jsa,sb,isb,jsb,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+complex,dimension(*),target:: sa,sb
+integer,dimension(*),target:: isa,jsa,isb,jsb
+integer,dimension(64) :: feastparam
+real :: epsout 
+integer :: loop
+real :: Emin,Emax
+integer :: M0
+real,dimension(*)  :: E
+complex,dimension(N,*):: X
+integer :: mode
+real,dimension(*)    :: res
+integer :: info
+end subroutine cfeast_sge
+
+
+
+subroutine cfeast_sst(UPLO,N,sa,isa,jsa,feastparam,epsout,loop,Emin,Emax,M0,E,X,mode,res,info)
+character(len=1) :: UPLO
+integer :: N
+complex,dimension(*),target:: sa
+integer,dimension(*),target:: isa,jsa
+integer,dimension(64) :: feastparam
+real :: epsout 
+integer :: loop
+real :: Emin,Emax
+integer :: M0
+real,dimension(*)  :: E
+complex,dimension(N,*):: X
+integer :: mode
+real,dimension(*)    :: res
+integer :: info
+end subroutine cfeast_sst
+
+
+
+
+end interface

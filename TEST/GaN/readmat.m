@@ -1,3 +1,13 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:c4e122747f290ea41d4a6b01d0757e2e98f9114d15c468f1ad6760a87a30fbcd
-size 233
+N=160;
+fid= fopen('fort.99','r');
+
+for i=1:N
+    for j=1:i
+        A=fgetl(fid);
+        L=sscanf(A,'%d %d %*c%g%*c%g%*c');
+        M(L(1),L(2))=complex(L(3),L(4));
+        M(L(2),L(1))=conj( M(L(1),L(2)) );
+    end
+end
+
+fclose(fid);

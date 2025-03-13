@@ -1,3 +1,19 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:3fb950f24a1bc423a8be0d797e3d0c23ac81d76285a8e8ba8222ba9a7406df22
-size 218
+
+FC = g95 
+FLAGS = -W #-check all
+
+OBJS = precision.o allocation.o prova.o 
+
+
+target: prova
+
+.SUFFIXES: .f90 .o
+
+.f90.o:
+	$(FC) $(FLAGS) -c $< 
+
+prova: $(OBJS)
+	$(FC) -o $@  $(OBJS)
+
+clean:
+	rm -rf $(OBJS) *.mod prova

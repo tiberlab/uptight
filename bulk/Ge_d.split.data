@@ -1,3 +1,93 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:7b13f050fb6f9a0477996787fbd8e3a09ce21ffd10c9b9278fc8ef64e414c4a2
-size 1776
+# Tight binding parameters (c) Jean Marc Jancu
+
+
+
+
+# material type : 'simple' / 'binary' / 'ternary' / 'quaternary'
+material type = 'simple'
+
+# lattice
+# lattice type : 'face centered cubic' / 'hexagonal'
+lattice type = 'face centered cubic'
+
+# lattice parameters ( in Angtroms )
+lattice parameters =   5.6563D0   5.6563D0   5.6563D0
+
+# 0 = no internal strain / 1 = maximal internal strain
+internal strain parameter = 0.00D0
+
+
+# basis type : 'zinc-blende' / 'diamond' / 'wurtzite'
+basis type = 'diamond'
+
+
+
+ions = 'Ge'
+
+
+
+# states
+
+number of spin-orbit parameters per ion = 2
+
+Ge spin orbit
+'p' 0.1325D0
+'d' 0.0000D0
+
+
+# onsite ETB
+
+number of orbitals per ion = 8 
+	
+Ge onsite
+'s'    -3.2967D0     1
+'p'     4.6560D0     3
+'s*'   19.1725D0     1
+'dxy'   13.45960d0   1   
+ 'dyz'   12.791640d0   1 
+'dzx'    12.791640d0   1  
+'dx2y2'  13.45960d0    1
+'dz2r2'  13.45960d0    1
+
+
+Ge offset = 0.00D0
+#0.75
+# TB couplings
+
+number of pairs = 1
+
+pair 1 = 'Ge' 'Ge' 21 1
+
+Ge Ge coupling 1
+'sss'     -1.5003D0    3.631D0 
+'sps'      2.7986D0    3.713D0
+'ss*s'    -1.9206D0    0.000D0
+'sds'     -2.8028D0    1.931D0
+'pss'      2.7986D0    3.713D0
+'pps'      4.2541D0    2.030D0
+'ps*s'     2.8177D0    1.830D0
+'pds'     -2.2138D0    1.759D0
+'s*ss'    -1.9206D0    0.000D0
+'s*ps'     2.8177D0    1.830D0 
+'s*s*s'   -3.6029D0    0.000D0
+'s*ds'    -0.6209D0    2.000D0 
+'dss'     -2.8028D0    1.931D0 
+'dps'     -2.2138D0    1.759D0 
+'ds*s'    -0.6029D0    2.000D0 
+'dds'     -1.2172D0    2.000D0
+'ppp'     -1.6510D0    4.025D0
+'pdp'      1.9001D0    1.872D0 
+'dpp'      1.9001D0    1.872D0
+'ddp'      2.5054D0    2.000D0
+'ddd'     -2.1389D0    2.000D0       
+
+Ge Ge pair reference distance 1 = 2.44925D0
+
+
+# dangling bonds saturation
+
+saturated bond length
+0.1D0
+
+onsite H energy
+-200.0D0

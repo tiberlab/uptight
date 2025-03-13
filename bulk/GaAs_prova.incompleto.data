@@ -1,3 +1,63 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:ee1d1599ea5b9277c5abc3724b344eb0c2997a38858c19815e5ad6814132a257
-size 1046
+# Tight binding parameters (c) Jean Marc Jancu
+# PROVA  SENZA  TUTTI I PARAM.  CPL. , PER  FARLI LEGGERE DA TERZO PARENT FILE
+
+# material type : 'simple' / 'binary' / 'ternary' / 'quaternary'
+
+material type = 'binary'
+
+# lattice type : 'face centered cubic' / 'hexagonal'
+
+lattice type = 'face centered cubic'
+
+# lattice parameters ( in Angtroms )
+
+lattice parameters =   5.6532D0   5.6532D0   5.6532D0
+
+# 0 = no internal strain / 1 = maximal internal strain
+
+internal strain parameter = 0.60D0
+
+# basis type : 'zinc-blende' / 'wurtzite'
+
+basis type = 'zinc-blende'
+
+ions = 'Ga' 'As'
+
+# spin orbit
+
+number of spin-orbit parameters per ion = 2 2
+
+Ga spin orbit
+'p' 0.0408D0
+'d' 0.0000D0
+
+As spin orbit
+'p' 0.1824D0
+'d' 0.0000D0
+
+# onsite ETB
+
+number of orbitals per ion = 4 4 
+	
+Ga onsite
+'s'    -0.4028D0   1
+'p'     6.3853D0   3
+'s*'   19.4220D0   1
+'d'    13.1023D0   5
+
+As onsite
+'s'    -5.9819D0   1
+'p'     3.5820D0   3
+'s*'   19.4220D0   1
+'d'    13.1023D0   5
+
+Ga offset = 0.0D0
+As offset = 0.0D0
+
+# ETB couplings
+
+number of pairs = 0
+
+
+
+

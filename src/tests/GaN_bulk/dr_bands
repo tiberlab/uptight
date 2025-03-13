@@ -1,3 +1,10 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:5ed403fab5ad8d533cad0cdb8046549c1a053c08fff5e422a5a53e8ed7667463
-size 68
+'../../../bulk/'
+unit_cell.gen
+T
+LK
+12
+4
+0.5d0
+3.0d0
+kpoints
+0 0 0 

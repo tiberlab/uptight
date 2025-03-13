@@ -1,3 +1,79 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:729d8891c7d76bc8a76dc014aec9f1af0a6020fae90ddf77cc7c330a25547226
-size 1585
+CXX := @CXX@
+CC := @CC@
+FC := @FC@
+
+
+have_cuda=@HAVE_CUDA@
+
+OMP=Y
+
+ifneq ($(findstring mpi,$(FC)),)
+  UPT_MPI=Y
+endif
+
+#-------------------------------------
+ARCH1= $(shell uname -m)
+
+FCFLAVOUR:=$(shell $(FC) -v 2>&1 |grep "ifort version")
+
+TIBERCADROOT = ../../../../../../../
+TCMODULE = src/core/modules/etb/libuptight
+
+ifneq ($(FCFLAVOUR),) 
+  #FFLAGS = -O3 -xHost -no-prec-div -unroll -ip -fexceptions -gcc-name=${CC} -gxx-name=${CC} -nofor-main
+  FFLAGS = -O1 -no-prec-div -unroll -ip -fexceptions -gcc-name=${CC} -gxx-name=${CC} -nofor-main
+  #FFLAGS = -g -CB -fexceptions -gcc-name=${CC} -gxx-name=${CC} -nofor-main
+  #FFLAGS = -g -ip -fexceptions -gcc-name=${CC} -gxx-name=${CC} -nofor-main
+else  
+  FFLAGS = -O3 -fexceptions -fallow-argument-mismatch
+endif
+
+FFLAGS += $(INCLUDE)
+ 
+
+
+ifeq ($(have_cuda),yes)
+  CUDA=Y
+endif
+
+ifeq ($(ARCH1),x86_64)
+FFLAGS += -fPIC
+CFLAGS += -fPIC
+CXXFLAGS += -fPIC
+endif
+
+FNAME_SUFFIX="_"
+
+
+LIBMKLIB = @LAPACK_LIBS@
+MKLINC = @MKL_INCLUDES@
+
+ifdef OMP
+  ifneq ($(FCFLAVOUR),) 
+     OPENMP = -qopenmp
+  else
+     OPENMP = -fopenmp
+  endif
+  LDFLAGS += $(OPENMP)
+  FFLAGS += $(OPENMP) 
+  CFLAGS += -D__OMP
+  CXXFLAGS += -D__OMP
+  FPPFLAGS += -D__OMP
+endif
+
+COPENMP = -fopenmp
+
+# CUDA libraries--------------------
+ifdef CUDA  
+ CUDADIR = @CUDA_DIR@
+ LIBCUDA = @CUDA_LIBS@  
+ #NVFLAGS = -m64 -DMKL_ILP64 --compiler-options -fPIC  
+ NVCC = @CUDA_DIR@/bin/nvcc
+
+ NVFLAGS = -ccbin=$(CC) --compiler-options -fPIC
+ # provide CUDA architecture numbers in ascending order
+ CUDA_VER = 35 80
+ FPPFLAGS += -D__CUDA
+endif
+#-----------------------------------
+

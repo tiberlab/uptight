@@ -1,3 +1,30 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:5e13d4d802f92fa75b642a9de5c5ae3596c1948464d77e298be0691d63a64028
-size 1120
+/*
+ * This file is part of uptight.
+ *
+ * uptight is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * uptight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with uptight. If not, see <https://www.gnu.org/licenses/>.
+ */
+#ifndef _FORTRAN_H
+#define _FORTRAN_H
+// C++ types corresponding to Fortran 77 types
+
+#include <complex>
+
+typedef int     f77_int;          // integer
+typedef float   f77_real;         // real(4)
+typedef double  f77_double;       // real(8)
+typedef char    f77_char;         // character
+typedef std::complex<double> f77_complex;      // complex(8)
+//typedef int     f77_logical;      // not used, use f77_int instead
+
+#endif

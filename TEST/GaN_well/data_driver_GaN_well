@@ -1,3 +1,259 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:e7bf477e66be081cc3b3ca4435a1ee2764086337843e3a78001078f0a0b7b092
-size 5898
+***************************************************************************
+*
+*                             SUPERCELL INPUT
+*
+***************************************************************************
+
+# super basis input flag : --> FALSE  - build the super basis
+#	                   --> TRUE   - read the super basisco	
+
+super basis flag = F
+super basis file = 'SiO2_basis.dat'
+
+extra couplings flag  =  F
+
+############## chemical input : materials involved
+
+# total number of materials in the supercell ( including the frame )
+
+number of materials = 1
+
+#---- material 1 ( supercell frame )
+
+material 1 name = 'GaN'	
+material 1 type = 'binary'
+parent file 1 in material 1 = '../../bulk/GaN_wz.data'
+extra couplings in material 1 =  F
+
+#material 2 name = 'AlN'	
+#material 2 type = 'binary'
+#parent file 1 in material 2 = '../Run_lib/input_files/bulk/AlN_wz.data'
+extra couplings in material 2 =  F
+
+#content of parent 2 in material 1 = 0.10
+#VCA disorder in material 1 = 0.99
+### VCA disorder is related to bowing factor for gap , etc.  ( greater disorder -> greater bow -> higher gap)
+
+############ geometry input -59.838d0
+
+Rotation along (111) = F 
+
+# supercell's boundaries ( Angstroms )
+#supercell start =  -58.997d0   -61.6792d0    -0.01d0
+supercell start =  -0.0d0   -0.16792d0    -0.01d0
+supercell end =    6.0d0   6.00d0    6.0d0
+
+# materials shape files
+
+#shape file 2 = 'basis_coord.dat'
+#shape file 2 = 'basis_hex_coord.dat'
+
+# supercell orientation : in terms of Miller indeces
+#
+#  ( h k l ) 1    1  1  0
+#  ( h k l ) 2    1  -1 0
+#  ( h k l ) 3   0  1  1
+
+supercell orientation
+
+ 1 1  0
+-1 1 0
+ 0  0 1
+
+# Created more complex structure hetrostructure freestanding structure etc.
+structure building flag = F
+str_filename = 'struct.input'
+str_output = T
+str_filename_out = 'struct'
+
+
+# Load pre-constructed structure 
+load precon flag = F
+gen_filename = 'Si_test_passiv.gen'
+nr_atomtypes = 3
+use str file = F
+gen_str_filename = 'struct.input'
+nn_max_dist = 0.7D0
+
+***************************************************************************
+*
+*                          TIGHT BINDING INPUT
+*
+***************************************************************************
+
+# coupling order
+
+nearest neighbours order = 1
+
+# coupling scaling
+
+ETB coupling scaling = T
+nearest distance accuracy (%) = 2.0D0
+
+ETB onsite shift = F 
+
+
+
+# spin - orbit
+
+relativistic = T
+
+# alloy : TRUE = random / FALSE = VCA
+
+random alloy = F
+number of alloy loops = 2
+
+# surface boundaries
+
+periodic boundaries = 'xyz'
+
+# saturated bond ETB parameters
+
+saturated bond scaling = 0.1D0
+saturated onsite energy = -200.0D0
+
+# Brillouin zone sampling
+
+k vector file = 'GaN_kpoints'
+#k vector file = 'ZB/zinc-blende/k_ZB'
+
+# reference orbitals
+
+state file = 'state.dat'
+
+
+***************************************************************************
+*
+*                              BASIS INPUT
+*
+***************************************************************************
+
+output flag = 0
+xmol output = T 
+xmol output file = 'GaN_basis.dat' 
+xyz output file = 'GaN_basis.xyz'
+
+basis output = T
+basis output file = 'GaN_basis_coord.dat'
+
+gen output = T
+
+strain = F
+strain tensor = F
+strain type = 'read'
+
+
+strain file = 'QW_strained.dat'
+
+Quantum Well =  F
+QW start = 50.0d0
+QW end = 85.0d0
+
+strain monodim  = F
+
+
+
+internal strain = F
+internal strain file = 'QW_int_strain.dat'
+
+potential = F 
+potential file = 'QW_potential.dat'
+
+
+***************************************************************************
+*
+*                          SPARSE INDEX INPUT
+*
+***************************************************************************
+
+# upper / lower / full
+
+sparse format = 'full'
+
+sparse index file = 'indeces_sparse.dat'
+sparse values file = 'values_sparse.dat'
+
+
+***************************************************************************
+*
+*                       DIAGONALIZATION INPUT
+*
+***************************************************************************
+
+diagonalization = T
+
+# lanczos / davidson
+
+diagonalization method = 'lanczos'
+
+#LAPACK
+max number of eigenvalues = 160
+number of valence states = 12
+min energy = -100.0
+max energy = 100
+
+# Fast Lanczos
+fast lanczos flag = T 
+number of fast lanczos iterations = 2
+number of long lanczos iterations = 30 
+max number of fast loops = 100
+fast tolerance = 1.0d-1
+long tolerance = 1.0d-10
+
+# Standard Lanczos
+standard lanczos flag = F
+number of lanczos iterations = 50
+standard tolerance = 1.0d-10
+
+# davidson
+
+# number of values = is better = size of ham.
+number of values = 160 
+maximum number of iterations = 100000
+tolerance = 1.0d-5
+guess energy value = ( 0.0D0, 0.0D0 )
+
+# lanczos
+number of cond values = 10
+conduction =  T
+conduction guess = 3.0D0 3.0d0
+conduction result = T
+conduction result file = 'result_cond.dat'
+
+valence = T
+number of valence values = 10
+valence guess = 0.5d0 0.5d0
+valence result = T
+valence result file = 'result_val.dat'
+
+# result syntax for the eigen values file :
+# --> 0 = band gap  :  norm of k   - valence energy ( error ) - conduction energy ( error ) - gap ( error )
+# --> 1 = alloys    :  alloy conc  - valence energy ( error ) - conduction energy ( error ) - gap ( error )
+# --> 2 = band structure :  norm of k  - energy for all the bands ( OK only for the bulk !!! and only for davidson !!!)
+
+result format = 2
+
+eigenvalues file = 'GaN_eigv.dat'
+
+# result syntax for the eigen vectors file :
+# index of the atom / charge density for valence ( raw + normalized ) 
+# / charge density for conduction ( raw + normalized )
+eigenstates = T
+# eigenstates = FALSE  per  bulk  energies dispersion
+eigenstates file = 'GaN_vec.dat'
+
+#Optical calculations
+#Notice that eigenvalues are needed for these calculations
+
+#Activate calculation of optical properties 
+optics = F
+
+#Intra band optical elements are to be calculated
+intra_band_optics = F
+
+#Inter band optical elements are to be calculated
+inter_band_optics = F
+
+
+
+

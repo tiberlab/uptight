@@ -1,3 +1,12 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:8f2f1881e5156ebd00dfa416c8df8f433057830f9fe257510cdf548971d0c8fa
-size 74
+'../../../bulk/'
+temp.gen
+T
+0.d0 0.d0 1.d0
+LO
+4
+2
+0.5d0
+3.0d0
+12000
+1e-9
+

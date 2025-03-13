@@ -1,3 +1,46 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:da72111f090925f0a3abd5a1d93c6a1b6c45d73875372275a95685af3a12f6ca
-size 3457
+allocation.o: allocation.f90 precision.o
+alloys.o: alloys.f90 errors.o exceptions.o type_defs.o precision.o input_output.o
+arpack.o: arpack.f90 errors.o upt_param.o precision.o sparse_numrec.o
+checks.o: checks.f90 errors.o exceptions.o type_defs.o precision.o
+clock.o: clock.f90
+constants.o: constants.f90 precision.o
+errors.o: errors.f90 exceptions.o input_output.o
+exceptions.o: exceptions.F90 exception_codes.h
+f_exceptions.o: f_exceptions.f90 exceptions.o
+feast_driver.o: feast_driver.f90 clock.o errors.o sparse_matrix.o upt_param.o exceptions.o precision.o input_output.o
+globals.o: globals.f90 precision.o
+input_data.o: input_data.f90 errors.o type_defs.o globals.o exceptions.o precision.o input_output.o
+input_output.o: input_output.f90 exceptions.o
+lanczos.o: lanczos.F90 input_output.o sort.o clock.o errors.o sparse_matrix.o exceptions.o precision.o sparse_numrec.o savemofile.o
+lanczos_driver.o: lanczos_driver.f90 errors.o lanczos.o upt_param.o precision.o input_output.o
+JD.o: JD.F90 input_output.o sort.o clock.o errors.o sparse_matrix.o exceptions.o precision.o sparse_numrec.o
+JD_driver.o: JD_driver.f90 errors.o JD.o upt_param.o precision.o input_output.o
+lapack_diag.o: lapack_diag.f90 errors.o exceptions.o precision.o
+lapack_driver.o: lapack_driver.f90 errors.o exceptions.o upt_param.o precision.o input_output.o savemofile.o
+latt_fun.o: latt_fun.f90 errors.o vectors.o type_defs.o precision.o
+lists.o: lists.f90 errors.o input_output.o type_defs.o listtypes.o
+listtypes.o: listtypes.f90 precision.o
+matrices.o: matrices.f90 exceptions.o 
+mo.o: mo.f90 neighbours.o states_and_couplings.o savemofile.o input_data.o upt_param.o struct_building.o type_defs.o alloys.o globals.o precision.o
+neighbours.o: precision.o type_defs.o checks.o supercell.o errors.o vectors.o input_output.o sort.o exceptions.o
+mpi_globals.o: mpi_globals.F90
+precision.o: precision.f90
+rota.o: rota.f90
+savemofile.o: savemofile.f90 sort.o constants.o errors.o type_defs.o checks.o upt_param.o globals.o precision.o input_output.o
+type_defs.o: type_defs.f90 globals.o mpi_globals.o exceptions.o precision.o
+upt_param.o: upt_param.f90 globals.o neighbours.o sparse_matrix.o type_defs.o precision.o
+TB_ham.o: TB_ham.f90 rota.o input_output.o neighbours.o exceptions.o constants.o latt_fun.o sparse_matrix.o type_defs.o checks.o upt_param.o mpi_globals.o allocation.o errors.o globals.o sort.o sparse_numrec.o precision.o listtypes.o
+vectors.o: vectors.f90 precision.o
+sort.o: sort.f90 exceptions.o precision.o
+sparse_matrix.o: sparse_matrix.f90 globals.o exceptions.o precision.o
+sparse_matrix_rout.o: sparse_matrix_rout.f90 sparse_matrix.o precision.o
+sparse_numrec.o: sparse_numrec.F90 errors.o sparse_matrix.o exceptions.o rcm_module.o precision.o
+states_and_couplings.o: states_and_couplings.f90 globals.o errors.o type_defs.o checks.o input_output.o
+struct_building.o: struct_building.f90 neighbours.o constants.o errors.o type_defs.o checks.o vectors.o lists.o exceptions.o precision.o input_output.o rcm_module.o 
+supercell.o: supercell.f90 vectors.o precision.o
+#uptight.f90: uptight.F90
+uptight.o: uptight.F90 neighbours.o states_and_couplings.o savemofile.o input_data.o upt_param.o struct_building.o type_defs.o alloys.o errors.o TB_ham.o lanczos_driver.o JD_driver.o globals.o lapack_driver.o sparse_matrix.o precision.o sparse_numrec.o
+test6.o: test6.f90 uptight.o 
+test7.o: test7.f90 uptight.o 
+test8.o: test8.F90 uptight.o 
+#JD_N_PC_Mxprec_ll_cuda.o

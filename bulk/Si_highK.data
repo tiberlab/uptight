@@ -1,3 +1,60 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:cbc9e45dd6cc7cd903710fbc6898383dd334cbb042c68fc7a3e3e061a0e82343
-size 1207
+# Tight binding parameters (c) Jean Marc Jancu
+# sp3s*d model
+
+# lattice
+
+material type = 'simple'
+
+number of ions = 1
+ions = 'Si'
+
+# states
+
+number of spin-orbit parameters per ion = 2
+
+Si spin orbit
+p 0.0147D0
+d 0.0000D0
+
+number of orbitals per ion = 4 
+	
+Si onsite
+'s'    -2.0196D0     1
+'p'     4.5448D0     3
+'s*'    19.6748D0    1
+'d'  	14.1836D0    5
+
+
+# TB couplings
+
+number of pairs = 1
+
+pair 1 = 'Si' 'Si' 21 1
+
+Si Si coupling 1
+'sss'     -1.9413D0    2.0D0 
+'sps'      2.7836D0    2.0D0
+'ss*s'    -1.6933D0    2.0D0
+'sds'     -1.6933D0    2.0D0
+'pss'      2.7836D0    2.0D0
+'pps'      2.7836D0    2.0D0
+'ps*s'     2.8428D0    2.0D0
+'pds'     -2.1073D0    2.0D0
+'s*ss'    -3.3081D0    2.0D0
+'s*ps'     2.8428D0    2.0D0 
+'s*s*s'   -3.3081D0    2.0D0
+'s*ds'    -2.7998D0    2.0D0 
+'dss'     -2.7998D0    2.0D0 
+'dps'     -2.1073D0    2.0D0 
+'ds*s'    -2.7998D0    2.0D0 
+'dds'     -1.2327D0    2.0D0
+'ppp'     -1.5934D0    2.0D0
+'pdp'      -2.1073D0    2.0D0 
+'dpp'      1.9977D0    2.0D0
+'ddp'      2.5145D0    2.0D0
+'ddd'      -2.4734D0    2.0D0
+
+Si Si pair reference distance 1 = 2.35d0      
+Si offset = 0.d0
+Si b_d parameter = 0.d0
+

@@ -1,3 +1,50 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:5d112801eeae5ff0d2c90b93a8fef121207f079d151464acf4b27dfb089f4410
-size 1447
+/*
+ * This file is part of uptight.
+ *
+ * uptight is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * uptight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with uptight. If not, see <https://www.gnu.org/licenses/>.
+ */
+// $Id: InitFailedException.h 1061 2008-05-28 15:19:14Z maufder $
+
+
+#ifndef _INITFAILEDEXCEPTION_H_
+#define _INITFAILEDEXCEPTION_H_
+
+#include <stdexcept>
+#include <string>
+
+//! An exception class for failed initialisation
+class InitFailedException : public std::runtime_error
+{
+
+  public:
+    InitFailedException(const char* msg)
+      : std::runtime_error(msg) {};
+
+    InitFailedException(const std::string& msg)
+      : std::runtime_error(msg) {};
+
+
+  private:
+
+};
+
+    //void * array[25];
+    //size_t entries = backtrace(array, sizeof(array) / sizeof(void*));
+    //char ** symbols = backtrace_symbols(array, entries);
+    //for ( size_t i = 2; i < entries; i++ ) {
+    //   cerr <<  symbols[i] << endl;
+    //}
+
+
+#endif // _INITFAILEDEXCEPTION_H_

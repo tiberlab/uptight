@@ -1,3 +1,127 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:550170f8d91ce77f3175550c761d0cd79fefc3610ea188ee5030ba9bfd8efd0a
-size 4260
+# sp3s* model
+# P.Vogl, H.P.Hjalmarson, and J.D.Dow, J. Phys. Chem. Sol.  44, 365 (1983)
+# note the following transformations of tb-couplings from cartesian basis 
+# to molecular basis
+# sss = 0.25 * v(s,s),  sps = 0.25* sqrt(3) * v(s,p)  
+# pps = 0.25* (v(x,x) + 2*v(x,y)), ppp = 0.25* (v(x,x) - v(x,y))
+##  coordinate cartesiani reali per la base  !!!!
+# modello sp3 !!!!!!!! da ROBERTSON  e Koslowski a Di Carlo !! (3/8/2000)
+# prova strain
+
+
+ $subject
+ compound_name = 'SiO2'
+ comment = 'sp3'
+ $end
+
+ $lattice
+ prim1 = 
+    3.7000      3.7000      0.0000 
+ prim2 = 
+    0.0000      3.7000      3.7000 
+ prim3 =
+    3.7000      0.0000      3.7000
+
+ fuzzyequal=.true.
+ accuracy = 5.0D-3
+ prim_lattice_cosy=.false.
+
+ basis_name(1)='Si'
+ basis_name(2)='Si'
+ basis_name(3)='Ox'
+ basis_name(4)='Ox'
+ basis_name(5)='Ox'
+ basis_name(6)='Ox'
+ 
+ basis =
+     0.0    0.0     0.0
+     1.85   1.85    1.85
+     0.925  0.925   0.925
+     2.775  0.925   2.775
+     0.925  2.775   2.775
+     2.775  2.775   0.925 
+ $end
+
+ $states_and_couplings
+
+ relativistic=.false.
+
+ state_name(1)='s'
+ state_name(2)='px'
+ state_name(3)='py'
+ state_name(4)='pz'
+
+ tb_coup_name(1)='sss'
+ tb_coup_name(2)='sps'
+ tb_coup_name(3)='pss'
+ tb_coup_name(4)='pps'
+ tb_coup_name(5)='ppp'
+ $end
+ 
+#                es        ep         ep           ep   
+ $tb_onsite_elements 
+ 'Si' 1     5.900     9.0000       9.0000       9.0000 
+ 'Si' 2     5.900     9.0000       9.0000       9.0000 
+ 'Ox' 3    -16.0000    -1.200       -1.200       -1.200    
+ 'Ox' 4    -16.0000    -1.200       -1.200       -1.200    
+ 'Ox' 5    -16.0000    -1.200       -1.200       -1.200    
+ 'Ox' 6    -16.0000    -1.200       -1.200       -1.200    
+ $end
+
+# crude approximation for inclusion of spin-orbit case...
+# shift p-energies by spin-p-coupling as given below and set above  relativistic=.true.
+
+#          p        d
+ $tb_spin_orbit_couplings
+ 'Si' 1   0.0147  0.0000 
+ 'Si' 2   0.0147  0.0000 
+ $end
+
+#                       sss     sps      pss       pps        ppp   
+ $tb_coupling_elements
+ 'Ox' 3  'Si' 1  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 3  'Si' 2  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 4  'Si' 2  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 4  'Si' 1  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 5  'Si' 2  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 5  'Si' 1  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 6  'Si' 2  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 6  'Si' 1  1   -3.0000   5.500    7.700   6.0000    -1.4000 
+ 'Ox' 4  'Ox' 3  1    0.0000   0.0000    0.0000   0.56	    -0.13   
+ 'Ox' 5  'Ox' 3  1    0.0000   0.0000    0.0000    0.56	    -0.13   
+ 'Ox' 6  'Ox' 3  1    0.0000   0.0000    0.0000    0.56	    -0.13   
+ 'Ox' 5  'Ox' 4  1    0.0000   0.0000    0.0000    0.56	    -0.13   
+ 'Ox' 6  'Ox' 4  1    0.0000   0.0000    0.0000    0.56	    -0.13   
+ 'Ox' 6  'Ox' 5  1    0.0000   0.0000    0.0000    0.56	    -0.13   
+ $end
+
+ $tb_model_distance
+ default_distance_power = 2.d0
+ $end
+
+
+#                       d[A]       sss     sps      pss       pps        ppp
+ $distance_dependence
+ 'Ox' 3  'Si' 1  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000         
+ 'Ox' 3  'Si' 2  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 4  'Si' 2  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 4  'Si' 1  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 5  'Si' 2  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 5  'Si' 1  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 6  'Si' 2  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 6  'Si' 1  1    1.6021    -3.0000   5.500    7.700   6.0000    -1.4000
+ 'Ox' 4  'Ox' 3  1    2.6163     0.0000   0.0000    0.0000   0.56      -0.13
+ 'Ox' 5  'Ox' 3  1    2.6163     0.0000   0.0000    0.0000   0.56      -0.13
+ 'Ox' 6  'Ox' 3  1    2.6163     0.0000   0.0000    0.0000   0.56      -0.13
+ 'Ox' 5  'Ox' 4  1    2.6163     0.0000   0.0000    0.0000   0.56      -0.13
+ 'Ox' 6  'Ox' 4  1    2.6163     0.0000   0.0000    0.0000   0.56      -0.13
+ 'Ox' 6  'Ox' 5  1    2.6163     0.0000   0.0000    0.0000   0.56      -0.13
+ $end
+
+
+
+
+
+ 
+ 
+ 

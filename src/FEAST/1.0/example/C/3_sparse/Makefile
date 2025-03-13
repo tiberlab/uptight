@@ -1,3 +1,46 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:51d61797b0cbf0b3beed9110cdfbf2f61c6a1ea3cf0d2b5dde9cf653be36429f
-size 1570
+include ../../make.inc
+
+help:
+	@echo "Usage: make {all rall clean} "
+	@echo "make all    -- compile/run all C examples for feast_sparse interface "
+	@echo "make rall   -- compile and run all C examples for feast_sparse interface "
+	@echo "make clean  -- clean all C examples for feast_sparse interface "
+	@echo "!!!!Please correct accordingly compiler and libraries paths, change compiler options " 
+	@echo " in file ../../make.inc !!!!"
+	@echo
+
+#==============================================================
+# Include the LIB (feast and  pardiso- lapack - blas)  
+#==============================================================
+LIB =  $(LOCLIBS)  -lfeast_dense $(LIBS)
+#==============================================================
+# List of codes to be compiled 
+#==============================================================
+EXAMPLES = sexample_sparse1 dexample_sparse1 cexample_sparse2 zexample_sparse2
+#==============================================================
+# Compile Link Execute
+#==============================================================
+all: examples 
+
+
+examples: 
+	@echo $(EXAMPLES)
+	@for file in $(EXAMPLES); \
+	do \
+		echo $(CC)  $(CFLAGS) $(INCL) -c $$file.c;\
+		$(CC)  $(CFLAGS) $(INCL) -c $$file.c ;\
+		echo $(CC)   -o $$file $$file.o $(LIB) ;\
+		$(CC)   -o $$file $$file.o  $(LIB) ;\
+	done
+
+
+rall: 	examples
+	@for file in $(EXAMPLES); \
+	do \
+                ./$$file; \
+	done
+#==========================================
+# Clean up directory: delete object files 
+#==========================================
+clean: 
+	-@rm  $(EXAMPLES) *.o

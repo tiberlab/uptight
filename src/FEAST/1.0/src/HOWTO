@@ -1,3 +1,14 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:559430ad777cf814879ca5f66bc339cd2a8140fd71f3b373717ba5d62aa8135e
-size 789
+Compilation of the FEAST library source code:
+----------------------------------------------
+
+- You are currently in the directory $FEASTROOT/src
+
+- Edit the "make.inc" file and change appropriately the name/path of the Fortran90 and C compilers.
+  Remark: In contrast to the pre-compiled libraries, both compilers are needed to compile the source code.
+
+- Execute: "make ARCH=<arch> all
+ where <arch> is your selected name for your architecture; your FEAST libraries
+will then be created in directory $FEASTROOT/lib/<arch>
+
+- If you have successfully created your FEAST library for your own architecture not currently listed 
+in the FEAST documentation, I will be pleased to receive these files by-email "feastsolver@gmail.com" in order to add them to the list of pre-compiled libraries.

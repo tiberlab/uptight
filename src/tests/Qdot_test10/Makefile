@@ -1,3 +1,21 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:9addcbcaccc6bbd7779e24e13525ad7bf51ee3bbea6f0240372567c7b33d2bd2
-size 269
+# $Id: Makefile 564 2007-11-23 09:02:50Z maufder $
+
+topdir := ../..
+
+inputfile = dr 
+
+exec = $(topdir)/lib_uptight/UPT_TEST6
+
+.PHONY: run clean distclean
+
+
+run: 
+	@echo "Running test in $(notdir $(PWD)) ..."
+	@echo ""
+	@$(exec) < $(inputfile)
+
+
+clean:
+	@rm -rf *.dat
+
+

@@ -1,3 +1,269 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:bcef69e7ebd1dcda2199eb5eabd07d39ebfbb207cc0139e4b6c9b86152a33d34
-size 5284
+
+***
+
+READ THE PARSE FILE
+
+Open file : ./data_driver_GaN_bulk ...
+
+Reading data from the parse file ...
+
+***
+
+SYSTEM DESCRIPTION :
+
+
+  =>     5.5300 Angstrom along x ( 1 ) 
+  =>     5.5333 Angstrom along y ( 2 ) 
+  =>     5.6000 Angstrom along z ( 3 ) 
+
+  INCLUDING 1 MATERIALS
+
+
+ material 1 : GaN
+
+PROGRAM PARAMETERS :
+
+
+  => spin-orbit interaction included.
+
+  => xyz periodic boundary conditions.
+
+***
+
+READ THE MATERIAL FILES
+
+
+Open file : ./../bulk/GaN_wz.data ...
+
+Reading data from file ...
+   ++++  i_state s  =              1
+   ++++ states_sym( i_state ) =   s     
+   ++++ TRIM( orb( i_orb ) ) =   s
+   ++++  i_state p  =              2
+   ++++  i_state s  =              5
+   ++++ states_sym( i_state ) =   s*    
+   ++++ TRIM( orb( i_orb ) ) =   s*
+   ++++  i_state s  =              1
+   ++++ states_sym( i_state ) =   s     
+   ++++ TRIM( orb( i_orb ) ) =   s
+   ++++  i_state p  =              2
+   ++++  i_state s  =              5
+   ++++ states_sym( i_state ) =   s*    
+   ++++ TRIM( orb( i_orb ) ) =   s*
+
+***
+
+OPEN THE k VECTORS FILE
+
+Open file : ././k_points.in ...
+
+Reading data from the k-vector file ...
+
+
+***
+
+READ THE REFERENCE STATE AND COUPLING
+
+Open file : ./state.dat ...
+
+Reading data from the states file ...
+
+
+ORIENTED UNIT CELL DATA
+
+ Oriented lattice vectors in Angstrom units :
+
+   a1 = (    4.3563  -3.1890  -1.1673 )
+   a2 = (    3.1890   1.1673  -4.3563 )
+   a3 = (    2.9936   2.9936   2.9936 )
+
+ Norm of lattice vectors in Angstrom units : 
+
+   | a1 | =    5.5235
+   | a2 | =    5.5235
+   | a3 | =    5.1850
+ READ prim basis
+ mat_data_u_par  0.376800000000000     
+           3           3           4
+
+ Number of atomic planes along each direction : 
+
+   a1 --> 3
+   a2 --> 3
+   a3 --> 4
+
+
+SUPER-CELL DATA
+
+ Supercell lattice vectors in Angstrom units :
+
+   A1 = (    4.3563  -3.1890  -1.1673 )
+   A2 = (    3.1890   1.1673  -4.3563 )
+   A3 = (    2.9936   2.9936   2.9936 )
+
+ Norm of supercell vectors in Angstrom units : 
+
+   | A1 | =    5.5235
+   | A2 | =    5.5235
+   | A3 | =    5.1850
+
+ Number of atoms in the supercell = 12
+
+ Nearest neighbours distances and number :
+
+          order  1 :   1.948836 ->  3.
+
+ Number of danglig bonds -> 0
+
+***
+
+ BEFORE         240           0           0
+ AFTER
+ STARTING K VECTOR LOOP           1
+
+Open file : ./GaN_basis.xyz ...
+
+Open file : ./GaN_basis.dat ...
+   4.35625446034826       -3.18899947784244       -1.16725498250582     
+   3.18899966370324        1.16725472861524       -4.35625439231848     
+   2.99356114574821        2.99356114574821        2.99356114574821     
+
+Open file : ./GaN_basis_coord.dat ...
+
+Open file : temp.gen ...
+ SAVING GEN FILE
+ GEN FILE SAVED
+        4152      100000           0
+ testing
+ testing
+ testing
+ ./indeces_sparse.dat                                                           
+                                                                                
+                                           
+ ./values_sparse.dat                                                            
+                                                                                
+                                           
+ files open
+ reading sparse matric
+ sparse matrix read
+
+***
+=> Number of atoms in the supercell : 12
+=> Number of lines in full Hamiltonian : 240
+=> Number of sparse Hamiltonian elements : 3912
+
+***
+ 
+        4068
+ reading sparse matric
+         240
+
+***
+=> Number of atoms in the supercell : 12
+=> Number of lines in full Hamiltonian : 240
+=> Number of sparse Hamiltonian elements : 3828
+
+***
+
+Open file : optical1_real_IBVB.data ...
+
+Open file : optical1_imag_IBVB.data ...
+
+Open file : optical1_real_IBCB.data ...
+
+Open file : optical1_imag_IBCB.data ...
+optical1_real_.data
+
+Open file : optical1_real_.data ...
+
+Open file : optical1_imag_.data ...
+        4080
+ reading sparse matric
+         240
+
+***
+=> Number of atoms in the supercell : 12
+=> Number of lines in full Hamiltonian : 240
+=> Number of sparse Hamiltonian elements : 3840
+
+***
+
+Open file : optical2_real_IBVB.data ...
+
+Open file : optical2_imag_IBVB.data ...
+
+Open file : optical2_real_IBCB.data ...
+
+Open file : optical2_imag_IBCB.data ...
+optical2_real_.data
+
+Open file : optical2_real_.data ...
+
+Open file : optical2_imag_.data ...
+        4080
+ reading sparse matric
+         240
+
+***
+=> Number of atoms in the supercell : 12
+=> Number of lines in full Hamiltonian : 240
+=> Number of sparse Hamiltonian elements : 3840
+
+***
+
+Open file : optical3_real_IBVB.data ...
+
+Open file : optical3_imag_IBVB.data ...
+
+Open file : optical3_real_IBCB.data ...
+
+Open file : optical3_imag_IBCB.data ...
+optical3_real_.data
+
+Open file : optical3_real_.data ...
+
+Open file : optical3_imag_.data ...
+
+Open file : ./GaN_eigv.dat ...
+
+***
+
+OPEN THE EIGEN STATES FILE
+
+Open file : ./GaN_vec.dat ...
+          20           0           0
+ 
+ 
+          40          20           0
+ 
+ 
+          60          40           0
+ 
+ 
+          80          60           0
+ 
+ 
+         100          80           0
+ 
+ 
+         120         100           0
+ 
+ 
+         140         120           0
+ 
+ 
+         160         140           0
+ 
+ 
+         180         160           0
+ 
+ 
+         200         180           0
+ 
+ 
+         220         200           0
+ 
+ 
+         240         220           0
+ 
+ 

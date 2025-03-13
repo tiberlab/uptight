@@ -1,3 +1,11 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:b301c3ae57636d871c298b363451fbc1dd7af440c16a8a29176887bf1030107f
-size 171
+'../../../../bulk/'
+si_sio2_qw_21A.gen 
+F        !relativistc
+T        !lanczos
+1        !n_valence
+1        !n_cond
+0.2d0    !guess valence
+1.0d0    !guess conduction
+
+
+

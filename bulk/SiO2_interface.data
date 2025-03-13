@@ -1,3 +1,89 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:11229c89d282891fe14e65bc0fd079176831d744f98fd81f247aa2703587cc64
-size 1626
+# Tight binding parameters - sp3 model
+
+# cristobalite basis
+
+material type = 'binary'
+
+lattice type = 'face centered cubic'
+
+lattice parameters =  5.43D0   5.43D0  5.43D0 
+
+internal strain parameter = 0.00D0
+
+basis type =  'zinc-blende' 
+
+number of ions = 2  
+ions = 'Si' 'O'
+
+Si valence = 4
+O valence = 2
+
+Si b_d parameter = 0.0D0
+O b_d parameter = 0.0D0
+# states
+
+number of spin-orbit parameters per ion = 1 1
+
+Si spin orbit
+p 0.0000D0
+
+O spin orbit
+p 0.0000D0
+
+
+number of orbitals per ion = 4 4 
+
+# Silicon  par	
+Si onsite
+'s'    -2.0196D0     1
+'p'     4.5448D0     3
+'s*'    19.6748D0    1
+'d'  	14.1836D0    5
+
+Si offset = -0.000D0
+
+# ZrO2 par
+O onsite
+'s'   -15.147470D0   1
+'p'     -0.477384D0  3
+'s*'   28.904745D0    1
+'d'   22.540247D0     5
+
+
+# O offset = -0.000D0 ???????????
+O offset = -3.21D0 
+
+# TB couplings
+
+number of pairs = 1
+
+pair 1 = 'O' 'Si'  21  1 
+
+O Si coupling 1
+
+'sss'  -5.8114     2.0D0 
+'sps'  4.9257D0      2.0D0
+'ss*s'   3.6127D0    2.0D0
+'sds'   -4.7342D0     2.0D0
+'pss'  6.5409D0       2.0D0
+'pps'   6.5409D0       2.0D0
+'ps*s'  3.6127D0     2.0D0
+'pds'    -4.2629D0      2.0D0
+'s*ss'  3.6127D0     2.0D0
+'s*ps'  -4.8477D0      2.0D0 
+'s*s*s'  3.6127D0     2.0D0
+'s*ds'   -4.7342D0     2.0D0 
+'dss'   -4.7342D0      2.0D0 
+'dps'  -4.2629D0       2.0D0 
+'ds*s'  -4.7342D0     2.0D0 
+'dds'     -2.3640D0    2.0D0
+'ppp'   -4.8477D0      2.0D0
+'pdp'   -4.2629D0      2.0D0 
+'dpp'   4.7875D0       2.0D0
+'ddp'   3.7542D0      2.0D0
+'ddd'   -2.9463D0     2.0D0
+
+
+O Si pair reference distance 1 = 1.6021D0
+
+

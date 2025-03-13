@@ -1,3 +1,229 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:d2f8dbd158204e168cffc7b77cf442f88f5e1b65a297c856ea8de3292a05ba27
-size 6085
+# Jmol state version 11.4.RC3  2007-12-20 06:37;
+
+function _setWindowState();
+# height 854;
+# width 1269;
+  stateVersion = 1104000;
+  backgroundColor = "[x000000]";
+  axis1Color = "[xff0000]";
+  axis2Color = "[x008000]";
+  axis3Color = "[x0000ff]";
+  ambientPercent = 45;
+  diffusePercent = 84;
+  specular = true;
+  specularPercent = 22;
+  specularPower = 40;
+  specularExponent = 6;
+  statusReporting  = true;
+end function;
+
+function _setFileState();
+
+  allowEmbeddedScripts = false;
+  set autoBond true;
+  set appendNew true;
+  set appletProxy "";
+  set applySymmetryToBonds false;
+  set bondRadiusMilliAngstroms 150;
+  set bondTolerance 0.45;
+  set defaultDirectory "";
+  set defaultLattice {0.0 0.0 0.0};
+  set defaultLoadScript "";
+  set loadFormat "http://www.rcsb.org/pdb/files/%FILE.pdb";
+  set forceAutoBond false;
+  set minBondDistance 0.4;
+  set percentVdwAtom 20;
+  set smartAromatic true;
+  load /*file*/"/home/nausica/pecchia/projects/newsuperTB/uptight/TEST/GaN/temp.xyz";
+
+end function;
+
+function _setVariableState();
+
+   set defaultanglelabel "%VALUE %UNITS";
+   set defaultcolorscheme "Jmol";
+   set defaultdirectory "";
+   set defaultdistancelabel "%VALUE %UNITS";
+   set defaultdrawarrowscale 0.5;
+   set defaultlattice "{0 0 0}";
+   set defaultloadscript "";
+   set defaulttorsionlabel "%VALUE %UNITS";
+   set defaulttranslucent 0.5;
+  set allowembeddedscripts true;
+  set allowrotateselected false;
+  set appletproxy "";
+  set applysymmetrytobonds false;
+  set autobond true;
+  set autofps false;
+  set axes window;
+  set axesmode 0;
+  set axesscale 2.0;
+  set bondmodeor false;
+  set bondradiusmilliangstroms 150;
+  set bondtolerance 0.45;
+  set cartoonrockets false;
+  set chaincasesensitive false;
+  set dataseparator "~~~";
+  set dipolescale 1.0;
+  set disablepopupmenu false;
+  set displaycellparameters true;
+  set dotsselectedonly false;
+  set dotsurface true;
+  set drawpicking false;
+  set dynamicmeasurements false;
+  set forceautobond false;
+  set greyscalerendering false;
+  set hbondsbackbone false;
+  set hbondssolid false;
+  set helppath "http://www.stolaf.edu/academics/chemapps/jmol/docs/index.htm";
+  set hermitelevel 0;
+  set hidenameinpopup false;
+  set hidenavigationpoint false;
+  set highresolution false;
+  set historylevel 0;
+  set hoverdelay 0.5;
+  set isosurfacepropertysmoothing true;
+  set justifymeasurements false;
+  set loadformat "http://www.rcsb.org/pdb/files/%FILE.pdb";
+  set measureallmodels false;
+  set measurementlabels true;
+  set minbonddistance 0.4;
+  set navigationperiodic false;
+  set navigationspeed 5.0;
+  set percentvdwatom 20;
+  set pickingspinrate 10;
+  set propertyatomnumberfield 0;
+  set propertycolorscheme "roygb";
+  set propertydatafield 0;
+  set rangeselected false;
+  set ribbonaspectratio 16;
+  set ribbonborder false;
+  set rocketbarrels false;
+  set selecthetero true;
+  set selecthydrogen true;
+  set sheetsmoothing 1.0;
+  set showhiddenselectionhalos false;
+  set showhydrogens true;
+  set showmeasurements true;
+  set showmultiplebonds true;
+  set shownavigationpointalways false;
+  set smartaromatic true;
+  set solventprobe false;
+  set solventproberadius 1.2;
+  set ssbondsbackbone false;
+  set stereodegrees 5;
+  set strandcountformeshribbon 7;
+  set strandcountforstrands 5;
+  set testflag1 false;
+  set testflag2 false;
+  set testflag3 false;
+  set testflag4 false;
+  set tracealpha true;
+  set usenumberlocalization true;
+  set vectorscale 1.0;
+  set vibrationperiod 0.5;
+  set vibrationscale 0.5;
+  set wireframerotation false;
+  set zoomlarge true;
+  set zshade false;
+
+#user-defined variables; 
+# --none--;
+
+# label defaults;
+  select none;
+  color label none;
+  background label none;
+  set labelOffset 4 4;
+  set labelAlignment left;
+  set labelPointer off;
+  font label 13 SansSerif Plain;
+
+end function;
+
+function _setModelState();
+
+  DATA "coord set"
+12 ;
+Jmol Property Data Format 1 -- Jmol 11.4.RC3  2007-12-20 06:37;
+1 Ga Ga1_#1  -0.35000002 0.6 0.0 ;
+2 Ga Ga2_#2  2.165085 -0.07391502 -1.84117 ;
+3 Ga Ga3_#3  4.6801705 -0.74783 -3.68234 ;
+4 N N4_#4  0.77797407 1.727974 1.127974 ;
+5 N N5_#5  3.2930589 1.054059 -0.71319604 ;
+6 N N6_#6  5.808144 0.380144 -2.5543659 ;
+7 Ga Ga7_#7  2.5988657 1.033781 1.1076959 ;
+8 Ga Ga8_#8  5.11395 0.35986602 -0.73347396 ;
+9 Ga Ga9_#9  3.272781 2.8749502 -1.4073889 ;
+10 N N10_#10  3.7268393 2.161754 2.2356694 ;
+11 N N11_#11  6.241924 1.4878391 0.39450002 ;
+12 N N12_#12  4.400754 4.0029244 -0.27941602 ;
+  end "coord set";
+
+  select ({0:11});
+  Spacefill 0.36;
+  select BONDS ({0:10});
+  wireframe 0.12;
+
+  measures delete;
+  set measures nanometers;
+  font measures 15 SansSerif Plain;
+  select measures ({null});
+
+  draw delete;
+  draw line {3.643059 0.454059 -0.71319604};
+  draw line fill noMesh noDots notFrontOnly fullylit off;
+  color draw opaque [xffa500];
+draw off;
+  draw line1 {1.0 1.0 1.0} {3.2930589 1.054059 -0.71319604};
+  draw line1 fill noMesh noDots notFrontOnly fullylit off;
+  color draw opaque [xffa500];
+draw off;
+
+  axes on;
+  font axes 14 SansSerif Plain;
+  axisScale = 2.0;
+
+  boundBox off;
+
+  hover "%U";
+
+  frank on;
+  font frank 16 SansSerif Bold;
+
+end function;
+
+function _setPerspectiveState();
+  set perspectiveModel 11;
+  set scaleAngstromsPerInch 0.0;
+  set perspectiveDepth false;
+  set visualRange 5.0;
+  set cameraDepth 3.0;
+  boundbox corners {0.0 -1.34783 -3.68234} {6.5919237 3.4029243 2.2356694} # volume = 185.33199;
+  center {3.2959619 1.0275471 -0.72333527};
+  moveto 0.0 { 579 2 815 103.14} 66.07 0.04 0.0 {3.2959619 1.0275471 -0.72333527} 6.0420027 {0.0 0.0 0.0} 3.4159873 22.667442 50.0;;
+  slab 100;depth 0;
+  set spinX 0; set spinY 30; set spinZ 0; set spinFps 30;
+end function;
+
+function _setSelectionState();
+  select ({0:11});
+  set hideNotSelected false;
+end function;
+
+function _setState();
+  initialize;
+  set refreshing false;
+  _setWindowState;
+  _setFileState;
+  _setVariableState;
+  _setModelState;
+  _setPerspectiveState;
+  _setSelectionState;
+  set refreshing true;
+  set antialiasDisplay false;
+  set antialiasTranslucent true;
+  set antialiasImages true;
+end function;
+
+_setState;

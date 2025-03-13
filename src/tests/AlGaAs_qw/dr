@@ -1,3 +1,11 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:21c2433cdbc103c268c84e2099d6e047a2bbec829b93ad241df522411f4960ca
-size 72
+'../../../bulk/'
+tb2.upg
+T
+1.d0 0.d0 0.d0
+LO
+6
+2
+0.5d0
+1.3d0
+10000
+1e-8

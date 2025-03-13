@@ -1,3 +1,11 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:087b12019c297dbe49c60f6fd55b9e6fc51a8d2a7914590e5fbabd497fe7c728
-size 343
+#ifndef _FORTRAN_H
+#define _FORTRAN_H
+// C++ types corresponding to Fortran 77 types
+
+typedef int     f77_int;          // integer
+typedef float   f77_real;         // real*4
+typedef double  f77_double;       // real*8
+typedef char    f77_char;         // character
+//typedef int     f77_logical;      // not used, use f77_int instead
+
+#endif

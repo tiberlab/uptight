@@ -1,3 +1,75 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:41baae500b7a279333715abc6a0749d0b038f8904589b8942dd795b0f15dfd6f
-size 1676
+# Tight binding parameters (c) Jean Marc Jancu
+
+# material type : 'simple' / 'binary' / 'ternary' / 'quaternary'
+material type = 'simple'
+
+# lattice type : 'face centered cubic' / 'hexagonal'
+lattice type = 'face centered cubic'
+
+# lattice parameters ( in Angtroms )
+lattice parameters =   5.430D0   5.430D0   5.430D0
+
+# 0 = no internal strain / 1 = maximal internal strain
+#internal strain parameter = 0.60D0
+internal strain parameter = 0.00D0
+
+# basis type : 'zinc-blende' / 'diamond' / 'wurtzite'
+basis type = 'diamond'
+
+ions = 'Si'
+
+# spin orbit
+
+number of spin-orbit parameters per ion = 2
+
+Si spin orbit
+'p' 0.0195D0
+'d' 0.0000D0
+
+# onsite ETB
+
+number of orbitals per ion = 4
+	
+Si onsite
+'s'    -2.038566D0   1
+'p'     5.066972D0   3
+'s*'   19.96986D0   1
+'d'    14.832327D0   5
+
+#Si offset = 0.0D0
+Si offset = -0.507
+
+# ETB couplings
+
+number of pairs = 1
+
+# pair <number> = 'ion1' 'ion2' <number of ETB data> 
+# <order of nearest neighbours>
+
+pair 1 = 'Si' 'Si' 21 1
+
+Si Si coupling 1
+'sss'     -1.888537D0    4.69D0 
+'sps'      2.960D0    4.42D0
+'ss*s'    -1.510D0    0.00D0
+'sds'     -2.534D0    1.26D0
+'pss'       2.960D0    4.42D0
+'pps'      4.365D0    1.04D0
+'ps*s'     3.534D0    1.39D0
+'pds'     -2.267497D0    1.20D0
+'s*ss'    -1.510D0    0.00D0
+'s*ps'     3.534D0    1.39D0 
+'s*s*s'   -3.693D0    0.00D0
+'s*ds'    -2.0505D0    1.45D0 
+'dss'     -2.534D0    1.26D0 
+'dps'     -2.267497D0    1.20D0 
+'ds*s'    -2.0505D0    1.45D0 
+'dds'     -1.542D0    0.00D0
+'ppp'      -1.628D0    4.67D0
+'pdp'      2.473D0    1.15D0 
+'dpp'      2.473D0    1.15D0
+'ddp'       3.6060D0    0.00D0
+'ddd'     -1.71566D0    0.00D0    
+
+Si Si pair reference distance 1 = 2.351259D0
+

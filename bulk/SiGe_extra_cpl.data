@@ -1,3 +1,107 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:77e398da569ea8e4a98e7cf46e7a70308f0571b166b17f3964dfc2aff66fa316
-size 2440
+#  TEST  PER  EXTRA COUPLINGS :
+#  QUI SOLO Si <-> Ge COUPL. ,  NON  ON-SITE EN. !!!
+
+# ***********************************************************************
+# ***********************************************************************
+# ETB couplings   ,   ok  par Si <-> Ge and  dist-dep. (from clara) !!!!!!!
+# ***********************************************************************
+# ***********************************************************************
+
+
+# material type = 'extra_TB_couplings'
+
+
+# Tight binding parameters (c) Jean Marc Jancu
+
+# material type : 'simple' / 'binary' / 'ternary' / 'quaternary'
+
+#material type = 'binary'
+
+# ***********************************************
+
+material type = 'extra_TB_couplings'
+
+# ***********************************************
+
+
+# lattice type : 'face centered cubic' / 'hexagonal'
+
+lattice type = 'face centered cubic'
+
+# lattice parameters ( in Angtroms )
+
+lattice parameters =   5.6532D0   5.6532D0   5.6532D0
+
+# 0 = no internal strain / 1 = maximal internal strain
+
+internal strain parameter = 0.60D0
+
+# basis type : 'zinc-blende' / 'wurtzite'
+
+basis type = 'zinc-blende'
+
+ions =  'Ge'  'Si'
+
+# spin orbit
+
+number of spin-orbit parameters per ion = 2 2
+
+Ga spin orbit
+'p' 0.0408D0
+'d' 0.0000D0
+
+As spin orbit
+'p' 0.1824D0
+'d' 0.0000D0
+
+# onsite ETB
+
+number of orbitals per ion = 4 4 
+	
+Ga onsite
+'s'    -0.4028D0   1
+'p'     6.3853D0   3
+'s*'   19.4220D0   1
+'d'    13.1023D0   5
+
+As onsite
+'s'    -5.9819D0   1
+'p'     3.5820D0   3
+'s*'   19.4220D0   1
+'d'    13.1023D0   5
+
+Ga offset = 0.0D0
+As offset = 0.0D0
+
+# ETB couplings   ,   ok  par Si <-> Ge and  dist-dep. (from clara)
+
+number of pairs = 1
+
+pair 1 =  'Ge'  'Si'  21 1
+
+Ge  Si coupling 1
+'sss'     -1.7208D0    3.6994D0 
+'sps'      2.7911D0    3.34855D0
+'ss*s'    -1.80695D0    0.00D0
+'sds'     -2.80135D0    2.13315D0
+'pss'      2.7911D0    3.34855D0
+'pps'      4.18045D0    1.85755D0
+'ps*s'     2.83025D0    1.9485D0
+'pds'     -2.16055D0    1.6306D0
+'s*ss'    -1.80695D0    0.00D0
+'s*ps'     2.83025D0    1.9485D0 
+'s*s*s'   -3.4555D0    0.00D0
+'s*ds'    -0.6606D0    2.00D0 
+'dss'     -2.80135D0    2.13315D0 
+'dps'     -2.16055D0    1.6306D0 
+'ds*s'    -0.6606D0    2.00D0 
+'dds'     -1.22495D0    2.000D0
+'ppp'     -1.6222D0    3.2814D0
+'pdp'      1.9489D0    1.8277D0 
+'dpp'      1.9489D0    1.8277D0
+'ddp'      2.50995D0    2.000D0
+'ddd'     -2.30615D0    2.000D0    
+
+Ge Si pair reference distance 1 = 2.4008D0
+
+

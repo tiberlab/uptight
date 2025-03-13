@@ -1,3 +1,235 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:30b735955f043714f7d638dc4737b3beb0c713df5a80844bafd99a070aa646cc
-size 5305
+***************************************************************************
+*
+*                             SUPERCELL INPUT
+*
+***************************************************************************
+
+# super basis input flag : --> FALSE  - build the super basis
+#	                   --> TRUE   - read the super basis
+
+super basis flag = F
+
+extra couplings flag  =  F
+
+############## chemical input : materials involved
+
+# total number of materials in the supercell ( including the frame )
+
+number of materials =1
+
+#---- material 1 ( supercell frame )
+
+material 1 name = 'GaAs'	
+material 1 type = 'binary'
+parent file 1 in material 1 = '../bulk/GaAs.data'
+extra couplings in material 1 =  F
+
+### VCA disorder is related to bowing factor for gap , etc.  ( greater disorder -> greater bow -> higher gap)
+
+############ geometry input
+
+# supercell's boundaries ( Angstroms )
+
+supercell start =  0.000    0.000    0.0000
+supercell end   =  6.5300   6.533300     6.6000
+
+# materials shape files
+
+# supercell orientation : in terms of Miller indeces
+#
+#  ( h k l ) 1    1  1  0
+#  ( h k l ) 2    1 -1  0
+#  ( h k l ) 3    0  1  1
+
+supercell orientation
+
+ 1  0  0
+ 0  1  0
+ 0  0  1   
+ 
+ 
+# Created more complex structure hetrostructure freestanding structure etc.
+structure building flag = F
+str_filename = 'struct1.input'
+str_output = T
+str_filename_out = 'struct'
+
+# Load pre-constructed structure 
+load precon flag = F
+
+***************************************************************************
+*
+*                          TIGHT BINDING INPUT
+*
+***************************************************************************
+
+# coupling order
+
+nearest neighbours order = 1
+
+# coupling scaling
+
+ETB coupling scaling = F 
+nearest distance accuracy (%) = 2.0D0
+
+ETB onsite shift = F 
+
+
+# spin - orbit
+
+relativistic = T
+
+# alloy : TRUE = random / FALSE = VCA
+
+random alloy = F
+number of alloy loops = 2
+
+# surface boundaries
+
+periodic boundaries = 'xyz'
+
+# saturated bond ETB parameters
+
+saturated bond scaling = 0.1D0
+saturated onsite energy = -200.0D0
+
+# Brillouin zone sampling
+
+k vector file = './k_points.in'
+#k vector file = 'ZB/zinc-blende/k_ZB'
+
+# reference orbitals
+
+state file = 'state.dat'
+
+
+***************************************************************************
+*
+*                              BASIS INPUT
+*
+***************************************************************************
+
+output flag = 0
+xmol output = T 
+xmol output file = 'GaN_basis.dat' 
+xyz output file = 'GaN_basis.xyz'
+
+basis output = T
+basis output file = 'GaN_basis_coord.dat'
+
+gen output = T
+
+strain = F
+strain tensor = F
+strain type = 'read'
+strain file = 'displacements.out'
+
+Quantum Well =  F
+QW start = 50.0d0
+QW end = 85.0d0
+
+strain monodim  = F
+
+internal strain = F
+internal strain file = 'QW_int_strain.dat'
+
+potential = F 
+potential file = 'column.dat'
+
+
+***************************************************************************
+*
+*                          SPARSE INDEX INPUT
+*
+***************************************************************************
+
+# upper / lower / full
+
+sparse format = 'upper'
+sparse index file = 'indeces_sparse.dat'
+sparse values file = 'values_sparse.dat'
+
+
+***************************************************************************
+*
+*                       DIAGONALIZATION INPUT
+*
+***************************************************************************
+
+diagonalization = T
+
+# lanczos / davidson
+
+diagonalization method = 'LAPACK'
+
+#LAPACK
+max number of eigenvalues = 10
+number of valence states = 10
+min energy = -10.0
+max energy = 10.0
+
+# Fast Lanczos
+fast lanczos flag = F 
+number of fast lanczos iterations = 2
+number of long lanczos iterations = 10000 
+#500
+fast tolerance = 1.0d-1
+long tolerance = 1.0d-10
+
+# Standard Lanczos
+standard lanczos flag = F 
+number of lanczos iterations = 50
+standard tolerance = 1.0d-10
+
+# davidson
+
+# number of values = is better = size of ham.
+number of values = 160 
+maximum number of iterations = 100000
+tolerance = 1.0d-5
+guess energy value = ( 0.0D0, 0.0D0 )
+
+# lanczos
+number of cond values = 2
+conduction = T 
+conduction guess = 1.2D0 1.2d0
+conduction result = T
+conduction result file = 'result_cond.dat'
+
+valence = T
+number of valence values = 8
+valence guess = 0.2d0 0.2d0
+valence result = T
+valence result file = 'result_val.dat'
+
+# result syntax for the eigen values file :
+# --> 0 = band gap  :  norm of k   - valence energy ( error ) - conduction energy ( error ) - gap ( error )
+# --> 1 = alloys    :  alloy conc  - valence energy ( error ) - conduction energy ( error ) - gap ( error )
+# --> 2 = band structure :  norm of k  - energy for all the bands ( OK only for the bulk !!! and only for davidson !!!)
+
+result format = 2
+
+eigenvalues file = 'GaN_eigv.dat'
+
+# result syntax for the eigen vectors file :
+# index of the atom / charge density for valence ( raw + normalized ) 
+# / charge density for conduction ( raw + normalized )
+eigenstates = T
+# eigenstates = FALSE  per  bulk  energies dispersion
+eigenstates file = 'GaN_vec.dat'
+
+#Optical calculations
+#Notice that eigenvalues are needed for these calculations
+
+#Activate calculation of optical properties 
+optics = F
+
+#Intra band optical elements are to be calculated
+intra_band_optics = F
+
+#Inter band optical elements are to be calculated
+inter_band_optics = F
+
+
+
+

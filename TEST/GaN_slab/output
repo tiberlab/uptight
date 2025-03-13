@@ -1,3 +1,16 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:731987958b1ac33a1da5f5f91da1902519f43369507b1039c09da8b90c3b3bbc
-size 313
+
+***
+
+READ THE PARSE FILE
+
+Open file : ./data_driver_GaN_bulk ...
+
+Reading data from the parse file ...
+
+SYNTAX ERROR in file './data_driver_GaN_bulk' :
+Data list 'Rotation along (111)' missing.
+
+
+SYNTAX ERROR in file './data_driver_GaN_bulk' :
+A logical flag value is required for data 'Rotation along (111)' .
+

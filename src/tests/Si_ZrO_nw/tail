@@ -1,3 +1,8 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:ce5c103f1ab1abefd76a051c375f28dadfe25f634ec4abf5bc673ffffe2b4378
-size 273
+     000     000     0.000000
+    3500     000     0.000000
+     000    3500     0.000000
+     000     000     5.430400
+1  Si   zb  binary 1 CRY Si  1.0 Si.data
+2  ZrO2  zb  binary 1 CRY ZrO2  1.0 ZrO2.data
+3  SiO2  zb  binary 1 CRY SiO2  1.0 SiO2_interface.data 
+

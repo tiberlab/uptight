@@ -1,3 +1,30 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:c86a84c39b57bccd372ac2abfb24098c9e9ac22495e80be6e78f45d3fd7401cb
-size 932
+! This file is part of uptight.
+!
+! uptight is free software: you can redistribute it and/or modify
+! it under the terms of the GNU Lesser General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! uptight is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY; without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+! GNU Lesser General Public License for more details.
+!
+! You should have received a copy of the GNU Lesser General Public License
+! along with uptight. If not, see <https://www.gnu.org/licenses/>.
+!
+program test_upt_api
+
+integer :: handler(4)
+
+write(*,*) 'initializing UPT ...'
+call upt_initsession(handler)
+
+write(*,*) 'handler recieved',handler
+
+write(*,*) 'kill UPT ...'
+call upt_destructsession(handler)
+
+write(*,*) '...done'
+
+end program test_upt_api

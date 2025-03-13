@@ -1,3 +1,17 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:6303115c4574ccecb48b9b4c30fe350895ddd21e4687034dccc9c5d449a64dba
-size 170
+AlAs_bulk
+GaAs_bulk
+GaN_bulk
+AlGaN_bulk
+#InN_bulk
+AlGaAs_qw
+AlGaN_qw
+GaN_column
+AlGaN_column
+Qdot_test10
+#Qdot_IWCE
+Si_bulk
+#SiO2_bulk
+#Si_SiO2_qw
+#ZrO2_bulk
+#Si_ZrO_nw
+
