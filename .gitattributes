@@ -2,3 +2,4 @@ TEST/** linguist-vendored
 lib_arpack/** linguist-vendored
 bulk/** linguist-vendored
 src/tests/** linguist-vendored
+src/lib_uptight/** linguist-vendored
