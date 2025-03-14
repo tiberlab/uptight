@@ -1,4 +1,4 @@
-TEST/* linguist-vendored
+TEST/* linguist-detectable=false
 lib_arpack/* linguist-vendored
 bulk/* linguist-vendored
 src/tests linguist-vendored
