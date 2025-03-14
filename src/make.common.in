@@ -16,8 +16,6 @@ ARCH1= $(shell uname -m)
 
 FCFLAVOUR:=$(shell $(FC) -v 2>&1 |grep "ifort version")
 
-TIBERCADROOT = ../../../../../../../
-TCMODULE = src/core/modules/etb/libuptight
 
 ifneq ($(FCFLAVOUR),) 
   #FFLAGS = -O3 -xHost -no-prec-div -unroll -ip -fexceptions -gcc-name=${CC} -gxx-name=${CC} -nofor-main

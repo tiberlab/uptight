@@ -15,6 +15,7 @@
  * along with uptight. If not, see <https://www.gnu.org/licenses/>.
  */
 #include "UptSolverException.h"
+#include "exception_codes.h"
 
 const char* ETBSolverException::what(void) const throw()
 {

@@ -10,8 +10,9 @@ FEASTSRC = ../FEAST/1.0/src
 LFEAST = #-L ../FEAST/1.0/lib/$(ARCH1) -lfeast -lfeast_sparse
 LIBARPACK = #../../lib_arpack/libarpack_debian_ifort_mkl.a 
 
+
 FPPFLAGS += -D__REVISION='"$(shell git describe --always --tags --dirty )"'
-FPPFLAGS += -D__MODIFIED='"$(shell git log -n 1 | grep Date | awk '{print $3, $4, $5, $6}' )"'
+FPPFLAGS += -D__MODIFIED='"$(shell git log -n 1 | grep Date | awk '{print $$3, $$4, $$5, $$6}' )"'
 FPPFLAGS += -D__COMPDATE='"$(shell date +'%F')"'
 
 #LIBMPI=-L$(MPILIB)

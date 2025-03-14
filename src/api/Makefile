@@ -13,16 +13,16 @@ CSOURCES = UptInitException.C \
       	   UptSolverException.C 
 
 MODULES = precision.mod \
-					globals.mod \
-				  upt_param.mod \
-			    uptight.mod \
-			    savemofile.mod \
-			    sparse_matrix.mod \
-			    tb_ham.mod		
+	globals.mod \
+	upt_param.mod \
+	uptight.mod \
+	savemofile.mod \
+	sparse_matrix.mod \
+	tb_ham.mod		
 
 OBJECTS = $(CSOURCES:.C=.o)  
 
-all: update
+all: libuptight
 	
 tests: test_upt_api_c test_upt_api_f
 
@@ -69,14 +69,6 @@ test_upt_api_c: cpp_wrapped_binding test_upt_api_c.o $(TARGET)
 test_upt_api_f: test_upt_api_f.o $(TARGET)
 	$(FC) $(LDFLAGS) -o $@ test_upt_api_f.o $(TARGET) $(LFLAGS)
 
-.PHONY: update
-
-update: $(TARGET) cpp_wrapped_binding
-	@echo "copy $(TARGET) in $(TIBERCADROOT)/$(TCMODULE)"; \
-	cp $(TARGET) $(TIBERCADROOT)/$(TCMODULE); \
-	echo "copy exception_codes.h fortran.h uptight.h $(TIBERCADROOT)/$(TCMODULE)"; \
-	cp fortran.h uptight.h $(TIBERCADROOT)/$(TCMODULE); \
-	rm -f $(TIBERCADROOT)/lib/libuptight.so 
 
 .PHONY: clean
 clean:

@@ -19,7 +19,6 @@
 #define _UPTSOLVEREXCEPTION_H_
 
 #include "SolveFailedException.h"
-#include "exception_codes.h"
 
 //! An exception class for the solver interfaces
 class ETBSolverException : public SolveFailedException 

@@ -18,7 +18,6 @@
 #define _UPTINITEXCEPTION_H_
 
 #include "InitFailedException.h"
-#include "exception_codes.h"
 
 //! An exception class for the solver interfaces
 class ETBInitException : public InitFailedException 

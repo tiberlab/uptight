@@ -15,6 +15,7 @@
  * along with uptight. If not, see <https://www.gnu.org/licenses/>.
  */
 #include "UptInitException.h"
+#include "exception_codes.h"
 
 const char* ETBInitException::what(void) const throw()
 {
