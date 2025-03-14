@@ -1,4 +1,4 @@
-TEST/* linguist-detectable=false
-lib_arpack/* linguist-detectable=false
-bulk/* linguist-detectable=false
-src/tests linguist-detectable=false
+TEST/* linguist-vendored
+lib_arpack/* linguist-vendored
+bulk/* linguist-vendored
+src/tests linguist-vendored
