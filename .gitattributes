@@ -1,4 +1,4 @@
-*.data linguist-language=data
-*.dat linguist-language=data
-*.f90 linguist-language=Fortran
-*.F90 linguist-language=Fortran
+TEST/* linguist-vendored
+lib_arpack/* linguist-vendored
+bulk/* linguist-vendored
+src/tests linguist-vendored
