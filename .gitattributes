@@ -1,4 +1,4 @@
-TEST/* linguist-vendored
-lib_arpack/* linguist-vendored
-bulk/* linguist-vendored
-src/tests linguist-vendored
+TEST/** linguist-vendored
+lib_arpack/** linguist-vendored
+bulk/** linguist-vendored
+src/tests/** linguist-vendored
