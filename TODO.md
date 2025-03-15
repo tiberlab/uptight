@@ -12,8 +12,8 @@ https://github.com/todomd/todo.md
 
 ### In Progress
 
-- [ ] Create Changelog 
 
 ### Done ✓
 
+- [x] Create Changelog 
 - [x] Create TODO.md 
