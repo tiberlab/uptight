@@ -9,7 +9,8 @@ under the guidance of Prof. Aldo Di Carlo. Main contributions are due to
 Alessandro Pecchia, and Anh-Luan Phan.
 
 The ETB implementation is based on the following papers:
-
+* Slater J C, and Koster G F: "Simplified LCAO Method for the Periodic
+  Potential Problem”, Phys. Rev. 94, no. 6, 1498–1524, 1954.
 * Jancu J-M, Scholz R, Beltram F and Bassani F: "Empirical spds*
   tight-binding calculation for cubic semiconductors: general method
   and material parameters", Phys. Rev. B 57, 6493, 1998
@@ -17,8 +18,8 @@ The ETB implementation is based on the following papers:
   tight-binding model for strained group IV and III-V materials and
   heterostructures", Phys. Rev. B 94, 045311, 2016
 
-Uptight has been interfaced to tibercad multiscale device simulation software
-and used mainly throuhg the latter. Several paramterizations are available for
+Uptight has been interfaced to TiberCAD multiscale device simulation software
+and used mainly through the latter. Several paramterizations are available for
 III-V and III-nitride materials, Si, Ge, and in limited amount for 2D materials.
 
 If you use uptight in your work, you may consider citing the following work,
