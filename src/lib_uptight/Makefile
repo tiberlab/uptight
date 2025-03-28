@@ -102,12 +102,15 @@ endif
 # UPTIGHT_linux_sige_QW_LAPACK: $(OBJECTS)
 
 
-all: UPT_TEST6 UPT_TEST7
+all: UPT_TEST6 UPT_TEST7 PARAMETERIZER
 
 UPT_TEST6: test6.o f_exceptions.o $(OBJECTS)  
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
 UPT_TEST7: test7.o f_exceptions.o $(OBJECTS) 
+		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
+
+PARAMETERIZER: parameterizer.o f_exceptions.o $(OBJECTS) 
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
 pUPT: test8.o f_exceptions.o  $(OBJECTS) 
@@ -186,7 +189,7 @@ $(SOURCES):
 
 .PHONY: clean check
 clean:
-	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 pUPT
+	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT
 
 check:
 	@echo $(have_cuda)
