@@ -1,3 +1,8 @@
 *.o
 *.mod
 *~
+config.log
+config.status
+make.common
+src/lib_uptight/PARAMETERIZER
+src/lib_uptight/uptight.a

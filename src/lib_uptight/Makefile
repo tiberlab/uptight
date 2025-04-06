@@ -17,6 +17,9 @@ FPPFLAGS += -D__COMPDATE='"$(shell date +'%F')"'
 
 #LIBMPI=-L$(MPILIB)
 
+# Link against LAPACK and BLAS libraries
+LIBMKLIB += -llapack -lblas
+
 #LIBS =	$(LIBMKL) $(LIBMPI) $(LIBCUDA) 
 
 ifdef UPT_MPI
@@ -102,20 +105,20 @@ endif
 # UPTIGHT_linux_sige_QW_LAPACK: $(OBJECTS)
 
 
-all: UPT_TEST6 UPT_TEST7 PARAMETERIZER
+all: PARAMETERIZER
 
-UPT_TEST6: test6.o f_exceptions.o $(OBJECTS)  
-		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
+# UPT_TEST6: test6.o f_exceptions.o $(OBJECTS)  
+#		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
-UPT_TEST7: test7.o f_exceptions.o $(OBJECTS) 
-		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
+# UPT_TEST7: test7.o f_exceptions.o $(OBJECTS) 
+#		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
 PARAMETERIZER: parameterizer.o f_exceptions.o $(OBJECTS) 
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
-pUPT: test8.o f_exceptions.o  $(OBJECTS) 
-		@$(FC) $(SHOW) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
-		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
+# pUPT: test8.o f_exceptions.o  $(OBJECTS) 
+#		@$(FC) $(SHOW) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
+#		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
 
 
 getdist: $(OBJECTS) f_exceptions.o getdist.o 
@@ -199,5 +202,3 @@ tar_source:
 
 
 include ./Makefile.dep
-
-
