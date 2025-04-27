@@ -65,4 +65,13 @@ MODULE globals
 
   INTEGER, PUBLIC, PARAMETER :: n_intra = 7 !Tan: intra couplings
   
+! --- Magnetic Field Parameters ---
+  INTEGER, PUBLIC, PARAMETER :: GAUGE_NONE = 0
+  INTEGER, PUBLIC, PARAMETER :: GAUGE_LANDAU_Z = 1
+  INTEGER, PUBLIC, PARAMETER :: GAUGE_SYMMETRIC_Z = 2
+
+  LOGICAL, PUBLIC :: use_magnetic_field = .FALSE.
+  REAL(dp), PUBLIC, DIMENSION(3) :: magnetic_field_vector = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+  INTEGER, PUBLIC :: gauge_choice = GAUGE_NONE
+  ! --- End Magnetic Field Parameters ---
 END MODULE globals

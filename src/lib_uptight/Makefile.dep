@@ -29,7 +29,7 @@ rota.o: rota.f90
 savemofile.o: savemofile.f90 sort.o constants.o errors.o type_defs.o checks.o upt_param.o globals.o precision.o input_output.o
 type_defs.o: type_defs.f90 globals.o mpi_globals.o exceptions.o precision.o
 upt_param.o: upt_param.f90 globals.o neighbours.o sparse_matrix.o type_defs.o precision.o
-TB_ham.o: TB_ham.f90 rota.o input_output.o neighbours.o exceptions.o constants.o latt_fun.o sparse_matrix.o type_defs.o checks.o upt_param.o mpi_globals.o allocation.o errors.o globals.o sort.o sparse_numrec.o precision.o listtypes.o
+TB_ham.o: TB_ham.f90 rota.o input_output.o neighbours.o exceptions.o constants.o latt_fun.o sparse_matrix.o type_defs.o checks.o upt_param.o mpi_globals.o allocation.o errors.o globals.o sort.o sparse_numrec.o precision.o listtypes.o magnetic_gauge.o
 vectors.o: vectors.f90 precision.o
 sort.o: sort.f90 exceptions.o precision.o
 sparse_matrix.o: sparse_matrix.f90 globals.o exceptions.o precision.o
@@ -44,3 +44,7 @@ test6.o: test6.f90 uptight.o
 test7.o: test7.f90 uptight.o 
 test8.o: test8.F90 uptight.o 
 #JD_N_PC_Mxprec_ll_cuda.o
+
+parameterizer.o: parameterizer.f90 precision.o globals.o upt_param.o struct_building.o neighbours.o input_data.o type_defs.o states_and_couplings.o alloys.o TB_ham.o lanczos_driver.o lapack_driver.o sparse_matrix.o uptight.o input_output.o f_exceptions.o
+
+test_magnetic.o: test_magnetic.f90 precision.o globals.o upt_param.o struct_building.o neighbours.o input_data.o type_defs.o states_and_couplings.o alloys.o TB_ham.o lanczos_driver.o lapack_driver.o sparse_matrix.o uptight.o input_output.o f_exceptions.o

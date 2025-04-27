@@ -6,3 +6,5 @@ config.status
 make.common
 src/lib_uptight/PARAMETERIZER
 src/lib_uptight/uptight.a
+src/lib_uptight/TEST_MAGNETIC
+src/tests/magnetic_field_test/herm_check.dat

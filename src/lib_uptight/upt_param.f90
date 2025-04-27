@@ -109,6 +109,12 @@ module upt_param
 
      REAL(sp) :: estimate_factor    ! for estimating Hamil size
 
+     ! --- Magnetic Field Parameters ---
+     LOGICAL :: use_magnetic_field
+     REAL(dp), DIMENSION(3) :: magnetic_field_vector
+     INTEGER :: gauge_choice
+     ! --- End Magnetic Field Parameters ---
+
   end type OUPT
 
 contains
@@ -173,6 +179,12 @@ contains
    upt%seed_flag = .true.  ! random start or use old vector
 
    upt%estimate_factor = 1.0
+
+   ! --- Magnetic Field Defaults ---
+   upt%use_magnetic_field = .FALSE.
+   upt%magnetic_field_vector(:) = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+   upt%gauge_choice = GAUGE_NONE
+   ! --- End Magnetic Field Defaults ---
 
  end subroutine set_defaults
 

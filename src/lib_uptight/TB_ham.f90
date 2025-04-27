@@ -44,6 +44,8 @@ MODULE TB_ham
   USE input_output
   USE crystal_field_d
   USE sort
+  USE magnetic_gauge, only : calculate_peierls_phase
+  USE globals, only : magnetic_field_vector, gauge_choice ! Added for Peierls
   !===========================================================================
 
   IMPLICIT NONE
@@ -235,8 +237,8 @@ CONTAINS
     INTEGER :: n_ham     !Hamiltonian size
     INTEGER :: poldir    !Polarization direction
     REAL ( dp ), DIMENSION( 3 )  :: veck    ! k-vector 
-    REAL ( dp ), DIMENSION( 3 )  :: c_axis  ! c_axis for wurtzites 
-    REAL ( dp ), DIMENSION(3,3)  :: rec_latt 
+    REAL ( dp ), DIMENSION( 3 )  :: c_axis  ! c_axis for wurtzites
+    REAL ( dp ), DIMENSION(3,3)  :: rec_latt
     !CHARACTER(5), DIMENSION(:), POINTER :: ref_couplings
     CHARACTER(1) :: sparse_format
     INTEGER(8) :: mem
@@ -319,7 +321,7 @@ CONTAINS
     INTEGER, DIMENSION(:), ALLOCATABLE :: col_start
 
     LOGICAL :: value_test, dg_bond, tmp_scale, ons_mix
-
+    COMPLEX(dp) :: peierls_phase_factor ! Added for Peierls
     CHARACTER ( LEN = 10 ) :: scheme !the ETB scheme ('tan','jancu')
     CHARACTER ( LEN = 5 ), DIMENSION(n_intra) :: name_intra
     REAL(dp) :: dist_phase
@@ -1043,8 +1045,12 @@ CONTAINS
 
                 CALL koster_slater(cos_latt, tb_cpl, tb_bloc)
 
-                hydro( i_dg_a )%mat(:, 1) = exp_fac * tb_bloc(1:size(hydro( i_dg_a )%mat), 1)
-               
+                ! Calculate Peierls phase factor
+                peierls_phase_factor = calculate_peierls_phase(basis%coord(:, i_a), basis%coord(:, i_b), &
+                                                               magnetic_field_vector, gauge_choice)
+
+                hydro( i_dg_a )%mat(:, 1) = exp_fac * peierls_phase_factor * tb_bloc(1:size(hydro( i_dg_a )%mat), 1)
+
              ELSE
 
                 IF (scheme .EQ. 'tan') THEN
@@ -1100,13 +1106,18 @@ CONTAINS
                 !IF (i_a .EQ. p_start) THEN
                 !  print*,'tb_bloc: ', tb_bloc
                 !ENDIF
+
+                ! Calculate Peierls phase factor (after tb_bloc is computed)
+                peierls_phase_factor = calculate_peierls_phase(basis%coord(:, i_a), basis%coord(:, i_b), &
+                                                               magnetic_field_vector, gauge_choice)
+
                 b_ref(1:n_st_b)= mat_data(i_b_mat)%ion(i_b_ion)%ind_ref(1:n_st_b)
 
                 ! different atoms can have different orbital sets
                 DO a_st = 1, n_st_a 
                   DO b_st = 1, n_st_b 
                     cpl(i_cpl)%mat(a_st,b_st) = cpl(i_cpl)%mat(a_st,b_st) &
-                                                + exp_fac * tb_bloc(a_ref(a_st), b_ref(b_st))
+                                                + exp_fac * peierls_phase_factor * tb_bloc(a_ref(a_st), b_ref(b_st))
                   END DO
                 END DO
                 

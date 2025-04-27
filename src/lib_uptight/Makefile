@@ -65,8 +65,9 @@ SOURCES = precision.f90 \
  	  JD_driver.f90 \
  	  lapack_driver.f90 \
  	  savemofile.f90 \
- 	  f_exceptions.f90 #\
- 	  #feast_driver.f90 
+ 	  f_exceptions.f90 \
+ 	       magnetic_gauge.f90 #\
+ 	  #feast_driver.f90
 
 SOURCES2 = mpi_globals.F90 \
 	   exceptions.F90 \
@@ -104,8 +105,8 @@ endif
 # UPTIGHT_linux_sige_LAPACK: $(OBJECTS)
 # UPTIGHT_linux_sige_QW_LAPACK: $(OBJECTS)
 
+all: PARAMETERIZER TEST_MAGNETIC
 
-all: PARAMETERIZER
 
 # UPT_TEST6: test6.o f_exceptions.o $(OBJECTS)  
 #		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
@@ -116,7 +117,10 @@ all: PARAMETERIZER
 PARAMETERIZER: parameterizer.o f_exceptions.o $(OBJECTS) 
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
-# pUPT: test8.o f_exceptions.o  $(OBJECTS) 
+TEST_MAGNETIC: test_magnetic.o f_exceptions.o $(OBJECTS)
+		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
+
+# pUPT: test8.o f_exceptions.o  $(OBJECTS)
 #		@$(FC) $(SHOW) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
 #		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
 
@@ -192,7 +196,7 @@ $(SOURCES):
 
 .PHONY: clean check
 clean:
-	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT
+	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT TEST_MAGNETIC
 
 check:
 	@echo $(have_cuda)
