@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 ############################################################################
 #
 #  Produces bindings based Fortran 95 procedures
@@ -33,7 +33,7 @@ PAT_ARG_SEP = re.compile(r"""\s*,\s*""", REFLAGS)
 
 PAT_MODULE_DEF = re.compile(r"""use\s+(?P<name>\w+)\s*""", REFLAGS)
 
-PAT_PARANTHESIS = re.compile(r"""(?P<obj>\w+)(?:\((?P<arg>[^\)]*)\))?""",
+PAT_PARENTHESIS = re.compile(r"""(?P<obj>\w+)(?:\((?P<arg>[^\)]*)\))?""",
                              REFLAGS)
 
 
@@ -71,7 +71,7 @@ class Subroutine(object):
 ############################################################################
 
 def parse(txt):
-
+  
   start = 0
   match = PAT_SUBROUTINE.search(txt, start)
   tree = []
@@ -83,6 +83,9 @@ def parse(txt):
     newSub.modules = []
     newSub.varDefs = {}
     defLines = match.group("defs").strip().split("\n")
+    # Strip away bind(c) stuff
+    if "bind(" in defLines[0]:
+        defLines.pop(0)
     for defLine in defLines:
       split = defLine.split("!", 1)
       if len(split) == 2:
@@ -103,7 +106,7 @@ def parse(txt):
             split2 = split[0].split("::", 1)
             split3 = split2[0].split(",", 1)
             varNameAndArgs = split2[1].strip()
-            match3 = PAT_PARANTHESIS.search(varNameAndArgs)
+            match3 = PAT_PARENTHESIS.search(varNameAndArgs)
             varName = match3.group("obj")
             varArgStr = match3.group("arg")
             if varArgStr:
@@ -124,10 +127,9 @@ def parse(txt):
                                          attribs)
             else:
               raise ParserError("Invalid variable information '%s'" % minfo)
-
     tree.append(newSub)
     match = PAT_SUBROUTINE.search(txt, match.end())
-    
+  
   return tree
 
 
@@ -245,7 +247,7 @@ class FormatterF95(Formatter):
         argProps = sub.varDefs[argName]
         varArgs = argProps[0]
         varType = argProps[1]
-        if self.userTypeMap.has_key(varType):
+        if varType in self.userTypeMap.keys():
           varType = self.userTypeMap[varType]
         if argProps[2] == INTENT_IN:
           varIntent = "intent(in)"
@@ -278,10 +280,18 @@ class FormatterF95(Formatter):
 class FormatterC(Formatter):
   """Formatter for C output"""
 
-  typeMap = { "integer": ("int", True),
+  typeMap = { "integer(c_int)": ("int", True),
+              "integer": ("int", True),
+              "character(kind=c_char)": ("char", True),
               "character": ("char", True),
-              "real" : ("float", True),
-              "complex" : ("complex", True),
+              "real(c_double)" : ("double", True),
+              "real" : ("double", True),
+              "complex(c_double_complex)" : ("double _Complex", True),
+              "complex" : ("double _Complex", True),
+              "logical(c_bool)" : ("bool", True), # is bool native type in C? If not, this must change
+              "type(lnparams)" : ("struct lnparams", True),
+              "type(c_ptr)" : ("double *", False),
+              "type(MPI_Comm)" : ("MPI_Fint", False)
               }
               
 
@@ -371,15 +381,18 @@ class FormatterC(Formatter):
         argProps = sub.varDefs[argName]
         varType = argProps[1]
         varIntent = argProps[2]
-        if self.typeMap.has_key(varType):
+        ref = "*"
+        if "value" in argProps[3]:
+            ref = ""
+        if varType in self.typeMap.keys():
           (cVarType, isScalar) = self.typeMap[varType]
         else:
           raise FormatterError("No corresponding C-type for '%s'" % varType)
         strConst = varIntent == INTENT_IN and "const " or ""
         if self.printVarNames:
-          cargs.append("%s%s *%s" % (strConst, cVarType, argName))
+          cargs.append("%s%s %s%s" % (strConst, cVarType, ref, argName))
         else:
-          cargs.append("%s%s *" % (strConst, cVarType))
+          cargs.append("%s%s %s" % (strConst, cVarType, ref))
         if self.printOrigTypes:
           if varIntent == INTENT_IN:
             strIntent = "intent(in)"
@@ -392,7 +405,7 @@ class FormatterC(Formatter):
           varArgs = argProps[0]
           varAttrs = argProps[3]
           strArgs = varArgs and "(%s)" % ", ".join(varArgs) or ""
-          strAttrs = varAttrs and ", %s" % ", ".join(attribs) or ""
+          strAttrs = varAttrs and ", %s" % ", ".join(varAttrs) or ""
           comments.append("%s%s, %s :: %s%s" % (varType, strAttrs, strIntent,
                                              argName, strArgs))
           
@@ -417,10 +430,18 @@ class FormatterCpp(FormatterC):
 
   # Substitution of fortran types into C++ types. Boolean flag signalises
   # if the resulting C++-type is a scalar (True) or an array (False)
-  typeMap = { "integer": ("f77_int", True),
-              "character": ("f77_char", True),
-              "real" : ("f77_float", True),
-	      "complex" : ("f77_complex", True),
+  typeMap = { "integer(c_int)": ("int", True),
+              "integer": ("int", True),
+              "character(kind=c_char)": ("char", True),
+              "character": ("char", True),
+              "real(c_double)" : ("double", True),
+              "real" : ("double", True),
+              "complex(c_double_complex)" : ("std::complex<double>", True),
+              "complex" : ("std::complex<double>", True),
+              "logical(c_bool)" : ("bool", True),
+              "type(lnparams)" : ("struct lnparams", True),
+              "type(c_ptr)" : ("double *", False),
+              "type(MPI_Comm)" : ("MPI_Fint", True)
               }
 
   def format(self, tree):
@@ -429,31 +450,31 @@ class FormatterCpp(FormatterC):
     out = [ self.startText, ]
     for sub in tree:
       externDecl = []           # Declaration for the "extern" routine
-      wrapDef = []              # Definition for the wrapper function
       if self.upperCase:
         name = sub.name.upper()
       else:
         name = sub.name
-      externDecl.append("extern \"C\" void %s%s%s ("
-                        % (self.funcPrefix, name, self.funcSuffix))
-      wrapDef.append("inline void f77_%s (" % name)
-      externDeclArgs = []       # Arguments of the external function
-      wrapDefArgs = []          # Arguments of the wrapper function
-      wrapCallArgs = []         # Arguments for calling external from wrapper
+      externDecl.append("extern \"C\"")
+      wrapCallArgs = []         # Arguments of functions
       comments = []
       for argName in sub.argNames:
         argProps = sub.varDefs[argName]
         varArgs = argProps[0]    # List of arguments (array dimensions)
         varType = argProps[1]    # Type of the variable
         varIntent = argProps[2]  # Intent of the variabe
-        if self.typeMap.has_key(varType):
+        if varType in self.typeMap.keys():
           (cVarType, isScalar) = self.typeMap[varType]
         else:
           raise FormatterError("No corresponding C++-type for '%s'" % varType)
+
         if varIntent == INTENT_IN:
           if varArgs == None and isScalar:
-            # intent(in) scalar variables mapped to const&,
-            strVarType = "%s const&" % cVarType
+            if "value" in argProps[3]:
+              # intent(in), value scalar variables passed by value,
+              strVarType = "%s" % cVarType
+            else:
+              # intent(in) scalar variables mapped to const&,
+              strVarType = "%s const&" % cVarType
           else:
             # intent(in) array variables mapped to const*
             strVarType = "%s const*" % cVarType
@@ -464,12 +485,7 @@ class FormatterCpp(FormatterC):
           else:
             # intent(out), intent(inout) array variables mapped to *
             strVarType = "%s*" % cVarType
-        wrapDefArgs.append("%s %s" % (strVarType, argName))
-        if self.printVarNames:
-          externDeclArgs.append("%s %s" % (strVarType, argName))
-        else:
-          externDeclArgs.append("%s" % (strVarType,))
-        wrapCallArgs.append(argName)
+        wrapCallArgs.append("%s %s" % (strVarType, argName))
 
         # Creating comment
         if self.printOrigTypes:
@@ -484,28 +500,23 @@ class FormatterCpp(FormatterC):
           varArgs = argProps[0]
           varAttrs = argProps[3]
           strArgs = varArgs and "(%s)" % ", ".join(varArgs) or ""
-          strAttrs = varAttrs and ", %s" % ", ".join(attribs) or ""
+          strAttrs = varAttrs and ", %s" % ", ".join(varAttrs) or ""
           comments.append("%s%s, %s :: %s%s" % (varType, strAttrs, strIntent,
                                              argName, strArgs))
-      # Printing out the external declaration        
-      externDecl.append(", ".join(externDeclArgs))
-      externDecl.append(");")
-      out.append(self.fold("".join(externDecl), 0))
-      out.append("")
-
+          
       # Printing out the corresponding Fortran 77 types, if needed
       if self.printOrigTypes:
         indent = self.indentInit * " "
-        out.append("%s// Corresponding F77 arguments for f77_%s:"
+        out.append("%s// Corresponding F77 arguments for %s:"
                    % (indent, name))
         out.append("%s// %s" % (indent, ("\n%s// " % indent).join(comments),))
 
-      # Printing out the wrapper functions
-      wrapDef.append(", ".join(wrapDefArgs))
-      wrapDef.append(")")
-      out.append(self.fold("".join(wrapDef), 0));
+      out.append(self.fold("".join(externDecl), 0))
+      out.append("")
+
+      # # Printing out the function arguments line
       out.append("{")
-      line = [ "%s%s%s (" % (self.funcPrefix, name, self.funcSuffix),
+      line = [ "void %s%s%s (" % (self.funcPrefix, name, self.funcSuffix),
                ", ".join(wrapCallArgs), ");" ]
       out.append(self.fold("".join(line),1));
       out.append("}")
@@ -524,7 +535,7 @@ def error(msg):
   """Prints an error message and stops the script.
   msg  --  Error message to print.
   """
-  print "ERROR: %s" % msg
+  print("ERROR: %s" % msg)
   sys.exit()
   
 
@@ -637,7 +648,7 @@ and dumps out the interface definitions to stdout.""" % scriptName
   tree = parse(txt)
 
   # Dump out in the required format
-  print formatter.format(tree)
+  print(formatter.format(tree))
 
 
 ### Local Variables:
