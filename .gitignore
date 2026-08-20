@@ -6,3 +6,11 @@ config.status
 make.common
 src/lib_uptight/PARAMETERIZER
 src/lib_uptight/uptight.a
+src/lib_uptight/INISHELL_INTERFACE
+TEST/INIshell/etb.csv
+TEST/INIshell/GaN.etb
+TEST/INIshell/kpoints
+TEST/INIshell/tb.upg
+TEST/INIshell/test_GUI.ini
+/src/lib_uptight/from_CPA
+src/lib_uptight/test_CPA

@@ -107,6 +107,53 @@ endif
 
 all: PARAMETERIZER
 
+#=============================================================================
+# CPA multi-component extension
+#
+# New source files (placed in this directory alongside existing sources):
+#   kmesh_gen.f90      from from_CPA/ prototype (unchanged)
+#   cpa_linalg.f90     from from_CPA/ prototype (unchanged)
+#   TB_ham_min.f90     from from_CPA/ prototype (unchanged)
+#   cpa_multi_types.f90
+#   cpa_config.f90
+#   cpa_multi_build.f90
+#   cpa_multi_hk.f90
+#   cpa_multi_solver.f90
+#   test_CPA.f90       (driver)
+#
+# Compile order follows module dependencies:
+#   precision, globals -> cpa_multi_types
+#   input_output, input_data, states_and_couplings -> cpa_config, cpa_multi_build
+#   cpa_multi_types, TB_ham_min -> cpa_multi_hk
+#   cpa_multi_hk, cpa_linalg -> cpa_multi_solver
+#   all above + kmesh_gen -> test_CPA
+#=============================================================================
+
+CPA_SOURCES = from_CPA/kmesh_gen.f90 \
+              from_CPA/cpa_linalg.f90 \
+              from_CPA/TB_ham_min.f90 \
+              cpa_multi_types.f90 \
+              cpa_config.f90 \
+              cpa_multi_build.f90 \
+              cpa_multi_hk.f90 \
+              cpa_multi_solver.f90
+
+CPA_OBJECTS = kmesh_gen.o cpa_linalg.o TB_ham_min.o \
+              cpa_multi_types.o cpa_config.o cpa_multi_build.o \
+              cpa_multi_hk.o cpa_multi_solver.o
+
+test_CPA: test_CPA.o f_exceptions.o $(CPA_OBJECTS) $(OBJECTS)
+	$(FC) $(LDFLAGS) -o $@ $^ $(LFLAGS) $(LIBMKLIB)
+
+kmesh_gen.o: from_CPA/kmesh_gen.f90
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+cpa_linalg.o: from_CPA/cpa_linalg.f90
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+TB_ham_min.o: from_CPA/TB_ham_min.f90
+	$(FC) -c $(FFLAGS) -o $@ $<
+
 # UPT_TEST6: test6.o f_exceptions.o $(OBJECTS)  
 #		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 

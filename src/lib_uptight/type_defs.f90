@@ -818,6 +818,18 @@ contains
      if(associated(pair%cpl))     DEALLOCATE( pair%cpl )
      if(associated(pair%energy))  DEALLOCATE( pair%energy )
      if(associated(pair%scaling)) DEALLOCATE( pair%scaling )
+     
+     ! Deallocate Tan scheme arrays (memory leak fix)
+     if(associated(pair%fac_I))   DEALLOCATE( pair%fac_I )
+     if(associated(pair%l_I))     DEALLOCATE( pair%l_I )
+     if(associated(pair%fac_so))  DEALLOCATE( pair%fac_so )
+     if(associated(pair%ons_corr)) DEALLOCATE( pair%ons_corr )
+     if(associated(pair%so_corr)) DEALLOCATE( pair%so_corr )
+     if(associated(pair%intra))   DEALLOCATE( pair%intra )
+     if(associated(pair%fac_P))   DEALLOCATE( pair%fac_P )
+     if(associated(pair%fac_S))   DEALLOCATE( pair%fac_S )
+     if(associated(pair%fac_Q))   DEALLOCATE( pair%fac_Q )
+     if(associated(pair%fac_C))   DEALLOCATE( pair%fac_C )
 
    end subroutine destroy_pair_coupling
    ! ---------------------------------------------------------- 
