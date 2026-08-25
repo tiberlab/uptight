@@ -313,28 +313,16 @@ CONTAINS
 
     INTEGER :: i_E, i_kp, i_orb, ierr, file_num
     
-    ! Peak detection at Gamma
-    INTEGER :: i_gamma
-    REAL(dp), ALLOCATABLE :: E_array(:), A_gamma(:)
-    REAL(dp), ALLOCATABLE :: peak_energies(:)
-    INTEGER :: n_peaks
+    ! VBM/CBM detection across all (k,E)
+    REAL(dp), ALLOCATABLE :: A_matrix(:,:)
+    REAL(dp) :: VBM_E, VBM_k, CBM_E, CBM_k, band_gap
+    LOGICAL :: found_VBM, found_CBM
 
     lwork = NDIM * NDIM
     ALLOCATE(work_arr(lwork))
-    ALLOCATE(E_array(n_E), A_gamma(n_E))
+    ALLOCATE(A_matrix(n_k_path, n_E))
 
     !=========================================================================
-
-    ! Find Gamma point index (k = [0,0,0])
-    i_gamma = -1
-    DO i_kp = 1, n_k_path
-      IF ( ABS(kpts_path(1,i_kp)) < 1.0d-6 .AND. &
-           ABS(kpts_path(2,i_kp)) < 1.0d-6 .AND. &
-           ABS(kpts_path(3,i_kp)) < 1.0d-6 ) THEN
-        i_gamma = i_kp
-        EXIT
-      END IF
-    END DO
 
     OPEN( NEWUNIT=file_num, FILE=TRIM(output_filename), STATUS='REPLACE', ACTION='WRITE' )
 
@@ -372,9 +360,6 @@ CONTAINS
       ! Step 2: Compute A(k,E) along k-path using converged sigma
       !------------------------------------------------------------------------
 
-      ! Store energy value
-      E_array(i_E) = E
-
       DO i_kp = 1, n_k_path
 
         CALL build_multi_HK( kpts_path(:,i_kp), params, sigma1, sigma2, HK )
@@ -398,12 +383,8 @@ CONTAINS
           A_kE = A_kE - AIMAG(Gk(i_orb,i_orb)) / pi
         END DO
 
+        A_matrix(i_kp, i_E) = A_kE
         WRITE(file_num, '(3(es16.8))') k_dist(i_kp), E, A_kE
-        
-        ! Store A at Gamma for peak detection
-        IF ( i_kp == i_gamma .AND. i_gamma > 0 ) THEN
-          A_gamma(i_E) = A_kE
-        END IF
 
       END DO
 
@@ -415,13 +396,38 @@ CONTAINS
     CLOSE(file_num)
 
     !=========================================================================
-    ! Peak detection and band gap analysis at Gamma
+    ! VBM/CBM detection and band gap analysis
     !=========================================================================
 
-    IF ( i_gamma > 0 ) THEN
-      CALL detect_peaks_and_report( E_array, A_gamma, n_E )
+    CALL detect_VBM_CBM_bandgap( A_matrix, k_dist, E_min, E_max, n_k_path, n_E, &
+                                  VBM_E, VBM_k, CBM_E, CBM_k, &
+                                  found_VBM, found_CBM )
+
+    IF ( found_VBM .AND. found_CBM ) THEN
+      band_gap = CBM_E - VBM_E
+      
+      WRITE(*,'(a)') ' ============================================'
+      WRITE(*,'(a)') ' Band Structure Analysis'
+      WRITE(*,'(a)') ' ============================================'
+      WRITE(*,'(a,f10.5,a,f10.5)') ' VBM:  E = ', VBM_E, ' eV,  k-dist = ', VBM_k
+      WRITE(*,'(a,f10.5,a,f10.5)') ' CBM:  E = ', CBM_E, ' eV,  k-dist = ', CBM_k
+      WRITE(*,'(a,f10.5,a)') ' Band Gap: ', band_gap, ' eV'
+      
+      ! Check if direct or indirect
+      IF ( ABS(VBM_k - CBM_k) < 1.0d-6 ) THEN
+        WRITE(*,'(a)') ' Band Gap Type: DIRECT'
+      ELSE
+        WRITE(*,'(a)') ' Band Gap Type: INDIRECT'
+      END IF
+      WRITE(*,'(a)') ' ============================================'
     ELSE
-      WRITE(*,'(a)') ' WARNING: Gamma point not found in k-path, skipping peak analysis'
+      WRITE(*,'(a)') ' ============================================'
+      WRITE(*,'(a)') ' Band Structure Analysis'
+      WRITE(*,'(a)') ' ============================================'
+      IF ( .NOT. found_VBM ) WRITE(*,'(a)') ' VBM: Not found (no peak with E < 0)'
+      IF ( .NOT. found_CBM ) WRITE(*,'(a)') ' CBM: Not found (no peak with E > 0)'
+      WRITE(*,'(a)') ' Band Gap: Cannot determine'
+      WRITE(*,'(a)') ' ============================================'
     END IF
 
     WRITE(*,'(a)') ' ============================================'
@@ -430,141 +436,115 @@ CONTAINS
     WRITE(*,'(a,a,a)') '   set pm3d map; splot "', TRIM(output_filename), '" u 1:2:3'
     WRITE(*,'(a)') ' ============================================'
 
-    DEALLOCATE(work_arr, E_array, A_gamma)
+    DEALLOCATE(work_arr, A_matrix)
 
   END SUBROUTINE cpa_multi_compute_spectral_function
 
 
   !===========================================================================
-  ! Subroutine detect_peaks_and_report
+  ! Subroutine detect_VBM_CBM_bandgap
   !
-  ! Find local maxima (peaks) in A(Gamma, E) and report VBM, CBM, band gap.
+  ! Find VBM and CBM across all (k,E) points in the spectral function.
   !
-  ! Peak criterion: A(i) > A(i-1) AND A(i) > A(i+1) AND A(i) > threshold
-  ! where threshold = 0.05 * max(A_gamma) to filter noise
+  ! Strategy:
+  !   Step 1: For EACH k-point, identify two key peaks:
+  !           - VB_peak(k): highest-energy peak with E < 0
+  !           - CB_peak(k): lowest-energy peak with E > 0
+  !   Step 2: Among all k-points:
+  !           - VBM = highest VB_peak(k) across all k
+  !           - CBM = lowest CB_peak(k) across all k
+  !
+  ! Peak criterion: A(k,i_E) > A(k,i_E-1) AND A(k,i_E) > A(k,i_E+1) 
+  !                 AND A(k,i_E) > threshold
+  ! where threshold = 0.05 * max(A_matrix) to filter noise
   !===========================================================================
 
-  SUBROUTINE detect_peaks_and_report( E_array, A_gamma, n_E )
-    REAL(dp), DIMENSION(:), INTENT(IN) :: E_array, A_gamma
-    INTEGER,                INTENT(IN) :: n_E
+  SUBROUTINE detect_VBM_CBM_bandgap( A_matrix, k_dist, E_min, E_max, &
+                                      n_k_path, n_E, &
+                                      VBM_E, VBM_k, CBM_E, CBM_k, &
+                                      found_VBM, found_CBM )
 
-    REAL(dp), ALLOCATABLE :: peak_E(:)
-    INTEGER :: i, n_peaks, i_peak
-    REAL(dp) :: A_max, threshold, VBM, CBM, E_gap
-    LOGICAL :: found_VBM, found_CBM
+    REAL(dp), DIMENSION(:,:), INTENT(IN) :: A_matrix  ! (n_k_path, n_E)
+    REAL(dp), DIMENSION(:),   INTENT(IN) :: k_dist    ! (n_k_path)
+    REAL(dp),                 INTENT(IN) :: E_min, E_max
+    INTEGER,                  INTENT(IN) :: n_k_path, n_E
 
-    ! Threshold for peak detection (5% of max spectral function)
-    A_max = MAXVAL(A_gamma)
-    threshold = 0.05_dp * A_max
+    REAL(dp), INTENT(OUT) :: VBM_E, VBM_k, CBM_E, CBM_k
+    LOGICAL,  INTENT(OUT) :: found_VBM, found_CBM
 
-    ! Count peaks
-    n_peaks = 0
-    DO i = 2, n_E - 1
-      IF ( A_gamma(i) > A_gamma(i-1) .AND. &
-           A_gamma(i) > A_gamma(i+1) .AND. &
-           A_gamma(i) > threshold ) THEN
-        n_peaks = n_peaks + 1
-      END IF
-    END DO
+    REAL(dp) :: E, A_max, threshold
+    REAL(dp) :: VB_peak_E, CB_peak_E  ! Peaks at current k-point
+    LOGICAL  :: found_VB_at_k, found_CB_at_k
+    INTEGER  :: i_k, i_E
 
-    IF ( n_peaks == 0 ) THEN
-      WRITE(*,'(a)') ' ============================================'
-      WRITE(*,'(a)') ' Peak Analysis at Gamma: No peaks detected'
-      WRITE(*,'(a,es12.4)') '   (threshold = 5% of A_max = ', threshold, ')'
-      WRITE(*,'(a)') ' ============================================'
-      RETURN
-    END IF
-
-    ! Extract peak energies
-    ALLOCATE( peak_E(n_peaks) )
-    i_peak = 0
-    DO i = 2, n_E - 1
-      IF ( A_gamma(i) > A_gamma(i-1) .AND. &
-           A_gamma(i) > A_gamma(i+1) .AND. &
-           A_gamma(i) > threshold ) THEN
-        i_peak = i_peak + 1
-        peak_E(i_peak) = E_array(i)
-      END IF
-    END DO
-
-    ! Sort peak energies (bubble sort - fine for small n_peaks)
-    CALL sort_real_array( peak_E, n_peaks )
-
-    ! Identify VBM and CBM
-    ! VBM = highest peak with E < 0
-    ! CBM = lowest peak with E > 0
+    ! Initialize global VBM/CBM
+    VBM_E = -999.0_dp
+    VBM_k = 0.0_dp
+    CBM_E = 999.0_dp
+    CBM_k = 0.0_dp
     found_VBM = .FALSE.
     found_CBM = .FALSE.
-    VBM = -999.0_dp
-    CBM =  999.0_dp
 
-    DO i = 1, n_peaks
-      IF ( peak_E(i) < 0.0_dp ) THEN
-        VBM = peak_E(i)  ! Keep updating to get the highest (last one < 0)
+    ! Threshold for peak detection (5% of max spectral function)
+    A_max = MAXVAL(A_matrix)
+    threshold = 0.05_dp * A_max
+
+    ! Loop over all k-points
+    DO i_k = 1, n_k_path
+
+      ! Initialize peaks for this k-point
+      VB_peak_E = -999.0_dp
+      CB_peak_E = 999.0_dp
+      found_VB_at_k = .FALSE.
+      found_CB_at_k = .FALSE.
+
+      ! Step 1: Find VB and CB peaks at this k-point
+      DO i_E = 2, n_E - 1
+
+        ! Check if this is a local maximum
+        IF ( A_matrix(i_k, i_E) > A_matrix(i_k, i_E-1) .AND. &
+             A_matrix(i_k, i_E) > A_matrix(i_k, i_E+1) .AND. &
+             A_matrix(i_k, i_E) > threshold ) THEN
+
+          ! Calculate energy
+          IF ( n_E > 1 ) THEN
+            E = E_min + (E_max - E_min) * REAL(i_E - 1, dp) / REAL(n_E - 1, dp)
+          ELSE
+            E = E_min
+          END IF
+
+          ! Update VB peak: highest energy peak with E < 0
+          IF ( E < 0.0_dp .AND. E > VB_peak_E ) THEN
+            VB_peak_E = E
+            found_VB_at_k = .TRUE.
+          END IF
+
+          ! Update CB peak: lowest energy peak with E > 0
+          IF ( E > 0.0_dp .AND. E < CB_peak_E ) THEN
+            CB_peak_E = E
+            found_CB_at_k = .TRUE.
+          END IF
+
+        END IF
+
+      END DO
+
+      ! Step 2: Update global VBM (highest among all VB_peak_E)
+      IF ( found_VB_at_k .AND. VB_peak_E > VBM_E ) THEN
+        VBM_E = VB_peak_E
+        VBM_k = k_dist(i_k)
         found_VBM = .TRUE.
-      ELSE IF ( peak_E(i) > 0.0_dp .AND. .NOT. found_CBM ) THEN
-        CBM = peak_E(i)  ! First one > 0
+      END IF
+
+      ! Step 2: Update global CBM (lowest among all CB_peak_E)
+      IF ( found_CB_at_k .AND. CB_peak_E < CBM_E ) THEN
+        CBM_E = CB_peak_E
+        CBM_k = k_dist(i_k)
         found_CBM = .TRUE.
       END IF
+
     END DO
 
-    ! Report
-    WRITE(*,'(a)') ' ============================================'
-    WRITE(*,'(a)') ' Peak Analysis at Gamma Point'
-    WRITE(*,'(a)') ' ============================================'
-    WRITE(*,'(a,i4)') ' Number of peaks detected: ', n_peaks
-    WRITE(*,'(a)') ' Peak energies (eV), sorted:'
-    DO i = 1, n_peaks
-      WRITE(*,'(a,i4,a,f10.5)') '   Peak ', i, ':  E = ', peak_E(i)
-    END DO
-    WRITE(*,'(a)') ' --------------------------------------------'
-
-    IF ( found_VBM ) THEN
-      WRITE(*,'(a,f10.5,a)') ' VBM (Valence Band Maximum):  ', VBM, ' eV'
-    ELSE
-      WRITE(*,'(a)') ' VBM: Not found (no peak with E < 0)'
-    END IF
-
-    IF ( found_CBM ) THEN
-      WRITE(*,'(a,f10.5,a)') ' CBM (Conduction Band Minimum):', CBM, ' eV'
-    ELSE
-      WRITE(*,'(a)') ' CBM: Not found (no peak with E > 0)'
-    END IF
-
-    IF ( found_VBM .AND. found_CBM ) THEN
-      E_gap = CBM - VBM
-      WRITE(*,'(a,f10.5,a)') ' Band Gap (CBM - VBM):         ', E_gap, ' eV'
-    ELSE
-      WRITE(*,'(a)') ' Band Gap: Cannot determine'
-    END IF
-
-    WRITE(*,'(a)') ' ============================================'
-
-    DEALLOCATE(peak_E)
-
-  END SUBROUTINE detect_peaks_and_report
-
-
-  !===========================================================================
-  ! Simple bubble sort for real array (ascending order)
-  !===========================================================================
-
-  SUBROUTINE sort_real_array( arr, n )
-    REAL(dp), DIMENSION(:), INTENT(INOUT) :: arr
-    INTEGER,                INTENT(IN)    :: n
-    INTEGER :: i, j
-    REAL(dp) :: tmp
-
-    DO i = 1, n - 1
-      DO j = i + 1, n
-        IF ( arr(j) < arr(i) ) THEN
-          tmp    = arr(i)
-          arr(i) = arr(j)
-          arr(j) = tmp
-        END IF
-      END DO
-    END DO
-
-  END SUBROUTINE sort_real_array
+  END SUBROUTINE detect_VBM_CBM_bandgap
 
 END MODULE cpa_multi_solver
