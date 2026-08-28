@@ -110,10 +110,10 @@ all: PARAMETERIZER
 #=============================================================================
 # CPA multi-component extension
 #
-# New source files (placed in this directory alongside existing sources):
-#   kmesh_gen.f90      from from_CPA/ prototype (unchanged)
-#   cpa_linalg.f90     from from_CPA/ prototype (unchanged)
-#   TB_ham_min.f90     from from_CPA/ prototype (unchanged)
+# Source files (now in main lib_uptight directory):
+#   kmesh_gen.f90      (moved from from_CPA/)
+#   cpa_linalg.f90     (moved from from_CPA/)
+#   TB_ham_min.f90     (moved from from_CPA/)
 #   cpa_multi_types.f90
 #   cpa_config.f90
 #   cpa_multi_build.f90
@@ -129,9 +129,9 @@ all: PARAMETERIZER
 #   all above + kmesh_gen -> test_CPA
 #=============================================================================
 
-CPA_SOURCES = from_CPA/kmesh_gen.f90 \
-              from_CPA/cpa_linalg.f90 \
-              from_CPA/TB_ham_min.f90 \
+CPA_SOURCES = kmesh_gen.f90 \
+              cpa_linalg.f90 \
+              TB_ham_min.f90 \
               cpa_multi_types.f90 \
               cpa_config.f90 \
               cpa_multi_build.f90 \
@@ -145,13 +145,36 @@ CPA_OBJECTS = kmesh_gen.o cpa_linalg.o TB_ham_min.o \
 test_CPA: test_CPA.o f_exceptions.o $(CPA_OBJECTS) $(OBJECTS)
 	$(FC) $(LDFLAGS) -o $@ $^ $(LFLAGS) $(LIBMKLIB)
 
-kmesh_gen.o: from_CPA/kmesh_gen.f90
+# Explicit dependencies for CPA modules (order matters for Fortran modules)
+kmesh_gen.o: kmesh_gen.f90 precision.o
 	$(FC) -c $(FFLAGS) -o $@ $<
 
-cpa_linalg.o: from_CPA/cpa_linalg.f90
+cpa_linalg.o: cpa_linalg.f90 precision.o
 	$(FC) -c $(FFLAGS) -o $@ $<
 
-TB_ham_min.o: from_CPA/TB_ham_min.f90
+TB_ham_min.o: TB_ham_min.f90 precision.o globals.o
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+cpa_multi_types.o: cpa_multi_types.f90 precision.o globals.o
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+cpa_config.o: cpa_config.f90 precision.o input_output.o
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+cpa_multi_build.o: cpa_multi_build.f90 precision.o globals.o type_defs.o \
+                    input_data.o states_and_couplings.o cpa_config.o cpa_multi_types.o
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+cpa_multi_hk.o: cpa_multi_hk.f90 precision.o globals.o constants.o \
+                cpa_multi_types.o TB_ham_min.o
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+cpa_multi_solver.o: cpa_multi_solver.f90 precision.o globals.o constants.o \
+                     cpa_multi_types.o cpa_multi_hk.o cpa_linalg.o
+	$(FC) -c $(FFLAGS) -o $@ $<
+
+test_CPA.o: test_CPA.f90 precision.o globals.o cpa_config.o cpa_multi_types.o \
+            cpa_multi_build.o kmesh_gen.o cpa_multi_solver.o
 	$(FC) -c $(FFLAGS) -o $@ $<
 
 # UPT_TEST6: test6.o f_exceptions.o $(OBJECTS)  
@@ -239,7 +262,7 @@ $(SOURCES):
 
 .PHONY: clean check
 clean:
-	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT
+	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT test_CPA
 
 check:
 	@echo $(have_cuda)
