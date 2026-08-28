@@ -1,17 +1,49 @@
 ! cpa_multi_build.f90
 !
-! Build fully-populated cpa_multi_params from CPA config.
+! Build fully-populated cpa_multi_params from CPA config, under the
+! VCA-before-CPA scheme (see implementation_plan.md, "Critical Revision").
 !
 !   Onsite at a_vegard: ion%offset + ion%energy(alpha)  [bare]
 !     + Tan onsite correction (fac_I, fac_O) over 4 1NN bonds [Tan only]
 !   ion%offset = etb_file_offset + E_v  (E_v read from INIshell .dat)
 !
-!   SOC: ion%so_energy(1)  [bare]
-!     + 4 * so_corr_per_bond (fac_so) [Tan only]
+!   SOC (effective, per binary -- this is what enters VCA, never the bare
+!   value alone): ion%so_energy(1) [bare] + 4 * so_corr_per_bond (fac_so)
+!   [Tan only]. For Jancu scheme, effective == bare (no correction term
+!   exists in that scheme).
 !
 !   Hopping at dist_vegard:
 !     Jancu: energy * (dist_ref/dist_vegard)^scaling
 !     Tan:   energy * EXP(-scaling * (dist_vegard - dist_ref + delta_d))
+!
+! VCA-before-CPA aggregation (REVISED):
+!
+!   For each binary (i,j) we compute the BARE onsite/so_p of the sl1 atom
+!   (element sl1(i)) and the sl2 atom (element sl2(j)) exactly as before.
+!   These per-binary values are then accumulated into the REAL ELEMENT
+!   arrays, NOT kept as M*N independent pseudo-elements:
+!
+!     elem_sl1(i)%onsite = SUM_j  x2(j) * onsite1(binary i,j)
+!     elem_sl1(i)%so_p   = SUM_j  x2(j) * so_p1(binary i,j)      [1st VCA pass]
+!     elem_sl2(j)%onsite = SUM_i  x1(i) * onsite2(binary i,j)
+!     elem_sl2(j)%so_p   = SUM_i  x1(i) * so_p2(binary i,j)      [1st VCA pass]
+!
+!   Since sl1(i) and sl2(j) names are unique by construction (config sanity
+!   check forbids duplicates within sl1 or within sl2), n_real_elem_sl1 =
+!   n_sl1 and n_real_elem_sl2 = n_sl2: no name-merging is actually needed,
+!   only the VCA accumulation above.
+!
+!   Hopping remains a SINGLE VCA average over all M*N binaries (a bond has
+!   a unique pair identity and must never be grouped by element):
+!
+!     hopping_vca = SUM_{i,j} conc(i,j) * t_ij         conc(i,j) = x1(i)*x2(j)
+!
+!   SOC undergoes a SECOND VCA pass, over the real elements within each
+!   sublattice, to produce the single effective SOC used in the
+!   off-diagonal SOC block (SOC never enters the Soven CPA loop):
+!
+!     so_p_sl1_vca = SUM_i  x1(i) * elem_sl1(i)%so_p    [2nd VCA pass]
+!     so_p_sl2_vca = SUM_j  x2(j) * elem_sl2(j)%so_p    [2nd VCA pass]
 !
 MODULE cpa_multi_build
 
@@ -22,7 +54,7 @@ MODULE cpa_multi_build
   USE input_data,  ONLY : read_data
   USE states_and_couplings, ONLY : ref_states_and_couplings, sort_states
   USE cpa_config,  ONLY : cpa_config_t
-  USE cpa_multi_types, ONLY : cpa_multi_params, pseudo_element
+  USE cpa_multi_types, ONLY : cpa_multi_params, real_element
   USE globals,     ONLY : sps, pss, sses, sess, seps, pses, sds, dss, &
                           seds, dses, pds, dps, pdp, dpp
 
@@ -39,7 +71,7 @@ CONTAINS
     TYPE(cpa_config_t),     INTENT(IN)  :: cfg
     TYPE(cpa_multi_params), INTENT(OUT) :: params
 
-    INTEGER :: i, j, idx, n_pseudo
+    INTEGER :: i, j
     REAL(dp) :: conc_ij
     CHARACTER(LEN=LST) :: work_path
     TYPE(material_data) :: mat_ij
@@ -58,24 +90,34 @@ CONTAINS
 
     params%n_sl1     = cfg%n_sl1
     params%n_sl2     = cfg%n_sl2
-    params%n_pseudo1 = cfg%n_sl1 * cfg%n_sl2
-    params%n_pseudo2 = cfg%n_sl1 * cfg%n_sl2
+
+    ! sl1(:) and sl2(:) names are unique by config sanity check, so each
+    ! input element is its own distinct real element: no name-merging.
+    params%n_real_elem_sl1 = cfg%n_sl1
+    params%n_real_elem_sl2 = cfg%n_sl2
+
     params%scheme    = TRIM(cfg%scheme)
 
-    n_pseudo = params%n_pseudo1
-    ALLOCATE( params%pseudo1(n_pseudo), params%pseudo2(n_pseudo) )
+    ALLOCATE( params%elem_sl1(params%n_real_elem_sl1) )
+    ALLOCATE( params%elem_sl2(params%n_real_elem_sl2) )
     ALLOCATE( params%hopping_vca(n_ref_couplings) )
 
-    DO idx = 1, n_pseudo
-      ALLOCATE( params%pseudo1(idx)%onsite(n_ref_states) )
-      ALLOCATE( params%pseudo2(idx)%onsite(n_ref_states) )
-      params%pseudo1(idx)%onsite = 0.0_dp
-      params%pseudo2(idx)%onsite = 0.0_dp
-      params%pseudo1(idx)%so_p   = 0.0_dp
-      params%pseudo2(idx)%so_p   = 0.0_dp
-      params%pseudo1(idx)%conc   = 0.0_dp
-      params%pseudo2(idx)%conc   = 0.0_dp
+    DO i = 1, params%n_real_elem_sl1
+      ALLOCATE( params%elem_sl1(i)%onsite(n_ref_states) )
+      params%elem_sl1(i)%name   = cfg%sl1(i)
+      params%elem_sl1(i)%conc   = cfg%x1(i)
+      params%elem_sl1(i)%onsite = 0.0_dp
+      params%elem_sl1(i)%so_p   = 0.0_dp
     END DO
+
+    DO j = 1, params%n_real_elem_sl2
+      ALLOCATE( params%elem_sl2(j)%onsite(n_ref_states) )
+      params%elem_sl2(j)%name   = cfg%sl2(j)
+      params%elem_sl2(j)%conc   = cfg%x2(j)
+      params%elem_sl2(j)%onsite = 0.0_dp
+      params%elem_sl2(j)%so_p   = 0.0_dp
+    END DO
+
     params%hopping_vca  = 0.0_dp
     params%so_p_sl1_vca = 0.0_dp
     params%so_p_sl2_vca = 0.0_dp
@@ -94,19 +136,13 @@ CONTAINS
     WRITE(*,'(a,f12.6)') ' (cpa_multi_build) a_vegard  (Ang) = ', params%a_vegard
     WRITE(*,'(a,f12.6)') ' (cpa_multi_build) d_vegard  (Ang) = ', params%dist_vegard
 
-    !--- Per-binary loop ---
+    !--- Per-binary loop: compute bare onsite/so_p/hopping, then accumulate
+    !    into real-element (1st VCA pass, onsite+SOC) and into the global
+    !    hopping VCA average (single pass, never grouped by element) ---
     DO i = 1, cfg%n_sl1
       DO j = 1, cfg%n_sl2
 
-        idx     = (i-1)*cfg%n_sl2 + j
         conc_ij = cfg%x1(i) * cfg%x2(j)
-
-        params%pseudo1(idx)%idx_self  = i
-        params%pseudo1(idx)%idx_other = j
-        params%pseudo1(idx)%conc      = conc_ij
-        params%pseudo2(idx)%idx_self  = j
-        params%pseudo2(idx)%idx_other = i
-        params%pseudo2(idx)%conc      = conc_ij
 
         ! Init mat_ij: .etb filename + E_v from .dat
         CALL init_mat_data_for_binary( cfg, i, j, mat_ij )
@@ -141,8 +177,13 @@ CONTAINS
                params%dist_vegard, n_st_ion2, onsite2 )
         END IF
 
-        params%pseudo1(idx)%onsite = onsite1
-        params%pseudo2(idx)%onsite = onsite2
+        ! 1st VCA pass (onsite, by real element): conditional weight
+        ! elem_sl1(i) accumulates over j with weight x2(j);
+        ! elem_sl2(j) accumulates over i with weight x1(i).
+        params%elem_sl1(i)%onsite = params%elem_sl1(i)%onsite + &
+                                     cfg%x2(j) * onsite1
+        params%elem_sl2(j)%onsite = params%elem_sl2(j)%onsite + &
+                                     cfg%x1(i) * onsite2
 
         ! SOC: bare + Tan correction
         n_so = SIZE(mat_ij%parent(1)%ion(i_ion_sl1)%so_energy)
@@ -155,28 +196,57 @@ CONTAINS
           CALL add_tan_so_correction( mat_ij, cfg%sl2(j), so_p2 )
         END IF
 
-        params%pseudo1(idx)%so_p = so_p1
-        params%pseudo2(idx)%so_p = so_p2
+        ! 1st VCA pass (SOC, by real element): same conditional weight as onsite
+        params%elem_sl1(i)%so_p = params%elem_sl1(i)%so_p + cfg%x2(j) * so_p1
+        params%elem_sl2(j)%so_p = params%elem_sl2(j)%so_p + cfg%x1(i) * so_p2
 
-        ! Hopping VCA accumulation
+        ! Hopping VCA accumulation: single pass over all M*N binaries,
+        ! never grouped by real element (a bond has a unique pair identity).
         CALL compute_hopping_at_vegard( mat_ij, cfg%scheme, i_ion_sl1, i_ion_sl2, &
                                         params%dist_vegard, t_ij )
         params%hopping_vca  = params%hopping_vca  + conc_ij * t_ij
-        params%so_p_sl1_vca = params%so_p_sl1_vca + conc_ij * so_p1
-        params%so_p_sl2_vca = params%so_p_sl2_vca + conc_ij * so_p2
 
+        ! NOTE: so_p1/so_p2 here are the FINAL effective SOC for this binary
+        ! (bare so_energy(1) + Tan 4-bond fac_so correction, if scheme=tan).
+        ! For Jancu scheme, effective == bare (no correction applied). This
+        ! effective value, never the bare one, is what enters the 1st VCA
+        ! pass into elem_sl1(i)%so_p / elem_sl2(j)%so_p.
         WRITE(*,'(a,a,a,f8.4,a,f8.5,a,f8.5)') &
           ' (cpa_multi_build) ', TRIM(cfg%sl1(i))//TRIM(cfg%sl2(j)), &
           '  conc=', conc_ij, &
-          '  so_p(sl1)=', so_p1, '  so_p(sl2)=', so_p2
+          '  so_p1(effective,binary)=', so_p1, '  so_p2(effective,binary)=', so_p2
 
         CALL destroy_material( mat_ij )
 
       END DO
     END DO
 
-    WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl1_vca = ', params%so_p_sl1_vca
-    WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl2_vca = ', params%so_p_sl2_vca
+    ! 2nd VCA pass (SOC only): average the per-real-element SOC over the
+    ! sublattice using element concentrations. SOC never enters the Soven
+    ! CPA loop -- this is the single effective value used in the
+    ! off-diagonal SOC block of the Bloch Hamiltonian.
+    DO i = 1, params%n_real_elem_sl1
+      params%so_p_sl1_vca = params%so_p_sl1_vca + &
+                             params%elem_sl1(i)%conc * params%elem_sl1(i)%so_p
+    END DO
+    DO j = 1, params%n_real_elem_sl2
+      params%so_p_sl2_vca = params%so_p_sl2_vca + &
+                             params%elem_sl2(j)%conc * params%elem_sl2(j)%so_p
+    END DO
+
+    WRITE(*,'(a)') ' (cpa_multi_build) --- Real elements, sublattice 1 ---'
+    DO i = 1, params%n_real_elem_sl1
+      WRITE(*,'(a,a2,a,f8.4,a,f10.6)') '   ', params%elem_sl1(i)%name, &
+        '  conc=', params%elem_sl1(i)%conc, '  so_p(VCA,elem)=', params%elem_sl1(i)%so_p
+    END DO
+    WRITE(*,'(a)') ' (cpa_multi_build) --- Real elements, sublattice 2 ---'
+    DO j = 1, params%n_real_elem_sl2
+      WRITE(*,'(a,a2,a,f8.4,a,f10.6)') '   ', params%elem_sl2(j)%name, &
+        '  conc=', params%elem_sl2(j)%conc, '  so_p(VCA,elem)=', params%elem_sl2(j)%so_p
+    END DO
+
+    WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl1_vca (2nd VCA pass) = ', params%so_p_sl1_vca
+    WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl2_vca (2nd VCA pass) = ', params%so_p_sl2_vca
     WRITE(*,'(a,5f10.4)') ' (cpa_multi_build) hopping(1..5) = ', params%hopping_vca(1:5)
 
     DEALLOCATE( ref_states, ref_couplings )

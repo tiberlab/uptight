@@ -1,27 +1,37 @@
 ! cpa_multi_solver.f90
 !
-! N-component Soven self-consistency and spectral function for multi-component alloy.
+! N-component Soven self-consistency and spectral function for the
+! multi-component alloy, under the VCA-before-CPA scheme (see
+! implementation_plan.md, "Critical Revision").
 !
-! Generalizes cpa_solver.f90 to:
-!   - TWO self-energies: sigma1(n_ref_states) for sl1, sigma2 for sl2
-!   - n_pseudo1 = M*N pseudo-elements per sublattice (general N-component CPA)
-!   - The BZ-sum F_alpha is computed separately for each sublattice
+! REVISED: the Soven loop now runs over the REAL ELEMENTS of each
+! sublattice (elem_sl1(:), elem_sl2(:), sizes n_real_elem_sl1 /
+! n_real_elem_sl2), not over the M*N binaries. If a sublattice has only
+! ONE real element (no disorder there), its self-energy is fixed at the
+! (real, since imaginary part = 0) VCA onsite value of that element and
+! is NEVER updated by the Soven iteration -- there is no disorder to
+! self-consistently resum on that sublattice. If BOTH sublattices have
+! only one real element (pure binary case), no Soven iteration is
+! performed at all.
 !
-! Soven equation per orbital alpha, sublattice s (=1 or 2):
+! SOC is never part of the Soven loop (see cpa_multi_types.f90 /
+! cpa_multi_build.f90): it always enters build_multi_HK via the
+! precomputed so_p_sl1_vca / so_p_sl2_vca (2nd VCA pass).
+!
+! Soven equation per orbital alpha, sublattice s (=1 or 2), only for
+! sublattices with disorder (n_real_elem_s > 1):
 !
 !   F_alpha^s(z) = (1/N_k) SUM_k [ z*I - HK(k) ]^{-1}_{sl_s,alpha,alpha}
 !                  (spin-averaged: mean of up and down diagonal elements)
 !
-!   DO i = 1, n_pseudo_s
-!      v_i = pseudo_s(i)%onsite(alpha) - sigma_s_old(alpha)
+!   DO i = 1, n_real_elem_s
+!      v_i = elem_s(i)%onsite(alpha) - sigma_s_old(alpha)
 !      t_i = v_i / (1 - F_alpha^s * v_i)
 !   END DO
 !
-!   t_avg^s = SUM_i conc_i * t_i
+!   t_avg^s = SUM_i elem_s(i)%conc * t_i
 !
 !   sigma_s_new(alpha) = sigma_s_old(alpha) + t_avg^s / (1 + F_alpha^s * t_avg^s)
-!
-! Both sublattices are updated simultaneously within each Soven iteration.
 !
 ! Spectral function:
 !   A(k,E) = -(1/pi) * Im Tr[ G(k,E+i*eta) ]   (trace over all 4*n_ref_states)
@@ -63,6 +73,12 @@ CONTAINS
   !
   ! Solve sigma1(z) and sigma2(z) via Soven self-consistency for z=E+i*eta.
   !
+  ! If a sublattice has only one real element (n_real_elem_s == 1), its
+  ! self-energy is fixed to that element's VCA onsite (no disorder, no
+  ! Soven update). If BOTH sublattices have n_real_elem == 1, this routine
+  ! returns immediately with converged=.TRUE., n_iter_used=0, and no BZ
+  ! sum is ever performed.
+  !
   ! INPUT:
   !   E, eta        : energy and broadening (eta > 0)
   !   params        : cpa_multi_params
@@ -73,8 +89,8 @@ CONTAINS
   !   mixing_alpha  : linear mixing factor (1 = no mixing)
   !
   ! OUTPUT:
-  !   sigma1(n_ref_states) : converged CPA self-energy for sublattice 1
-  !   sigma2(n_ref_states) : converged CPA self-energy for sublattice 2
+  !   sigma1(n_ref_states) : converged (or fixed) self-energy for sublattice 1
+  !   sigma2(n_ref_states) : converged (or fixed) self-energy for sublattice 2
   !   converged            : .TRUE. if converged before max_iter
   !   n_iter_used          : actual number of iterations
   !===========================================================================
@@ -99,6 +115,8 @@ CONTAINS
     ! Local variables
     !=========================================================================
 
+    LOGICAL :: disorder_sl1, disorder_sl2
+
     COMPLEX(dp), DIMENSION(n_ref_states) :: sigma1_old, sigma1_new
     COMPLEX(dp), DIMENSION(n_ref_states) :: sigma2_old, sigma2_new
     COMPLEX(dp), DIMENSION(n_ref_states) :: F1_alpha, F2_alpha
@@ -114,6 +132,45 @@ CONTAINS
     INTEGER :: i_iter, i_k, i_orb, ierr, idx
     INTEGER :: off1_up, off1_dn, off2_up, off2_dn
 
+    !=========================================================================
+    ! Determine which sublattices carry disorder (n_real_elem > 1).
+    ! A sublattice with a single real element has NO CPA disorder: its
+    ! self-energy is fixed at that element's VCA onsite value (real,
+    ! imaginary part exactly zero) for the whole run.
+    !=========================================================================
+
+    disorder_sl1 = ( params%n_real_elem_sl1 > 1 )
+    disorder_sl2 = ( params%n_real_elem_sl2 > 1 )
+
+    sigma1_old = CMPLX(0.0_dp, 0.0_dp, dp)
+    sigma2_old = CMPLX(0.0_dp, 0.0_dp, dp)
+
+    DO idx = 1, params%n_real_elem_sl1
+      DO i_orb = 1, n_ref_states
+        sigma1_old(i_orb) = sigma1_old(i_orb) + &
+          params%elem_sl1(idx)%conc * params%elem_sl1(idx)%onsite(i_orb)
+      END DO
+    END DO
+    DO idx = 1, params%n_real_elem_sl2
+      DO i_orb = 1, n_ref_states
+        sigma2_old(i_orb) = sigma2_old(i_orb) + &
+          params%elem_sl2(idx)%conc * params%elem_sl2(idx)%onsite(i_orb)
+      END DO
+    END DO
+
+    !=========================================================================
+    ! Pure-binary shortcut: no disorder anywhere -> sigma = VCA onsite,
+    ! no Soven iteration, no BZ sum ever performed.
+    !=========================================================================
+
+    IF ( .NOT. disorder_sl1 .AND. .NOT. disorder_sl2 ) THEN
+      sigma1      = sigma1_old
+      sigma2      = sigma2_old
+      converged   = .TRUE.
+      n_iter_used = 0
+      RETURN
+    END IF
+
     lwork   = NDIM * NDIM
     ALLOCATE(work_arr(lwork))
     off1_up = 0
@@ -122,23 +179,6 @@ CONTAINS
     off2_dn = 3*n_ref_states
 
     z = CMPLX(E, eta, dp)
-
-    !=========================================================================
-    ! Initialize sigma from VCA (real, imaginary part = 0)
-    !   sigma_s(alpha) = SUM_i conc_i * pseudo_s(i)%onsite(alpha)
-    !=========================================================================
-
-    sigma1_old = CMPLX(0.0_dp, 0.0_dp, dp)
-    sigma2_old = CMPLX(0.0_dp, 0.0_dp, dp)
-
-    DO idx = 1, params%n_pseudo1
-      DO i_orb = 1, n_ref_states
-        sigma1_old(i_orb) = sigma1_old(i_orb) + &
-          params%pseudo1(idx)%conc * params%pseudo1(idx)%onsite(i_orb)
-        sigma2_old(i_orb) = sigma2_old(i_orb) + &
-          params%pseudo2(idx)%conc * params%pseudo2(idx)%onsite(i_orb)
-      END DO
-    END DO
 
     converged = .FALSE.
 
@@ -150,6 +190,8 @@ CONTAINS
 
       !------------------------------------------------------------------------
       ! Step 1: BZ sum for F1_alpha and F2_alpha
+      ! (still needed for both sublattices even if only one has disorder,
+      !  since HK couples sl1 and sl2 via hopping)
       !------------------------------------------------------------------------
 
       F1_alpha = CMPLX(0.0_dp, 0.0_dp, dp)
@@ -189,43 +231,47 @@ CONTAINS
       F2_alpha = F2_alpha / REAL(n_k, dp)
 
       !------------------------------------------------------------------------
-      ! Step 2: Soven update for sigma1 and sigma2, per orbital
+      ! Step 2: Soven update for sigma1 and sigma2, per orbital.
+      ! Only sublattices with disorder are updated; the other keeps its
+      ! fixed VCA onsite value (sigma_old carried through unchanged).
       !------------------------------------------------------------------------
 
-      sigma1_new = CMPLX(0.0_dp, 0.0_dp, dp)
-      sigma2_new = CMPLX(0.0_dp, 0.0_dp, dp)
+      sigma1_new = sigma1_old
+      sigma2_new = sigma2_old
 
       DO i_orb = 1, n_ref_states
 
-        !-- sublattice 1 --
-        t_avg = CMPLX(0.0_dp, 0.0_dp, dp)
-        DO idx = 1, params%n_pseudo1
-          v_i = CMPLX(params%pseudo1(idx)%onsite(i_orb), 0.0_dp, dp) - sigma1_old(i_orb)
-          t_i = v_i / ( CMPLX(1.0_dp,0.0_dp,dp) - F1_alpha(i_orb)*v_i )
-          t_avg = t_avg + params%pseudo1(idx)%conc * t_i
-        END DO
-        sigma1_new(i_orb) = sigma1_old(i_orb) + &
-          t_avg / ( CMPLX(1.0_dp,0.0_dp,dp) + F1_alpha(i_orb)*t_avg )
+        IF ( disorder_sl1 ) THEN
+          t_avg = CMPLX(0.0_dp, 0.0_dp, dp)
+          DO idx = 1, params%n_real_elem_sl1
+            v_i = CMPLX(params%elem_sl1(idx)%onsite(i_orb), 0.0_dp, dp) - sigma1_old(i_orb)
+            t_i = v_i / ( CMPLX(1.0_dp,0.0_dp,dp) - F1_alpha(i_orb)*v_i )
+            t_avg = t_avg + params%elem_sl1(idx)%conc * t_i
+          END DO
+          sigma1_new(i_orb) = sigma1_old(i_orb) + &
+            t_avg / ( CMPLX(1.0_dp,0.0_dp,dp) + F1_alpha(i_orb)*t_avg )
+        END IF
 
-        !-- sublattice 2 --
-        t_avg = CMPLX(0.0_dp, 0.0_dp, dp)
-        DO idx = 1, params%n_pseudo2
-          v_i = CMPLX(params%pseudo2(idx)%onsite(i_orb), 0.0_dp, dp) - sigma2_old(i_orb)
-          t_i = v_i / ( CMPLX(1.0_dp,0.0_dp,dp) - F2_alpha(i_orb)*v_i )
-          t_avg = t_avg + params%pseudo2(idx)%conc * t_i
-        END DO
-        sigma2_new(i_orb) = sigma2_old(i_orb) + &
-          t_avg / ( CMPLX(1.0_dp,0.0_dp,dp) + F2_alpha(i_orb)*t_avg )
+        IF ( disorder_sl2 ) THEN
+          t_avg = CMPLX(0.0_dp, 0.0_dp, dp)
+          DO idx = 1, params%n_real_elem_sl2
+            v_i = CMPLX(params%elem_sl2(idx)%onsite(i_orb), 0.0_dp, dp) - sigma2_old(i_orb)
+            t_i = v_i / ( CMPLX(1.0_dp,0.0_dp,dp) - F2_alpha(i_orb)*v_i )
+            t_avg = t_avg + params%elem_sl2(idx)%conc * t_i
+          END DO
+          sigma2_new(i_orb) = sigma2_old(i_orb) + &
+            t_avg / ( CMPLX(1.0_dp,0.0_dp,dp) + F2_alpha(i_orb)*t_avg )
+        END IF
 
       END DO
 
       !------------------------------------------------------------------------
-      ! Step 3: Convergence check (max over both sublattices)
+      ! Step 3: Convergence check (max over the sublattice(s) with disorder)
       !------------------------------------------------------------------------
 
-      max_diff = MAX( &
-        MAXVAL( ABS(sigma1_new - sigma1_old) ), &
-        MAXVAL( ABS(sigma2_new - sigma2_old) ) )
+      max_diff = 0.0_dp
+      IF ( disorder_sl1 ) max_diff = MAX( max_diff, MAXVAL( ABS(sigma1_new - sigma1_old) ) )
+      IF ( disorder_sl2 ) max_diff = MAX( max_diff, MAXVAL( ABS(sigma2_new - sigma2_old) ) )
 
       IF ( max_diff < tol ) THEN
         sigma1_old   = sigma1_new
@@ -239,8 +285,10 @@ CONTAINS
       ! Step 4: Linear mixing
       !------------------------------------------------------------------------
 
-      sigma1_old = mixing_alpha * sigma1_new + (1.0_dp - mixing_alpha) * sigma1_old
-      sigma2_old = mixing_alpha * sigma2_new + (1.0_dp - mixing_alpha) * sigma2_old
+      IF ( disorder_sl1 ) &
+        sigma1_old = mixing_alpha * sigma1_new + (1.0_dp - mixing_alpha) * sigma1_old
+      IF ( disorder_sl2 ) &
+        sigma2_old = mixing_alpha * sigma2_new + (1.0_dp - mixing_alpha) * sigma2_old
 
       n_iter_used = i_iter
 
@@ -267,6 +315,7 @@ CONTAINS
   !
   ! For each energy E:
   !   1. Solve sigma1(E+i*eta), sigma2(E+i*eta) via BZ-mesh Soven loop
+  !      (skipped internally if neither sublattice has disorder)
   !   2. For each k on the path: build HK(k), invert, compute trace
   !      A(k,E) = -(1/pi) * Im Tr[ G(k,E+i*eta) ]
   !
@@ -333,6 +382,8 @@ CONTAINS
     WRITE(*,'(a,f10.4,a,f10.4,a,i6)') '   E_min=', E_min, '  E_max=', E_max, &
                                         '  n_E=', n_E
     WRITE(*,'(a,i6,a,i6)') '   n_k_bz=', n_k_bz, '  n_k_path=', n_k_path
+    WRITE(*,'(a,i3,a,i3)') '   n_real_elem_sl1=', params%n_real_elem_sl1, &
+                            '  n_real_elem_sl2=', params%n_real_elem_sl2
     WRITE(*,'(a)') ' ============================================'
 
     energy_loop: DO i_E = 1, n_E

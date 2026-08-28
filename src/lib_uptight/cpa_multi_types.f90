@@ -1,8 +1,31 @@
 ! cpa_multi_types.f90
 !
-! Data structures for general N-component diagonal CPA.
-! Supports arbitrary M elements on sublattice 1, N elements on sublattice 2.
-! Total pseudo-elements per sublattice = M*N (general-CPA treatment).
+! Data structures for VCA-before-CPA general N-component diagonal CPA.
+!
+! REVISED (see implementation_plan.md, "Critical Revision"):
+!
+!   The previous "pseudo-element" scheme treated e.g. Ga in GaAs and Ga in
+!   GaSb as two independent disorder species and applied CPA directly on
+!   the M*N binaries. This is WRONG: Ga-As and Ga-Sb bonds are perfectly
+!   correlated (Ga always sits with either As or Sb, never randomly), so
+!   the pseudo-elements are not an uncorrelated-disorder ensemble as CPA
+!   requires.
+!
+!   VCA-before-CPA fixes this:
+!     1) Onsite and SOC are first VCA-averaged over binaries BY REAL
+!        ELEMENT (e.g. all Ga-containing binaries are merged into one
+!        "Ga" real_element).
+!     2) CPA (Soven) is then only run over the REAL disorder that remains
+!        in each sublattice, i.e. over the distinct real_element(:) list,
+!        not over the M*N binaries.
+!     3) Hopping is VCA-averaged directly over all M*N binaries (never
+!        grouped by element) because a pair (bond) has a unique identity
+!        and cannot be conflated across binaries.
+!     4) SOC undergoes a SECOND VCA pass: after real_element%so_p is
+!        obtained (VCA by element), it is VCA-averaged AGAIN across all
+!        real elements in the sublattice to give a single effective
+!        so_p_sl*_vca used in the off-diagonal SOC block. SOC never enters
+!        the Soven loop.
 !
 MODULE cpa_multi_types
 
@@ -12,61 +35,59 @@ MODULE cpa_multi_types
   IMPLICIT NONE
   PRIVATE
 
-  PUBLIC :: pseudo_element, cpa_multi_params
+  PUBLIC :: real_element, cpa_multi_params
   PUBLIC :: destroy_cpa_multi_params
 
   !===========================================================================
-  ! TYPE pseudo_element
+  ! TYPE real_element
   !
-  ! Represents one "pseudo-element" on a sublattice in the general-CPA sense:
-  ! the atom sl1(idx_self) as it appears in binary sl1(idx_self)+sl2(idx_other)
-  ! evaluated at a_vegard.
-  !
-  ! Index mapping: for M elements on sl1 and N on sl2,
-  !   flat index idx = (i-1)*N + j   where i in 1..M, j in 1..N
+  ! One physical chemical element on a sublattice (e.g. "Ga", "As"), after
+  ! VCA-averaging its onsite/SOC parameters over every binary that contains
+  ! it. This is the object that participates in the Soven CPA loop (for
+  ! onsite only).
   !===========================================================================
 
-  TYPE pseudo_element
+  TYPE real_element
 
-    INTEGER  :: idx_self   ! index into sl1(:) or sl2(:) (own sublattice)
-    INTEGER  :: idx_other  ! index into the OTHER sublattice (defines binary)
-    REAL(dp) :: conc       ! = x1(i) * x2(j)  for pseudo1; same for pseudo2
+    CHARACTER(LEN=2) :: name    ! physical element name, e.g. 'Ga', 'As'
+    REAL(dp) :: conc            ! total concentration of this element in its sublattice
 
-    ! Onsite energies at Gamma, in reference order (size n_ref_states).
-    ! For Jancu: = raw offset + energy  (summed over 4 bonds divided by 4)
-    ! For Tan:   = same but with Tan onsite correction also accumulated
-    REAL(dp), ALLOCATABLE :: onsite(:)   ! size n_ref_states
+    ! Onsite energies at Gamma, VCA-averaged (by element) over all binaries
+    ! containing this element, in reference order (size n_ref_states).
+    REAL(dp), ALLOCATABLE :: onsite(:)
 
-    ! Effective p-channel SOC parameter (final, after Tan so_corr if applicable)
+    ! SOC p-channel parameter, VCA-averaged (by element, "1st VCA pass")
+    ! over all binaries containing this element.
     REAL(dp) :: so_p
 
-  END TYPE pseudo_element
+  END TYPE real_element
 
 
   !===========================================================================
   ! TYPE cpa_multi_params
   !
   ! All parameters needed for the multi-component CPA Hamiltonian build
-  ! and Soven self-consistency.
+  ! and Soven self-consistency, under the VCA-before-CPA scheme.
   !===========================================================================
 
   TYPE cpa_multi_params
 
-    INTEGER :: n_sl1         ! M: number of elements on sublattice 1
-    INTEGER :: n_sl2         ! N: number of elements on sublattice 2
-    INTEGER :: n_pseudo1     ! = n_sl1 * n_sl2  pseudo-elements on sl1
-    INTEGER :: n_pseudo2     ! = n_sl1 * n_sl2  pseudo-elements on sl2
+    INTEGER :: n_sl1         ! M: number of elements defining sl1 binaries
+    INTEGER :: n_sl2         ! N: number of elements defining sl2 binaries
 
-    ! Flat arrays of pseudo-elements (size n_pseudo1 and n_pseudo2)
-    ! Index idx = (i-1)*n_sl2 + j  maps to binary sl1(i)+sl2(j)
-    TYPE(pseudo_element), ALLOCATABLE :: pseudo1(:)
-    TYPE(pseudo_element), ALLOCATABLE :: pseudo2(:)
+    INTEGER :: n_real_elem_sl1   ! number of DISTINCT real elements on sl1 (<= M)
+    INTEGER :: n_real_elem_sl2   ! number of DISTINCT real elements on sl2 (<= N)
 
-    ! VCA-averaged hopping (size n_ref_couplings), Harrison/Tan-scaled to a_vegard.
-    ! hopping_vca(k) = SUM_{i,j} conc(i,j) * t_ij(k)
+    TYPE(real_element), ALLOCATABLE :: elem_sl1(:)   ! size n_real_elem_sl1
+    TYPE(real_element), ALLOCATABLE :: elem_sl2(:)   ! size n_real_elem_sl2
+
+    ! Hopping: single VCA average over all M*N binaries (size n_ref_couplings).
+    ! NEVER grouped by real element -- a bond/pair has a unique identity.
     REAL(dp), ALLOCATABLE :: hopping_vca(:)
 
-    ! VCA-averaged SOC per sublattice (for off-diagonal SOC block)
+    ! SOC: 2nd VCA pass -- average of elem_sl*(:)%so_p weighted by
+    ! elem_sl*(:)%conc, giving one effective SOC parameter per sublattice.
+    ! Used only in the off-diagonal SOC block; never enters the Soven loop.
     REAL(dp) :: so_p_sl1_vca
     REAL(dp) :: so_p_sl2_vca
 
@@ -94,20 +115,20 @@ CONTAINS
 
     INTEGER :: idx
 
-    IF ( ALLOCATED(params%pseudo1) ) THEN
-      DO idx = 1, SIZE(params%pseudo1)
-        IF ( ALLOCATED(params%pseudo1(idx)%onsite) ) &
-          DEALLOCATE(params%pseudo1(idx)%onsite)
+    IF ( ALLOCATED(params%elem_sl1) ) THEN
+      DO idx = 1, SIZE(params%elem_sl1)
+        IF ( ALLOCATED(params%elem_sl1(idx)%onsite) ) &
+          DEALLOCATE(params%elem_sl1(idx)%onsite)
       END DO
-      DEALLOCATE(params%pseudo1)
+      DEALLOCATE(params%elem_sl1)
     END IF
 
-    IF ( ALLOCATED(params%pseudo2) ) THEN
-      DO idx = 1, SIZE(params%pseudo2)
-        IF ( ALLOCATED(params%pseudo2(idx)%onsite) ) &
-          DEALLOCATE(params%pseudo2(idx)%onsite)
+    IF ( ALLOCATED(params%elem_sl2) ) THEN
+      DO idx = 1, SIZE(params%elem_sl2)
+        IF ( ALLOCATED(params%elem_sl2(idx)%onsite) ) &
+          DEALLOCATE(params%elem_sl2(idx)%onsite)
       END DO
-      DEALLOCATE(params%pseudo2)
+      DEALLOCATE(params%elem_sl2)
     END IF
 
     IF ( ALLOCATED(params%hopping_vca) ) DEALLOCATE(params%hopping_vca)

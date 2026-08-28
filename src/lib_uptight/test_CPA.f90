@@ -1,6 +1,8 @@
 ! test_CPA.f90
 !
-! Driver program for multi-component diagonal CPA on zinc-blende alloys.
+! Driver program for multi-component diagonal CPA on zinc-blende alloys,
+! under the VCA-before-CPA scheme (see implementation_plan.md,
+! "Critical Revision").
 !
 ! Usage:
 !   ./test_CPA config.txt
@@ -79,6 +81,7 @@ PROGRAM test_CPA
   WRITE(*,'(a)') ' ============================================='
   WRITE(*,'(a)') ' test_CPA: General N-component diagonal CPA'
   WRITE(*,'(a)') '           for zinc-blende multi-component alloy'
+  WRITE(*,'(a)') '           (VCA-before-CPA scheme)'
   WRITE(*,'(a)') ' ============================================='
   WRITE(*,'(a,a)') ' Config file: ', TRIM(config_file)
 
@@ -89,33 +92,42 @@ PROGRAM test_CPA
   CALL read_and_validate_config( TRIM(config_file), cfg )
 
   !=============================================================================
-  ! Step 2: Build CPA parameters (Vegard lattice, pseudo-elements, hopping)
+  ! Step 2: Build CPA parameters (Vegard lattice, real elements via VCA,
+  !         hopping VCA), see cpa_multi_build.f90
   !=============================================================================
 
   CALL build_multi_cpa_params( cfg, params )
 
   !=============================================================================
-  ! Print summary of pseudo-element structure
+  ! Print summary of the real-element structure (VCA-before-CPA)
   !=============================================================================
 
   WRITE(*,'(a)') ''
-  WRITE(*,'(a,i4,a,i4,a,i4)') ' Pseudo-elements: n_sl1=', params%n_sl1, &
-    '  n_sl2=', params%n_sl2, '  n_pseudo=', params%n_pseudo1
-  WRITE(*,'(a)') ' Sublattice 1 pseudo-elements:'
-  DO i = 1, params%n_pseudo1
-    WRITE(*,'(a,i4,a,i2,a,i2,a,f8.4)') &
-      '   idx=', i, '  (sl1[', params%pseudo1(i)%idx_self, '], sl2[', &
-      params%pseudo1(i)%idx_other, '])  conc=', params%pseudo1(i)%conc
+  WRITE(*,'(a,i4,a,i4)') ' Real elements: n_real_elem_sl1=', params%n_real_elem_sl1, &
+    '  n_real_elem_sl2=', params%n_real_elem_sl2
+  WRITE(*,'(a)') ' Sublattice 1 real elements (VCA-averaged onsite/SOC):'
+  DO i = 1, params%n_real_elem_sl1
+    WRITE(*,'(a,a2,a,f8.4)') &
+      '   ', params%elem_sl1(i)%name, '  conc=', params%elem_sl1(i)%conc
   END DO
-  WRITE(*,'(a)') ' Sublattice 2 pseudo-elements (same binaries, sl2 atom):'
-  DO i = 1, params%n_pseudo2
-    WRITE(*,'(a,i4,a,i2,a,i2,a,f8.4)') &
-      '   idx=', i, '  (sl1[', params%pseudo2(i)%idx_other, '], sl2[', &
-      params%pseudo2(i)%idx_self, '])  conc=', params%pseudo2(i)%conc
+  WRITE(*,'(a)') ' Sublattice 2 real elements (VCA-averaged onsite/SOC):'
+  DO j = 1, params%n_real_elem_sl2
+    WRITE(*,'(a,a2,a,f8.4)') &
+      '   ', params%elem_sl2(j)%name, '  conc=', params%elem_sl2(j)%conc
   END DO
 
-  ! Internal assertion: sum of concentrations = 1.0
-  CALL assert_conc_sum( params )
+  IF ( params%n_real_elem_sl1 == 1 ) THEN
+    WRITE(*,'(a)') ' NOTE: sublattice 1 has no disorder (single real element) -- &
+                    &sigma1 is fixed at VCA onsite, no Soven update on sl1.'
+  END IF
+  IF ( params%n_real_elem_sl2 == 1 ) THEN
+    WRITE(*,'(a)') ' NOTE: sublattice 2 has no disorder (single real element) -- &
+                    &sigma2 is fixed at VCA onsite, no Soven update on sl2.'
+  END IF
+  IF ( params%n_real_elem_sl1 == 1 .AND. params%n_real_elem_sl2 == 1 ) THEN
+    WRITE(*,'(a)') ' NOTE: pure binary case -- no CPA disorder at all, Soven &
+                    &loop is skipped entirely.'
+  END IF
 
   !=============================================================================
   ! Step 3: Generate BZ mesh and k-path
@@ -182,38 +194,5 @@ PROGRAM test_CPA
   WRITE(*,'(a)') ''
   WRITE(*,'(a)') ' test_CPA: DONE.'
   WRITE(*,'(a,a)') ' Results: ', TRIM(output_filename)
-
-CONTAINS
-
-  !===========================================================================
-  ! Internal assertion: verify SUM of pseudo-element concentrations == 1.0
-  !===========================================================================
-
-  SUBROUTINE assert_conc_sum( params )
-    TYPE(cpa_multi_params), INTENT(IN) :: params
-    REAL(dp) :: sum1, sum2
-    INTEGER :: idx
-
-    sum1 = 0.0_dp
-    sum2 = 0.0_dp
-    DO idx = 1, params%n_pseudo1
-      sum1 = sum1 + params%pseudo1(idx)%conc
-      sum2 = sum2 + params%pseudo2(idx)%conc
-    END DO
-
-    WRITE(*,'(a,f12.8,a,f12.8)') &
-      ' (assertion) SUM conc pseudo1 = ', sum1, &
-      '   SUM conc pseudo2 = ', sum2
-
-    IF ( ABS(sum1 - 1.0_dp) > 1.0d-6 ) THEN
-      WRITE(*,*) 'ERROR (test_CPA): SUM conc pseudo1 /= 1.0, got ', sum1
-      STOP 1
-    END IF
-    IF ( ABS(sum2 - 1.0_dp) > 1.0d-6 ) THEN
-      WRITE(*,*) 'ERROR (test_CPA): SUM conc pseudo2 /= 1.0, got ', sum2
-      STOP 1
-    END IF
-
-  END SUBROUTINE assert_conc_sum
 
 END PROGRAM test_CPA
