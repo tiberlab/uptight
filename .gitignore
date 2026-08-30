@@ -14,3 +14,5 @@ TEST/INIshell/tb.upg
 TEST/INIshell/test_GUI.ini
 /src/lib_uptight/from_CPA
 src/lib_uptight/test_CPA
+.diff-gui-current.diff
+/diff_files

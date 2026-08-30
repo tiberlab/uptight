@@ -105,6 +105,8 @@ PROGRAM test_CPA
   WRITE(*,'(a)') ''
   WRITE(*,'(a,i4,a,i4)') ' Real elements: n_real_elem_sl1=', params%n_real_elem_sl1, &
     '  n_real_elem_sl2=', params%n_real_elem_sl2
+  WRITE(*,'(a,l2)') ' odd_hopping (BEB off-diagonal disorder for hopping) = ', &
+    params%odd_hopping
   WRITE(*,'(a)') ' Sublattice 1 real elements (VCA-averaged onsite/SOC):'
   DO i = 1, params%n_real_elem_sl1
     WRITE(*,'(a,a2,a,f8.4)') &

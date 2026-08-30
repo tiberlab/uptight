@@ -98,9 +98,26 @@ CONTAINS
 
     params%scheme    = TRIM(cfg%scheme)
 
+    params%odd_hopping = cfg%odd_hopping
+
     ALLOCATE( params%elem_sl1(params%n_real_elem_sl1) )
     ALLOCATE( params%elem_sl2(params%n_real_elem_sl2) )
     ALLOCATE( params%hopping_vca(n_ref_couplings) )
+
+    ! ODD hopping (BEB): one pair_hopping entry per (species on sl1, species
+    ! on sl2) combination -- same M*N enumeration as the binary loop below,
+    ! but each entry keeps its OWN hopping instead of being VCA-averaged away.
+    IF ( params%odd_hopping ) THEN
+      ALLOCATE( params%pairs(params%n_real_elem_sl1 * params%n_real_elem_sl2) )
+      DO i = 1, params%n_real_elem_sl1
+        DO j = 1, params%n_real_elem_sl2
+          ALLOCATE( params%pairs((i-1)*params%n_real_elem_sl2 + j)%t(n_ref_couplings) )
+          params%pairs((i-1)*params%n_real_elem_sl2 + j)%i_elem1 = i
+          params%pairs((i-1)*params%n_real_elem_sl2 + j)%i_elem2 = j
+          params%pairs((i-1)*params%n_real_elem_sl2 + j)%t       = 0.0_dp
+        END DO
+      END DO
+    END IF
 
     DO i = 1, params%n_real_elem_sl1
       ALLOCATE( params%elem_sl1(i)%onsite(n_ref_states) )
@@ -200,11 +217,18 @@ CONTAINS
         params%elem_sl1(i)%so_p = params%elem_sl1(i)%so_p + cfg%x2(j) * so_p1
         params%elem_sl2(j)%so_p = params%elem_sl2(j)%so_p + cfg%x1(i) * so_p2
 
-        ! Hopping VCA accumulation: single pass over all M*N binaries,
-        ! never grouped by real element (a bond has a unique pair identity).
+        ! Hopping: with ODD (odd_hopping = .TRUE.), each species-pair (i,j)
+        ! keeps its OWN hopping (BEB scheme) instead of being VCA-averaged.
+        ! With odd_hopping = .FALSE. (default), accumulate the single VCA
+        ! average over all M*N binaries exactly as before -- a bond has a
+        ! unique pair identity and must never be grouped by real element.
         CALL compute_hopping_at_vegard( mat_ij, cfg%scheme, i_ion_sl1, i_ion_sl2, &
                                         params%dist_vegard, t_ij )
-        params%hopping_vca  = params%hopping_vca  + conc_ij * t_ij
+        IF ( params%odd_hopping ) THEN
+          params%pairs((i-1)*params%n_real_elem_sl2 + j)%t = t_ij
+        ELSE
+          params%hopping_vca  = params%hopping_vca  + conc_ij * t_ij
+        END IF
 
         ! NOTE: so_p1/so_p2 here are the FINAL effective SOC for this binary
         ! (bare so_energy(1) + Tan 4-bond fac_so correction, if scheme=tan).
@@ -247,7 +271,19 @@ CONTAINS
 
     WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl1_vca (2nd VCA pass) = ', params%so_p_sl1_vca
     WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl2_vca (2nd VCA pass) = ', params%so_p_sl2_vca
-    WRITE(*,'(a,5f10.4)') ' (cpa_multi_build) hopping(1..5) = ', params%hopping_vca(1:5)
+
+    IF ( params%odd_hopping ) THEN
+      WRITE(*,'(a)') ' (cpa_multi_build) odd_hopping = T: hopping kept per species-pair (BEB)'
+      DO i = 1, params%n_real_elem_sl1
+        DO j = 1, params%n_real_elem_sl2
+          WRITE(*,'(a,a2,a,a2,a,5f10.4)') '   pair ', params%elem_sl1(i)%name, '-', &
+            params%elem_sl2(j)%name, '  t(1..5) = ', &
+            params%pairs((i-1)*params%n_real_elem_sl2 + j)%t(1:5)
+        END DO
+      END DO
+    ELSE
+      WRITE(*,'(a,5f10.4)') ' (cpa_multi_build) hopping(1..5) = ', params%hopping_vca(1:5)
+    END IF
 
     DEALLOCATE( ref_states, ref_couplings )
 

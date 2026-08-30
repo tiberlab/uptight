@@ -31,6 +31,8 @@ MODULE cpa_multi_hk
   PRIVATE
 
   PUBLIC :: build_multi_HK
+  PUBLIC :: build_multi_HK_odd
+  PUBLIC :: get_multi_HK_ndim
   PUBLIC :: get_1nn_bond_vectors
   PUBLIC :: add_soc_p_block
 
@@ -59,6 +61,14 @@ CONTAINS
 
   !===========================================================================
   ! Subroutine build_multi_HK
+  !
+  ! Build the 40×40 Bloch Hamiltonian for the multi-component CPA alloy.
+  ! NOTE: this routine assumes VCA hopping (params%odd_hopping = .FALSE.);
+  ! it must not be called when params%odd_hopping = .TRUE. -- callers must
+  ! dispatch to build_multi_HK_odd instead in that case (see
+  ! get_multi_HK_ndim to size the enlarged matrix). This routine's fixed
+  ! 4*n_ref_states signature is left completely untouched so existing
+  ! VCA-hopping behavior and performance are unaffected.
   !
   ! Build the 40×40 Bloch Hamiltonian for the multi-component CPA alloy.
   !
@@ -227,5 +237,200 @@ CONTAINS
     HK(off_dn+pz, off_up+py) = HK(off_dn+pz, off_up+py) - ci*so_p
 
   END SUBROUTINE add_soc_p_block
+
+
+  !===========================================================================
+  ! Function get_multi_HK_ndim
+  !
+  ! Return the Bloch Hamiltonian dimension for the current params. When
+  ! odd_hopping = .FALSE., this is the fixed 4*n_ref_states (2 sublattices
+  ! x spin), matching build_multi_HK. When odd_hopping = .TRUE., the basis
+  ! is expanded to one block per species per sublattice (BEB scheme):
+  !   ndim = n_spin * n_ref_states * (n_real_elem_sl1 + n_real_elem_sl2)
+  !===========================================================================
+
+  FUNCTION get_multi_HK_ndim( params ) RESULT( ndim )
+
+    TYPE(cpa_multi_params), INTENT(IN) :: params
+    INTEGER :: ndim
+
+    IF ( params%odd_hopping ) THEN
+      ndim = 2 * n_ref_states * &
+             ( params%n_real_elem_sl1 + params%n_real_elem_sl2 )
+    ELSE
+      ndim = 4 * n_ref_states
+    END IF
+
+  END FUNCTION get_multi_HK_ndim
+
+
+  !===========================================================================
+  ! Subroutine build_multi_HK_odd
+  !
+  ! Build the enlarged Bloch Hamiltonian under off-diagonal disorder (ODD)
+  ! for hopping, following the BEB extended-Hilbert-space scheme (Blackman
+  ! 1971; Papaconstantopoulos 1989 multiband generalization; Koepernik
+  ! 1997/1998 multi-sublattice generalization).
+  !
+  ! Basis layout: one spin-up/spin-down block of size n_ref_states per
+  ! REAL ELEMENT per sublattice, ordered as
+  !   [ sl1_elem_1_up, sl1_elem_1_dn, sl1_elem_2_up, sl1_elem_2_dn, ...,
+  !     sl2_elem_1_up, sl2_elem_1_dn, sl2_elem_2_up, sl2_elem_2_dn, ... ]
+  ! Total dimension = get_multi_HK_ndim(params).
+  !
+  ! Onsite blocks: sigma1(alpha) (resp. sigma2) placed identically on every
+  ! species block of sublattice 1 (resp. 2) -- the Soven self-energy stays
+  ! species-independent in form (single self-energy per sublattice, per
+  ! Koepernik Appendix A), only the basis layout is enlarged.
+  !
+  ! Off-diagonal (hopping) blocks: for each species pair (Q on sl1, Q' on
+  ! sl2), the block h^{Q,Q'}(k) is built from THAT PAIR's OWN hopping
+  ! parameters (params%pairs(:)%t), summed over the 4 zinc-blende 1NN bonds
+  ! with Bloch phase -- no averaging across species pairs. No direct
+  ! coupling is placed between different species within the same sublattice
+  ! (no such physical bond exists).
+  !
+  ! SOC: unchanged, VCA (so_p_sl1_vca / so_p_sl2_vca), applied identically
+  ! to every species block of the corresponding sublattice.
+  !
+  ! INPUT:
+  !   kvec(3) : k-vector in fractional coordinates
+  !   params  : cpa_multi_params with odd_hopping = .TRUE. and pairs(:) set
+  !   sigma1(n_ref_states) : CPA self-energy for sublattice 1 (COMPLEX)
+  !   sigma2(n_ref_states) : CPA self-energy for sublattice 2 (COMPLEX)
+  !
+  ! OUTPUT:
+  !   HK(ndim,ndim) : Bloch Hamiltonian, COMPLEX, ndim = get_multi_HK_ndim(params)
+  !===========================================================================
+
+  SUBROUTINE build_multi_HK_odd( kvec, params, sigma1, sigma2, HK )
+
+    REAL(dp), DIMENSION(3),     INTENT(IN) :: kvec
+    TYPE(cpa_multi_params),     INTENT(IN) :: params
+    COMPLEX(dp), DIMENSION(n_ref_states), INTENT(IN) :: sigma1, sigma2
+
+    COMPLEX(dp), DIMENSION(:,:), INTENT(OUT) :: HK
+
+    !=========================================================================
+    ! Local variables
+    !=========================================================================
+
+    REAL(dp), DIMENSION(3,4) :: bonds_frac
+    REAL(dp), DIMENSION(3)   :: cos_latt
+    REAL(dp)                 :: phase
+
+    REAL(dp), DIMENSION(n_ref_states, n_ref_states) :: tb_bloc
+
+    COMPLEX(dp) :: exp_fac
+
+    INTEGER :: i_bond, i_orb, j_orb
+    INTEGER :: n1, n2, i_pair, q1, q2
+    INTEGER :: off1_up, off1_dn, off2_up, off2_dn
+    INTEGER, ALLOCATABLE :: off_up_sl1(:), off_dn_sl1(:)
+    INTEGER, ALLOCATABLE :: off_up_sl2(:), off_dn_sl2(:)
+
+    !=========================================================================
+    ! Block offsets: 2 blocks (up,dn) x n_ref_states per species, sl1 species
+    ! first, then sl2 species. Offsets are 0-based row/col base indices.
+    !=========================================================================
+
+    n1 = params%n_real_elem_sl1
+    n2 = params%n_real_elem_sl2
+
+    ALLOCATE( off_up_sl1(n1), off_dn_sl1(n1) )
+    ALLOCATE( off_up_sl2(n2), off_dn_sl2(n2) )
+
+    DO q1 = 1, n1
+      off_up_sl1(q1) = 2*n_ref_states*(q1-1)
+      off_dn_sl1(q1) = off_up_sl1(q1) + n_ref_states
+    END DO
+    DO q2 = 1, n2
+      off_up_sl2(q2) = 2*n_ref_states*n1 + 2*n_ref_states*(q2-1)
+      off_dn_sl2(q2) = off_up_sl2(q2) + n_ref_states
+    END DO
+
+    HK = (0.0_dp, 0.0_dp)
+
+    !=========================================================================
+    ! Onsite blocks: sigma1(alpha) on every sl1 species block,
+    ! sigma2(alpha) on every sl2 species block (single self-energy per
+    ! sublattice, unchanged from build_multi_HK)
+    !=========================================================================
+
+    DO q1 = 1, n1
+      DO i_orb = 1, n_ref_states
+        HK( off_up_sl1(q1)+i_orb, off_up_sl1(q1)+i_orb ) = sigma1(i_orb)
+        HK( off_dn_sl1(q1)+i_orb, off_dn_sl1(q1)+i_orb ) = sigma1(i_orb)
+      END DO
+    END DO
+
+    DO q2 = 1, n2
+      DO i_orb = 1, n_ref_states
+        HK( off_up_sl2(q2)+i_orb, off_up_sl2(q2)+i_orb ) = sigma2(i_orb)
+        HK( off_dn_sl2(q2)+i_orb, off_dn_sl2(q2)+i_orb ) = sigma2(i_orb)
+      END DO
+    END DO
+
+    !=========================================================================
+    ! Off-diagonal (hopping) blocks: one per species pair, own parameters
+    !=========================================================================
+
+    CALL get_1nn_bond_vectors( bonds_frac )
+
+    DO i_pair = 1, SIZE(params%pairs)
+
+      q1 = params%pairs(i_pair)%i_elem1
+      q2 = params%pairs(i_pair)%i_elem2
+
+      off1_up = off_up_sl1(q1);  off1_dn = off_dn_sl1(q1)
+      off2_up = off_up_sl2(q2);  off2_dn = off_dn_sl2(q2)
+
+      DO i_bond = 1, 4
+
+        cos_latt = bonds_frac(:,i_bond) / SQRT( SUM(bonds_frac(:,i_bond)**2) )
+
+        phase = 2.0_dp * pi * DOT_PRODUCT( kvec, bonds_frac(:,i_bond) )
+        exp_fac = EXP( CMPLX(0.0_dp, phase, dp) )
+
+        CALL koster_slater_min( cos_latt, params%pairs(i_pair)%t, tb_bloc )
+
+        DO i_orb = 1, n_ref_states
+          DO j_orb = 1, n_ref_states
+            HK( off1_up + i_orb, off2_up + j_orb ) = &
+              HK( off1_up + i_orb, off2_up + j_orb ) + &
+              exp_fac * CMPLX(tb_bloc(i_orb, j_orb), 0.0_dp, dp)
+            HK( off1_dn + i_orb, off2_dn + j_orb ) = &
+              HK( off1_dn + i_orb, off2_dn + j_orb ) + &
+              exp_fac * CMPLX(tb_bloc(i_orb, j_orb), 0.0_dp, dp)
+          END DO
+        END DO
+
+      END DO
+
+      DO i_orb = 1, n_ref_states
+        DO j_orb = 1, n_ref_states
+          HK( off2_up + j_orb, off1_up + i_orb ) = &
+            CONJG( HK( off1_up + i_orb, off2_up + j_orb ) )
+          HK( off2_dn + j_orb, off1_dn + i_orb ) = &
+            CONJG( HK( off1_dn + i_orb, off2_dn + j_orb ) )
+        END DO
+      END DO
+
+    END DO
+
+    !=========================================================================
+    ! SOC (VCA, unchanged): applied identically to every species block
+    !=========================================================================
+
+    DO q1 = 1, n1
+      CALL add_soc_p_block( params%so_p_sl1_vca, off_up_sl1(q1), off_dn_sl1(q1), HK )
+    END DO
+    DO q2 = 1, n2
+      CALL add_soc_p_block( params%so_p_sl2_vca, off_up_sl2(q2), off_dn_sl2(q2), HK )
+    END DO
+
+    DEALLOCATE( off_up_sl1, off_dn_sl1, off_up_sl2, off_dn_sl2 )
+
+  END SUBROUTINE build_multi_HK_odd
 
 END MODULE cpa_multi_hk

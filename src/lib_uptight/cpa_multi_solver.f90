@@ -42,7 +42,7 @@ MODULE cpa_multi_solver
   USE globals,         ONLY : n_ref_states
   USE constants,       ONLY : pi
   USE cpa_multi_types, ONLY : cpa_multi_params
-  USE cpa_multi_hk,    ONLY : build_multi_HK
+  USE cpa_multi_hk,    ONLY : build_multi_HK, build_multi_HK_odd, get_multi_HK_ndim
   USE cpa_linalg,      ONLY : invert_complex_matrix
 
   IMPLICIT NONE
@@ -51,22 +51,28 @@ MODULE cpa_multi_solver
   PUBLIC :: cpa_multi_solve_sigma_at_z
   PUBLIC :: cpa_multi_compute_spectral_function
 
-  ! Pre-computed constants
+  ! Fixed dimension used when params%odd_hopping = .FALSE. (VCA hopping,
+  ! unchanged from before). When params%odd_hopping = .TRUE., the actual
+  ! Bloch Hamiltonian dimension is obtained at runtime via
+  ! get_multi_HK_ndim(params) and all work arrays are allocated accordingly.
   INTEGER, PARAMETER :: NDIM = 4*n_ref_states   ! = 40
 
 CONTAINS
 
-  ! Inline inversion using pre-allocated work — avoids repeated alloc in hot loop
-  SUBROUTINE invert_40x40( A, ipiv, work, lwork, ierr )
-    INTEGER,                     INTENT(IN)    :: lwork
-    COMPLEX(dp), DIMENSION(NDIM,NDIM), INTENT(INOUT) :: A
-    INTEGER,     DIMENSION(NDIM),      INTENT(INOUT) :: ipiv
-    COMPLEX(dp), DIMENSION(lwork),     INTENT(INOUT) :: work
-    INTEGER,                           INTENT(OUT)   :: ierr
-    CALL ZGETRF( NDIM, NDIM, A, NDIM, ipiv, ierr )
+  ! Inline inversion using pre-allocated work — avoids repeated alloc in hot loop.
+  ! ndim_loc is the actual matrix dimension (== NDIM for VCA hopping, or the
+  ! enlarged BEB dimension from get_multi_HK_ndim(params) for ODD hopping).
+  SUBROUTINE invert_nxn( ndim_loc, A, ipiv, work, lwork, ierr )
+    INTEGER,                       INTENT(IN)    :: ndim_loc
+    INTEGER,                       INTENT(IN)    :: lwork
+    COMPLEX(dp), DIMENSION(:,:),   INTENT(INOUT) :: A
+    INTEGER,     DIMENSION(:),     INTENT(INOUT) :: ipiv
+    COMPLEX(dp), DIMENSION(:),     INTENT(INOUT) :: work
+    INTEGER,                       INTENT(OUT)   :: ierr
+    CALL ZGETRF( ndim_loc, ndim_loc, A, ndim_loc, ipiv, ierr )
     IF ( ierr /= 0 ) RETURN
-    CALL ZGETRI( NDIM, A, NDIM, ipiv, work, lwork, ierr )
-  END SUBROUTINE invert_40x40
+    CALL ZGETRI( ndim_loc, A, ndim_loc, ipiv, work, lwork, ierr )
+  END SUBROUTINE invert_nxn
 
   !===========================================================================
   ! Subroutine cpa_multi_solve_sigma_at_z
@@ -121,8 +127,9 @@ CONTAINS
     COMPLEX(dp), DIMENSION(n_ref_states) :: sigma2_old, sigma2_new
     COMPLEX(dp), DIMENSION(n_ref_states) :: F1_alpha, F2_alpha
 
-    COMPLEX(dp) :: HK(NDIM,NDIM), Gk(NDIM,NDIM)
-    INTEGER      :: ipiv(NDIM)
+    INTEGER :: ndim_loc
+    COMPLEX(dp), ALLOCATABLE :: HK(:,:), Gk(:,:)
+    INTEGER,     ALLOCATABLE :: ipiv(:)
     COMPLEX(dp), ALLOCATABLE :: work_arr(:)
     INTEGER :: lwork
 
@@ -131,6 +138,9 @@ CONTAINS
 
     INTEGER :: i_iter, i_k, i_orb, ierr, idx
     INTEGER :: off1_up, off1_dn, off2_up, off2_dn
+    INTEGER, ALLOCATABLE :: off_up_sl1(:), off_dn_sl1(:)
+    INTEGER, ALLOCATABLE :: off_up_sl2(:), off_dn_sl2(:)
+    INTEGER :: q1, q2
 
     !=========================================================================
     ! Determine which sublattices carry disorder (n_real_elem > 1).
@@ -171,12 +181,30 @@ CONTAINS
       RETURN
     END IF
 
-    lwork   = NDIM * NDIM
+    ndim_loc = get_multi_HK_ndim( params )
+    lwork    = ndim_loc * ndim_loc
+    ALLOCATE( HK(ndim_loc,ndim_loc), Gk(ndim_loc,ndim_loc), ipiv(ndim_loc) )
     ALLOCATE(work_arr(lwork))
-    off1_up = 0
-    off1_dn = n_ref_states
-    off2_up = 2*n_ref_states
-    off2_dn = 3*n_ref_states
+
+    IF ( params%odd_hopping ) THEN
+      ! Species-block offsets, matching build_multi_HK_odd's layout exactly:
+      ! sl1 species blocks first, then sl2 species blocks.
+      ALLOCATE( off_up_sl1(params%n_real_elem_sl1), off_dn_sl1(params%n_real_elem_sl1) )
+      ALLOCATE( off_up_sl2(params%n_real_elem_sl2), off_dn_sl2(params%n_real_elem_sl2) )
+      DO q1 = 1, params%n_real_elem_sl1
+        off_up_sl1(q1) = 2*n_ref_states*(q1-1)
+        off_dn_sl1(q1) = off_up_sl1(q1) + n_ref_states
+      END DO
+      DO q2 = 1, params%n_real_elem_sl2
+        off_up_sl2(q2) = 2*n_ref_states*params%n_real_elem_sl1 + 2*n_ref_states*(q2-1)
+        off_dn_sl2(q2) = off_up_sl2(q2) + n_ref_states
+      END DO
+    ELSE
+      off1_up = 0
+      off1_dn = n_ref_states
+      off2_up = 2*n_ref_states
+      off2_dn = 3*n_ref_states
+    END IF
 
     z = CMPLX(E, eta, dp)
 
@@ -199,15 +227,19 @@ CONTAINS
 
       DO i_k = 1, n_k
 
-        CALL build_multi_HK( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
+        IF ( params%odd_hopping ) THEN
+          CALL build_multi_HK_odd( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
+        ELSE
+          CALL build_multi_HK( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
+        END IF
 
         ! G(k,z) = (z*I - HK)^{-1}
         Gk = -HK
-        DO i_orb = 1, ndim
+        DO i_orb = 1, ndim_loc
           Gk(i_orb, i_orb) = Gk(i_orb, i_orb) + z
         END DO
 
-        CALL invert_40x40( Gk, ipiv, work_arr, lwork, ierr )
+        CALL invert_nxn( ndim_loc, Gk, ipiv, work_arr, lwork, ierr )
 
         IF ( ierr /= 0 ) THEN
           WRITE(*,*) 'ERROR (cpa_multi_solver): matrix inversion failed at i_k=', &
@@ -215,15 +247,35 @@ CONTAINS
           STOP 1
         END IF
 
-        ! Accumulate spin-averaged diagonal for each sublattice
-        DO i_orb = 1, n_ref_states
-          F1_alpha(i_orb) = F1_alpha(i_orb) + &
-            0.5_dp * ( Gk(off1_up + i_orb, off1_up + i_orb) + &
-                       Gk(off1_dn + i_orb, off1_dn + i_orb) )
-          F2_alpha(i_orb) = F2_alpha(i_orb) + &
-            0.5_dp * ( Gk(off2_up + i_orb, off2_up + i_orb) + &
-                       Gk(off2_dn + i_orb, off2_dn + i_orb) )
-        END DO
+        IF ( params%odd_hopping ) THEN
+          ! BEB effective-medium condition: F_alpha is the concentration-
+          ! weighted average of the diagonal Green's function over every
+          ! species block of the sublattice (spin-averaged per species),
+          ! since sigma1(alpha)/sigma2(alpha) is the SAME self-energy
+          ! shared by all species blocks of that sublattice.
+          DO i_orb = 1, n_ref_states
+            DO q1 = 1, params%n_real_elem_sl1
+              F1_alpha(i_orb) = F1_alpha(i_orb) + params%elem_sl1(q1)%conc * &
+                0.5_dp * ( Gk(off_up_sl1(q1)+i_orb, off_up_sl1(q1)+i_orb) + &
+                           Gk(off_dn_sl1(q1)+i_orb, off_dn_sl1(q1)+i_orb) )
+            END DO
+            DO q2 = 1, params%n_real_elem_sl2
+              F2_alpha(i_orb) = F2_alpha(i_orb) + params%elem_sl2(q2)%conc * &
+                0.5_dp * ( Gk(off_up_sl2(q2)+i_orb, off_up_sl2(q2)+i_orb) + &
+                           Gk(off_dn_sl2(q2)+i_orb, off_dn_sl2(q2)+i_orb) )
+            END DO
+          END DO
+        ELSE
+          ! Accumulate spin-averaged diagonal for each sublattice
+          DO i_orb = 1, n_ref_states
+            F1_alpha(i_orb) = F1_alpha(i_orb) + &
+              0.5_dp * ( Gk(off1_up + i_orb, off1_up + i_orb) + &
+                         Gk(off1_dn + i_orb, off1_dn + i_orb) )
+            F2_alpha(i_orb) = F2_alpha(i_orb) + &
+              0.5_dp * ( Gk(off2_up + i_orb, off2_up + i_orb) + &
+                         Gk(off2_dn + i_orb, off2_dn + i_orb) )
+          END DO
+        END IF
 
       END DO
 
@@ -304,6 +356,10 @@ CONTAINS
     END IF
 
     DEALLOCATE(work_arr)
+    DEALLOCATE(HK, Gk, ipiv)
+    IF ( params%odd_hopping ) THEN
+      DEALLOCATE( off_up_sl1, off_dn_sl1, off_up_sl2, off_dn_sl2 )
+    END IF
 
   END SUBROUTINE cpa_multi_solve_sigma_at_z
 
@@ -350,8 +406,9 @@ CONTAINS
     !=========================================================================
 
     COMPLEX(dp), DIMENSION(n_ref_states) :: sigma1, sigma2
-    COMPLEX(dp) :: HK(NDIM,NDIM), Gk(NDIM,NDIM)
-    INTEGER      :: ipiv(NDIM)
+    INTEGER :: ndim_loc
+    COMPLEX(dp), ALLOCATABLE :: HK(:,:), Gk(:,:)
+    INTEGER,     ALLOCATABLE :: ipiv(:)
     COMPLEX(dp), ALLOCATABLE :: work_arr(:)
     INTEGER :: lwork
 
@@ -367,7 +424,9 @@ CONTAINS
     REAL(dp) :: VBM_E, VBM_k, CBM_E, CBM_k, band_gap
     LOGICAL :: found_VBM, found_CBM
 
-    lwork = NDIM * NDIM
+    ndim_loc = get_multi_HK_ndim( params )
+    lwork = ndim_loc * ndim_loc
+    ALLOCATE( HK(ndim_loc,ndim_loc), Gk(ndim_loc,ndim_loc), ipiv(ndim_loc) )
     ALLOCATE(work_arr(lwork))
     ALLOCATE(A_matrix(n_k_path, n_E))
 
@@ -384,6 +443,8 @@ CONTAINS
     WRITE(*,'(a,i6,a,i6)') '   n_k_bz=', n_k_bz, '  n_k_path=', n_k_path
     WRITE(*,'(a,i3,a,i3)') '   n_real_elem_sl1=', params%n_real_elem_sl1, &
                             '  n_real_elem_sl2=', params%n_real_elem_sl2
+    WRITE(*,'(a,l2,a,i5)') '   odd_hopping=', params%odd_hopping, &
+                            '  HK dimension=', ndim_loc
     WRITE(*,'(a)') ' ============================================'
 
     energy_loop: DO i_E = 1, n_E
@@ -413,14 +474,18 @@ CONTAINS
 
       DO i_kp = 1, n_k_path
 
-        CALL build_multi_HK( kpts_path(:,i_kp), params, sigma1, sigma2, HK )
+        IF ( params%odd_hopping ) THEN
+          CALL build_multi_HK_odd( kpts_path(:,i_kp), params, sigma1, sigma2, HK )
+        ELSE
+          CALL build_multi_HK( kpts_path(:,i_kp), params, sigma1, sigma2, HK )
+        END IF
 
         Gk = -HK
-        DO i_orb = 1, ndim
+        DO i_orb = 1, ndim_loc
           Gk(i_orb,i_orb) = Gk(i_orb,i_orb) + z
         END DO
 
-        CALL invert_40x40( Gk, ipiv, work_arr, lwork, ierr )
+        CALL invert_nxn( ndim_loc, Gk, ipiv, work_arr, lwork, ierr )
 
         IF ( ierr /= 0 ) THEN
           WRITE(*,*) 'ERROR (cpa_multi_solver): inversion failed at E=', E, &
@@ -428,9 +493,11 @@ CONTAINS
           STOP 1
         END IF
 
-        ! A(k,E) = -(1/pi) Im Tr[Gk]  (full trace over all 4*n_ref_states)
+        ! A(k,E) = -(1/pi) Im Tr[Gk]  (full trace over the Bloch Hamiltonian
+        ! dimension, which is 4*n_ref_states for VCA hopping or the
+        ! enlarged BEB dimension for ODD hopping)
         A_kE = 0.0_dp
-        DO i_orb = 1, ndim
+        DO i_orb = 1, ndim_loc
           A_kE = A_kE - AIMAG(Gk(i_orb,i_orb)) / pi
         END DO
 
@@ -488,6 +555,7 @@ CONTAINS
     WRITE(*,'(a)') ' ============================================'
 
     DEALLOCATE(work_arr, A_matrix)
+    DEALLOCATE(HK, Gk, ipiv)
 
   END SUBROUTINE cpa_multi_compute_spectral_function
 

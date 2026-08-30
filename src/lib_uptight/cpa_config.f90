@@ -75,6 +75,11 @@ MODULE cpa_config
     ! Output
     CHARACTER(LEN=LST) :: output_filename   ! set to '' to trigger auto-naming
 
+    ! Off-diagonal disorder (ODD) for hopping (BEB scheme).
+    ! .FALSE. (default) = current VCA-averaged hopping (single value per bond).
+    ! .TRUE.             = per species-pair hopping with BEB-style CPA.
+    LOGICAL :: odd_hopping
+
   END TYPE cpa_config_t
 
 
@@ -261,6 +266,15 @@ CONTAINS
       CALL strip_quotes( cfg%output_filename )
     END IF
 
+    ! odd_hopping is optional: if absent, default to .FALSE. (VCA hopping,
+    ! backward compatible with existing config files)
+    CALL label_in_file( file_num, 'odd_hopping =', error, 'no' )
+    IF ( error ) THEN
+      cfg%odd_hopping = .FALSE.
+    ELSE
+      READ(file_num, *) cfg%odd_hopping
+    END IF
+
     CLOSE( file_num )
 
     !=========================================================================
@@ -393,6 +407,7 @@ CONTAINS
     END DO
 
     WRITE(*,*) '(cpa_config) All sanity checks passed.'
+    WRITE(*,*) '(cpa_config) odd_hopping = ', cfg%odd_hopping
     WRITE(*,*) '(cpa_config) ETB scheme  = ', TRIM(cfg%scheme)
     WRITE(*,*) '(cpa_config) etb_path    = ', TRIM(cfg%etb_path)
     WRITE(*,*) '(cpa_config) dat_path    = ', TRIM(cfg%dat_path)
