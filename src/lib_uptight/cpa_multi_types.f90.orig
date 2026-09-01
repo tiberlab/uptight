@@ -35,7 +35,7 @@ MODULE cpa_multi_types
   IMPLICIT NONE
   PRIVATE
 
-  PUBLIC :: real_element, cpa_multi_params
+  PUBLIC :: real_element, pair_hopping, cpa_multi_params
   PUBLIC :: destroy_cpa_multi_params
 
   !===========================================================================
@@ -64,6 +64,30 @@ MODULE cpa_multi_types
 
 
   !===========================================================================
+  ! TYPE pair_hopping
+  !
+  ! Off-diagonal-disorder (ODD) hopping for one species pair (Q on sl1,
+  ! Q' on sl2), under the BEB scheme (Blackman 1971; Papaconstantopoulos
+  ! 1989 multiband generalization; Koepernik 1997/1998 multi-sublattice
+  ! generalization). Unlike hopping_vca (single averaged value for all
+  ! bonds), each pair keeps its OWN Slater-Koster hopping parameters, read
+  ! from that pair's own binary .etb file, evaluated at dist_vegard.
+  ! Only used when cpa_multi_params%odd_hopping = .TRUE.
+  !===========================================================================
+
+  TYPE pair_hopping
+
+    INTEGER :: i_elem1   ! index into elem_sl1(:)
+    INTEGER :: i_elem2   ! index into elem_sl2(:)
+
+    ! This pair's own hopping at dist_vegard, in reference-coupling order
+    ! (size n_ref_couplings)
+    REAL(dp), ALLOCATABLE :: t(:)
+
+  END TYPE pair_hopping
+
+
+  !===========================================================================
   ! TYPE cpa_multi_params
   !
   ! All parameters needed for the multi-component CPA Hamiltonian build
@@ -83,7 +107,15 @@ MODULE cpa_multi_types
 
     ! Hopping: single VCA average over all M*N binaries (size n_ref_couplings).
     ! NEVER grouped by real element -- a bond/pair has a unique identity.
+    ! Used when odd_hopping = .FALSE. (default, backward compatible).
     REAL(dp), ALLOCATABLE :: hopping_vca(:)
+
+    ! Off-diagonal disorder (ODD) for hopping (BEB scheme). .FALSE. (default)
+    ! keeps the existing VCA-hopping behavior via hopping_vca(:) above.
+    ! .TRUE. uses pairs(:) below instead, one entry per (species on sl1,
+    ! species on sl2) combination, size n_real_elem_sl1 * n_real_elem_sl2.
+    LOGICAL :: odd_hopping
+    TYPE(pair_hopping), ALLOCATABLE :: pairs(:)
 
     ! SOC: 2nd VCA pass -- average of elem_sl*(:)%so_p weighted by
     ! elem_sl*(:)%conc, giving one effective SOC parameter per sublattice.
@@ -132,6 +164,14 @@ CONTAINS
     END IF
 
     IF ( ALLOCATED(params%hopping_vca) ) DEALLOCATE(params%hopping_vca)
+
+    IF ( ALLOCATED(params%pairs) ) THEN
+      DO idx = 1, SIZE(params%pairs)
+        IF ( ALLOCATED(params%pairs(idx)%t) ) &
+          DEALLOCATE(params%pairs(idx)%t)
+      END DO
+      DEALLOCATE(params%pairs)
+    END IF
 
   END SUBROUTINE destroy_cpa_multi_params
 

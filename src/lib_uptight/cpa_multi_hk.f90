@@ -245,8 +245,11 @@ CONTAINS
   ! Return the Bloch Hamiltonian dimension for the current params. When
   ! odd_hopping = .FALSE., this is the fixed 4*n_ref_states (2 sublattices
   ! x spin), matching build_multi_HK. When odd_hopping = .TRUE., the basis
-  ! is expanded to one block per species per sublattice (BEB scheme):
-  !   ndim = n_spin * n_ref_states * (n_real_elem_sl1 + n_real_elem_sl2)
+  ! is expanded to one block per ACTIVE species per sublattice (BEB scheme):
+  !   ndim = n_spin * n_ref_states * (n_active_sl1 + n_active_sl2)
+  ! Species with zero concentration are excluded from the augmented basis
+  ! entirely (see cpa_multi_types.f90), so n_active_sl*, not
+  ! n_real_elem_sl*, sets the enlarged dimension.
   !===========================================================================
 
   FUNCTION get_multi_HK_ndim( params ) RESULT( ndim )
@@ -256,7 +259,7 @@ CONTAINS
 
     IF ( params%odd_hopping ) THEN
       ndim = 2 * n_ref_states * &
-             ( params%n_real_elem_sl1 + params%n_real_elem_sl2 )
+             ( params%n_active_sl1 + params%n_active_sl2 )
     ELSE
       ndim = 4 * n_ref_states
     END IF
@@ -273,31 +276,34 @@ CONTAINS
   ! 1997/1998 multi-sublattice generalization).
   !
   ! Basis layout: one spin-up/spin-down block of size n_ref_states per
-  ! REAL ELEMENT per sublattice, ordered as
+  ! ACTIVE (nonzero-concentration) REAL ELEMENT per sublattice, ordered as
   !   [ sl1_elem_1_up, sl1_elem_1_dn, sl1_elem_2_up, sl1_elem_2_dn, ...,
   !     sl2_elem_1_up, sl2_elem_1_dn, sl2_elem_2_up, sl2_elem_2_dn, ... ]
   ! Total dimension = get_multi_HK_ndim(params).
   !
-  ! Onsite blocks: sigma1(alpha) (resp. sigma2) placed identically on every
-  ! species block of sublattice 1 (resp. 2) -- the Soven self-energy stays
-  ! species-independent in form (single self-energy per sublattice, per
-  ! Koepernik Appendix A), only the basis layout is enlarged.
+  ! Onsite blocks: the BEB coherent potential is a FULL local matrix in
+  ! chemical-species space. sigma1((Q-1)*n1+Qp,alpha) is Sigma_1^{Q,Qp}
+  ! (and analogously for sublattice 2), so Q /= Qp couples chemical blocks
+  ! on the SAME physical site. These entries are the BEB interactor, not
+  ! physical same-sublattice hopping; see Blackman Eq. (3.14)-(3.22),
+  ! Papaconstantopoulos Eq. (2.8), and Koepernik et al. Eq. (62)-(65).
   !
-  ! Off-diagonal (hopping) blocks: for each species pair (Q on sl1, Q' on
-  ! sl2), the block h^{Q,Q'}(k) is built from THAT PAIR's OWN hopping
-  ! parameters (params%pairs(:)%t), summed over the 4 zinc-blende 1NN bonds
-  ! with Bloch phase -- no averaging across species pairs. No direct
-  ! coupling is placed between different species within the same sublattice
-  ! (no such physical bond exists).
+  ! Off-diagonal (hopping) blocks: for each ACTIVE species pair (Q on sl1,
+  ! Q' on sl2), the block h^{Q,Q'}(k) is built from THAT PAIR's OWN
+  ! hopping parameters (params%pairs(:)%t), summed over the 4 zinc-blende
+  ! 1NN bonds with Bloch phase -- no averaging across species pairs.
   !
   ! SOC: unchanged, VCA (so_p_sl1_vca / so_p_sl2_vca), applied identically
-  ! to every species block of the corresponding sublattice.
+  ! to every species block of the corresponding sublattice (SOC never
+  ! enters the Soven loop, see cpa_multi_types.f90).
   !
   ! INPUT:
   !   kvec(3) : k-vector in fractional coordinates
   !   params  : cpa_multi_params with odd_hopping = .TRUE. and pairs(:) set
-  !   sigma1(n_ref_states) : CPA self-energy for sublattice 1 (COMPLEX)
-  !   sigma2(n_ref_states) : CPA self-energy for sublattice 2 (COMPLEX)
+  !   sigma1(n_active_sl1**2,n_ref_states) : BEB chemical-space potential,
+  !                                           sublattice 1
+  !   sigma2(n_active_sl2**2,n_ref_states) : BEB chemical-space potential,
+  !                                           sublattice 2
   !
   ! OUTPUT:
   !   HK(ndim,ndim) : Bloch Hamiltonian, COMPLEX, ndim = get_multi_HK_ndim(params)
@@ -307,7 +313,7 @@ CONTAINS
 
     REAL(dp), DIMENSION(3),     INTENT(IN) :: kvec
     TYPE(cpa_multi_params),     INTENT(IN) :: params
-    COMPLEX(dp), DIMENSION(n_ref_states), INTENT(IN) :: sigma1, sigma2
+    COMPLEX(dp), DIMENSION(:,:), INTENT(IN) :: sigma1, sigma2
 
     COMPLEX(dp), DIMENSION(:,:), INTENT(OUT) :: HK
 
@@ -324,18 +330,19 @@ CONTAINS
     COMPLEX(dp) :: exp_fac
 
     INTEGER :: i_bond, i_orb, j_orb
-    INTEGER :: n1, n2, i_pair, q1, q2
+    INTEGER :: n1, n2, i_pair, q1, q2, qp1, qp2
     INTEGER :: off1_up, off1_dn, off2_up, off2_dn
     INTEGER, ALLOCATABLE :: off_up_sl1(:), off_dn_sl1(:)
     INTEGER, ALLOCATABLE :: off_up_sl2(:), off_dn_sl2(:)
 
     !=========================================================================
-    ! Block offsets: 2 blocks (up,dn) x n_ref_states per species, sl1 species
-    ! first, then sl2 species. Offsets are 0-based row/col base indices.
+    ! Block offsets: 2 blocks (up,dn) x n_ref_states per ACTIVE species,
+    ! sl1 species first, then sl2 species. Offsets are 0-based row/col
+    ! base indices. Zero-concentration species have no block at all.
     !=========================================================================
 
-    n1 = params%n_real_elem_sl1
-    n2 = params%n_real_elem_sl2
+    n1 = params%n_active_sl1
+    n2 = params%n_active_sl2
 
     ALLOCATE( off_up_sl1(n1), off_dn_sl1(n1) )
     ALLOCATE( off_up_sl2(n2), off_dn_sl2(n2) )
@@ -352,22 +359,30 @@ CONTAINS
     HK = (0.0_dp, 0.0_dp)
 
     !=========================================================================
-    ! Onsite blocks: sigma1(alpha) on every sl1 species block,
-    ! sigma2(alpha) on every sl2 species block (single self-energy per
-    ! sublattice, unchanged from build_multi_HK)
+    ! Local BEB coherent potential. Preserve Q /= Qp elements: the
+    ! species-space interactor is local, although zinc-blende has no
+    ! physical same-sublattice hopping.
     !=========================================================================
 
     DO q1 = 1, n1
-      DO i_orb = 1, n_ref_states
-        HK( off_up_sl1(q1)+i_orb, off_up_sl1(q1)+i_orb ) = sigma1(i_orb)
-        HK( off_dn_sl1(q1)+i_orb, off_dn_sl1(q1)+i_orb ) = sigma1(i_orb)
+      DO qp1 = 1, n1
+        DO i_orb = 1, n_ref_states
+          HK( off_up_sl1(q1)+i_orb, off_up_sl1(qp1)+i_orb ) = &
+            sigma1((q1-1)*n1+qp1,i_orb)
+          HK( off_dn_sl1(q1)+i_orb, off_dn_sl1(qp1)+i_orb ) = &
+            sigma1((q1-1)*n1+qp1,i_orb)
+        END DO
       END DO
     END DO
 
     DO q2 = 1, n2
-      DO i_orb = 1, n_ref_states
-        HK( off_up_sl2(q2)+i_orb, off_up_sl2(q2)+i_orb ) = sigma2(i_orb)
-        HK( off_dn_sl2(q2)+i_orb, off_dn_sl2(q2)+i_orb ) = sigma2(i_orb)
+      DO qp2 = 1, n2
+        DO i_orb = 1, n_ref_states
+          HK( off_up_sl2(q2)+i_orb, off_up_sl2(qp2)+i_orb ) = &
+            sigma2((q2-1)*n2+qp2,i_orb)
+          HK( off_dn_sl2(q2)+i_orb, off_dn_sl2(qp2)+i_orb ) = &
+            sigma2((q2-1)*n2+qp2,i_orb)
+        END DO
       END DO
     END DO
 

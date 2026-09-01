@@ -4,37 +4,112 @@
 ! multi-component alloy, under the VCA-before-CPA scheme (see
 ! implementation_plan.md, "Critical Revision").
 !
-! REVISED: the Soven loop now runs over the REAL ELEMENTS of each
-! sublattice (elem_sl1(:), elem_sl2(:), sizes n_real_elem_sl1 /
-! n_real_elem_sl2), not over the M*N binaries. If a sublattice has only
-! ONE real element (no disorder there), its self-energy is fixed at the
-! (real, since imaginary part = 0) VCA onsite value of that element and
-! is NEVER updated by the Soven iteration -- there is no disorder to
-! self-consistently resum on that sublattice. If BOTH sublattices have
-! only one real element (pure binary case), no Soven iteration is
-! performed at all.
+! Two self-energy structures are used, depending on params%odd_hopping:
+!
+! (A) odd_hopping = .FALSE. (VCA hopping, diagonal disorder only):
+!     ONE self-energy SHARED by every species of a sublattice (unchanged
+!     from the original implementation). This is exactly the "standard
+!     CPA limit" of Blackman, Esterling, Berk, PRB 4, 2412 (1971), Sec.
+!     IV: shared self-energy is correct ONLY when the hopping integral is
+!     non-random (same value regardless of which species sit at the bond
+!     ends). Soven equation per orbital alpha, sublattice s:
+!
+!       F_alpha^s(z) = (1/N_k) SUM_k [ z*I - HK(k) ]^{-1}_{sl_s,alpha,alpha}
+!       t_i = v_i / (1 - F_alpha^s v_i),  v_i = elem_s(i)%onsite(alpha) - sigma_s(alpha)
+!       t_avg = SUM_i c_i t_i
+!       sigma_s_new(alpha) = sigma_s(alpha) + t_avg / (1 + F_alpha^s t_avg)
+!
+! (B) odd_hopping = .TRUE. (BEB, random/off-diagonal hopping):
+!     a SEPARATE self-energy PER ACTIVE SPECIES of a sublattice. A shared
+!     self-energy is explicitly NOT valid here -- Blackman Sec. III, Eq.
+!     (3.14)-(3.22) (verified directly from the original scanned paper,
+!     not from OCR/paraphrase) shows the renormalized locators gamma^A,
+!     gamma^B require DIFFERENT self-energies U_1 != U_2 whenever hopping
+!     is random; only in the nonrandom-hopping limit does U_1=U_2 (path A
+!     above). Quote: "the inherent nonequivalence of atomic type, even on
+!     averaging, is reflected in the self-energy corrections of the
+!     renormalized locators... U1 and U2 are generally unequal."
+!     Papaconstantopoulos, Gonis, Laufer, PRB 40, 12196 (1989), Eq. (2.8)
+!     shows the identical structure (self-energy matrix diag(sigma^A,
+!     sigma^B), generally sigma^A != sigma^B) for the multiband
+!     tight-binding case. Koepernik, Velicky, Hayn, Eschrig, PRB 55, 5717
+!     (1997), Eq. (65), gives the general multi-sublattice single-site
+!     CPA condition as a concentration-weighted SUM over the possible
+!     occupying species of a site.
+!
+!     Our lattice is bipartite (zinc-blende: sublattice 1 and sublattice
+!     2, bonds exist ONLY between the two sublattices, never within one),
+!     unlike Blackman's original single-sublattice A/B alloy (where bonds
+!     can be AA, BB, or AB, forcing an extra "interactor" U_3 between A
+!     and B because A and B directly bond to each other). Because no two
+!     species of the SAME sublattice are ever directly bonded here, the
+!     self-energy can be taken diagonal in species (no same-sublattice
+!     interactor term is generated at the single-site level used by all
+!     three references above) while still keeping a DISTINCT diagonal
+!     value per species -- this is the direct generalization of
+!     Blackman's Eq. (3.14)-(3.15) to M/N components per sublattice.
+!
+!     Each active species Q of sublattice s occupies its OWN block in the
+!     augmented (BEB) Hamiltonian (see cpa_multi_hk.f90::build_multi_HK_odd).
+!     The bare hopping placed in that block's off-diagonal (cross-sublattice)
+!     coupling is TRANSLATIONALLY INVARIANT and NEVER scaled by
+!     concentration -- this is the defining trick of the augmented-space
+!     (BEB) method: species Q's block hops with the SAME bare t_{QQ'} to
+!     every neighbor regardless of how likely species Q actually is.
+!     Concentration enters ENTIRELY through the single-site scattering
+!     condition below, not through the Hamiltonian matrix elements.
+!
+!     For a given realization where the physical atom actually occupying
+!     this site is species q, Koepernik Eq. (63)-(64) fixes the single-
+!     site scattering potential b^{(q)QQ'} = delta_{QQ',Qq} x (bare atomic
+!     inverse propagator of species q): i.e. b^{(q)} is EXACTLY ZERO for
+!     every block Q != q. This is NOT "species Q has bare onsite energy
+!     zero" (which is what an earlier, INCORRECT version of this code
+!     used) -- it is the v -> infinity limit of the ordinary single-site
+!     T-matrix v/(1-Fv): the block simply has no atom in it for this
+!     realization, i.e. is decoupled with infinite scattering strength,
+!     giving t_vacancy = lim_{v->inf} v/(1-Fv) = -1/F_Q, a UNIVERSAL value
+!     that does not depend on sigma_Q at all (only on the current F_Q).
+!     Averaging Koepernik Eq. (65) over which species q actually sits at
+!     the site (species Q itself, weight c_Q; anything else, weight
+!     1-c_Q) gives the single-site CPA condition PER SPECIES Q:
+!
+!       F_Q,alpha(z) = (1/N_k) SUM_k [ z*I - HK(k) ]^{-1}_{Q,alpha,alpha}
+!                      (spin-averaged; HK built with the CURRENT guess of
+!                      EVERY active species' own self-energy, both
+!                      sublattices, since all species are coupled through
+!                      the bare cross-sublattice hopping)
+!
+!       v_own = elem%onsite(alpha) - sigma_Q(alpha)
+!       t_own = v_own / (1 - F_Q,alpha v_own)
+!       t_vac = -1 / F_Q,alpha
+!       0 = c_Q t_own + (1-c_Q) t_vac        <- single-site CPA condition
+!
+!     which is solved iteratively via the same robust Soven-type update
+!     step used by the standard (shared-sigma) path:
+!
+!       t_avg = c_Q t_own + (1-c_Q) t_vac
+!       sigma_Q_new(alpha) = sigma_Q(alpha) + t_avg / (1 + F_Q,alpha t_avg)
+!
+!     Reduction check: with a single active species (c_Q=1), the vacancy
+!     term drops out (weight 1-c_Q=0) and sigma_Q=onsite(alpha) is the
+!     trivial fixed point (v_own=0), matching the existing "no disorder"
+!     shortcut. A species with c_Q=0 must still be excluded from the
+!     augmented basis entirely (see cpa_multi_types.f90) rather than
+!     relying on this formula alone, because even a correctly-vanishing
+!     weight on the "own" term would leave its BARE hopping channel to
+!     the other sublattice fully active in HK(k) for every OTHER
+!     species' realization q -- i.e. c_Q=0 is a singular limit of the
+!     equation above (it forces t_vac=0 i.e. F_Q -> infinity, a pole
+!     that is not approached smoothly), so it is handled by removing the
+!     block outright rather than by this self-consistency condition.
 !
 ! SOC is never part of the Soven loop (see cpa_multi_types.f90 /
-! cpa_multi_build.f90): it always enters build_multi_HK via the
-! precomputed so_p_sl1_vca / so_p_sl2_vca (2nd VCA pass).
-!
-! Soven equation per orbital alpha, sublattice s (=1 or 2), only for
-! sublattices with disorder (n_real_elem_s > 1):
-!
-!   F_alpha^s(z) = (1/N_k) SUM_k [ z*I - HK(k) ]^{-1}_{sl_s,alpha,alpha}
-!                  (spin-averaged: mean of up and down diagonal elements)
-!
-!   DO i = 1, n_real_elem_s
-!      v_i = elem_s(i)%onsite(alpha) - sigma_s_old(alpha)
-!      t_i = v_i / (1 - F_alpha^s * v_i)
-!   END DO
-!
-!   t_avg^s = SUM_i elem_s(i)%conc * t_i
-!
-!   sigma_s_new(alpha) = sigma_s_old(alpha) + t_avg^s / (1 + F_alpha^s * t_avg^s)
+! cpa_multi_build.f90): it always enters build_multi_HK/build_multi_HK_odd
+! via the precomputed so_p_sl1_vca / so_p_sl2_vca (2nd VCA pass).
 !
 ! Spectral function:
-!   A(k,E) = -(1/pi) * Im Tr[ G(k,E+i*eta) ]   (trace over all 4*n_ref_states)
+!   A(k,E) = -(1/pi) * Im Tr[ G(k,E+i*eta) ]   (trace over the full HK dimension)
 !
 MODULE cpa_multi_solver
 
@@ -79,11 +154,18 @@ CONTAINS
   !
   ! Solve sigma1(z) and sigma2(z) via Soven self-consistency for z=E+i*eta.
   !
-  ! If a sublattice has only one real element (n_real_elem_s == 1), its
-  ! self-energy is fixed to that element's VCA onsite (no disorder, no
-  ! Soven update). If BOTH sublattices have n_real_elem == 1, this routine
-  ! returns immediately with converged=.TRUE., n_iter_used=0, and no BZ
-  ! sum is ever performed.
+  ! sigma1/sigma2 are returned as ALLOCATABLE(:,:), shape (n_species,n_ref_states):
+  !   - odd_hopping = .FALSE. : n_species = 1 (single value shared by the
+  !     whole sublattice; use sigma1(1,:) when building the Hamiltonian).
+  !   - odd_hopping = .TRUE.  : n_species = n_active_sl1**2
+  !     (resp. n_active_sl2**2), with row (Q-1)*n_active+Qp holding
+  !     Sigma^{Q,Qp} for the BEB chemical-space coherent potential.
+  !
+  ! If a sublattice has only one ACTIVE species, its self-energy is fixed
+  ! at that element's VCA onsite (no disorder, no Soven update). If BOTH
+  ! sublattices have only one active species, this routine returns
+  ! immediately with converged=.TRUE., n_iter_used=0, and no BZ sum is
+  ! ever performed.
   !
   ! INPUT:
   !   E, eta        : energy and broadening (eta > 0)
@@ -95,10 +177,9 @@ CONTAINS
   !   mixing_alpha  : linear mixing factor (1 = no mixing)
   !
   ! OUTPUT:
-  !   sigma1(n_ref_states) : converged (or fixed) self-energy for sublattice 1
-  !   sigma2(n_ref_states) : converged (or fixed) self-energy for sublattice 2
-  !   converged            : .TRUE. if converged before max_iter
-  !   n_iter_used          : actual number of iterations
+  !   sigma1, sigma2 : converged (or fixed) self-energy, see shape above
+  !   converged      : .TRUE. if converged before max_iter
+  !   n_iter_used    : actual number of iterations
   !===========================================================================
 
   SUBROUTINE cpa_multi_solve_sigma_at_z( E, eta, params, kpts, n_k, &
@@ -113,13 +194,44 @@ CONTAINS
     INTEGER,                INTENT(IN)  :: max_iter
     REAL(dp),               INTENT(IN)  :: mixing_alpha
 
-    COMPLEX(dp), DIMENSION(n_ref_states), INTENT(OUT) :: sigma1, sigma2
+    COMPLEX(dp), DIMENSION(:,:), ALLOCATABLE, INTENT(OUT) :: sigma1, sigma2
     LOGICAL,                              INTENT(OUT) :: converged
     INTEGER,                              INTENT(OUT) :: n_iter_used
 
-    !=========================================================================
-    ! Local variables
-    !=========================================================================
+    IF ( params%odd_hopping ) THEN
+      CALL solve_sigma_odd( E, eta, params, kpts, n_k, tol, max_iter, &
+                             mixing_alpha, sigma1, sigma2, converged, n_iter_used )
+    ELSE
+      CALL solve_sigma_shared( E, eta, params, kpts, n_k, tol, max_iter, &
+                                mixing_alpha, sigma1, sigma2, converged, n_iter_used )
+    END IF
+
+  END SUBROUTINE cpa_multi_solve_sigma_at_z
+
+
+  !===========================================================================
+  ! Subroutine solve_sigma_shared
+  !
+  ! odd_hopping = .FALSE. path: ONE self-energy shared by the whole
+  ! sublattice (unchanged logic from the original implementation).
+  ! Returns sigma1(1,:), sigma2(1,:).
+  !===========================================================================
+
+  SUBROUTINE solve_sigma_shared( E, eta, params, kpts, n_k, &
+                                  tol, max_iter, mixing_alpha, &
+                                  sigma1, sigma2, converged, n_iter_used )
+
+    REAL(dp),               INTENT(IN)  :: E, eta
+    TYPE(cpa_multi_params), INTENT(IN)  :: params
+    REAL(dp), DIMENSION(:,:), INTENT(IN) :: kpts
+    INTEGER,                INTENT(IN)  :: n_k
+    REAL(dp),               INTENT(IN)  :: tol
+    INTEGER,                INTENT(IN)  :: max_iter
+    REAL(dp),               INTENT(IN)  :: mixing_alpha
+
+    COMPLEX(dp), DIMENSION(:,:), ALLOCATABLE, INTENT(OUT) :: sigma1, sigma2
+    LOGICAL,                              INTENT(OUT) :: converged
+    INTEGER,                              INTENT(OUT) :: n_iter_used
 
     LOGICAL :: disorder_sl1, disorder_sl2
 
@@ -138,16 +250,8 @@ CONTAINS
 
     INTEGER :: i_iter, i_k, i_orb, ierr, idx
     INTEGER :: off1_up, off1_dn, off2_up, off2_dn
-    INTEGER, ALLOCATABLE :: off_up_sl1(:), off_dn_sl1(:)
-    INTEGER, ALLOCATABLE :: off_up_sl2(:), off_dn_sl2(:)
-    INTEGER :: q1, q2
 
-    !=========================================================================
-    ! Determine which sublattices carry disorder (n_real_elem > 1).
-    ! A sublattice with a single real element has NO CPA disorder: its
-    ! self-energy is fixed at that element's VCA onsite value (real,
-    ! imaginary part exactly zero) for the whole run.
-    !=========================================================================
+    ALLOCATE( sigma1(1,n_ref_states), sigma2(1,n_ref_states) )
 
     disorder_sl1 = ( params%n_real_elem_sl1 > 1 )
     disorder_sl2 = ( params%n_real_elem_sl2 > 1 )
@@ -168,14 +272,9 @@ CONTAINS
       END DO
     END DO
 
-    !=========================================================================
-    ! Pure-binary shortcut: no disorder anywhere -> sigma = VCA onsite,
-    ! no Soven iteration, no BZ sum ever performed.
-    !=========================================================================
-
     IF ( .NOT. disorder_sl1 .AND. .NOT. disorder_sl2 ) THEN
-      sigma1      = sigma1_old
-      sigma2      = sigma2_old
+      sigma1(1,:) = sigma1_old
+      sigma2(1,:) = sigma2_old
       converged   = .TRUE.
       n_iter_used = 0
       RETURN
@@ -186,54 +285,24 @@ CONTAINS
     ALLOCATE( HK(ndim_loc,ndim_loc), Gk(ndim_loc,ndim_loc), ipiv(ndim_loc) )
     ALLOCATE(work_arr(lwork))
 
-    IF ( params%odd_hopping ) THEN
-      ! Species-block offsets, matching build_multi_HK_odd's layout exactly:
-      ! sl1 species blocks first, then sl2 species blocks.
-      ALLOCATE( off_up_sl1(params%n_real_elem_sl1), off_dn_sl1(params%n_real_elem_sl1) )
-      ALLOCATE( off_up_sl2(params%n_real_elem_sl2), off_dn_sl2(params%n_real_elem_sl2) )
-      DO q1 = 1, params%n_real_elem_sl1
-        off_up_sl1(q1) = 2*n_ref_states*(q1-1)
-        off_dn_sl1(q1) = off_up_sl1(q1) + n_ref_states
-      END DO
-      DO q2 = 1, params%n_real_elem_sl2
-        off_up_sl2(q2) = 2*n_ref_states*params%n_real_elem_sl1 + 2*n_ref_states*(q2-1)
-        off_dn_sl2(q2) = off_up_sl2(q2) + n_ref_states
-      END DO
-    ELSE
-      off1_up = 0
-      off1_dn = n_ref_states
-      off2_up = 2*n_ref_states
-      off2_dn = 3*n_ref_states
-    END IF
+    off1_up = 0
+    off1_dn = n_ref_states
+    off2_up = 2*n_ref_states
+    off2_dn = 3*n_ref_states
 
     z = CMPLX(E, eta, dp)
 
     converged = .FALSE.
 
-    !=========================================================================
-    ! Soven loop
-    !=========================================================================
-
     soven_loop: DO i_iter = 1, max_iter
-
-      !------------------------------------------------------------------------
-      ! Step 1: BZ sum for F1_alpha and F2_alpha
-      ! (still needed for both sublattices even if only one has disorder,
-      !  since HK couples sl1 and sl2 via hopping)
-      !------------------------------------------------------------------------
 
       F1_alpha = CMPLX(0.0_dp, 0.0_dp, dp)
       F2_alpha = CMPLX(0.0_dp, 0.0_dp, dp)
 
       DO i_k = 1, n_k
 
-        IF ( params%odd_hopping ) THEN
-          CALL build_multi_HK_odd( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
-        ELSE
-          CALL build_multi_HK( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
-        END IF
+        CALL build_multi_HK( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
 
-        ! G(k,z) = (z*I - HK)^{-1}
         Gk = -HK
         DO i_orb = 1, ndim_loc
           Gk(i_orb, i_orb) = Gk(i_orb, i_orb) + z
@@ -247,46 +316,19 @@ CONTAINS
           STOP 1
         END IF
 
-        IF ( params%odd_hopping ) THEN
-          ! BEB effective-medium condition: F_alpha is the concentration-
-          ! weighted average of the diagonal Green's function over every
-          ! species block of the sublattice (spin-averaged per species),
-          ! since sigma1(alpha)/sigma2(alpha) is the SAME self-energy
-          ! shared by all species blocks of that sublattice.
-          DO i_orb = 1, n_ref_states
-            DO q1 = 1, params%n_real_elem_sl1
-              F1_alpha(i_orb) = F1_alpha(i_orb) + params%elem_sl1(q1)%conc * &
-                0.5_dp * ( Gk(off_up_sl1(q1)+i_orb, off_up_sl1(q1)+i_orb) + &
-                           Gk(off_dn_sl1(q1)+i_orb, off_dn_sl1(q1)+i_orb) )
-            END DO
-            DO q2 = 1, params%n_real_elem_sl2
-              F2_alpha(i_orb) = F2_alpha(i_orb) + params%elem_sl2(q2)%conc * &
-                0.5_dp * ( Gk(off_up_sl2(q2)+i_orb, off_up_sl2(q2)+i_orb) + &
-                           Gk(off_dn_sl2(q2)+i_orb, off_dn_sl2(q2)+i_orb) )
-            END DO
-          END DO
-        ELSE
-          ! Accumulate spin-averaged diagonal for each sublattice
-          DO i_orb = 1, n_ref_states
-            F1_alpha(i_orb) = F1_alpha(i_orb) + &
-              0.5_dp * ( Gk(off1_up + i_orb, off1_up + i_orb) + &
-                         Gk(off1_dn + i_orb, off1_dn + i_orb) )
-            F2_alpha(i_orb) = F2_alpha(i_orb) + &
-              0.5_dp * ( Gk(off2_up + i_orb, off2_up + i_orb) + &
-                         Gk(off2_dn + i_orb, off2_dn + i_orb) )
-          END DO
-        END IF
+        DO i_orb = 1, n_ref_states
+          F1_alpha(i_orb) = F1_alpha(i_orb) + &
+            0.5_dp * ( Gk(off1_up + i_orb, off1_up + i_orb) + &
+                       Gk(off1_dn + i_orb, off1_dn + i_orb) )
+          F2_alpha(i_orb) = F2_alpha(i_orb) + &
+            0.5_dp * ( Gk(off2_up + i_orb, off2_up + i_orb) + &
+                       Gk(off2_dn + i_orb, off2_dn + i_orb) )
+        END DO
 
       END DO
 
       F1_alpha = F1_alpha / REAL(n_k, dp)
       F2_alpha = F2_alpha / REAL(n_k, dp)
-
-      !------------------------------------------------------------------------
-      ! Step 2: Soven update for sigma1 and sigma2, per orbital.
-      ! Only sublattices with disorder are updated; the other keeps its
-      ! fixed VCA onsite value (sigma_old carried through unchanged).
-      !------------------------------------------------------------------------
 
       sigma1_new = sigma1_old
       sigma2_new = sigma2_old
@@ -317,8 +359,313 @@ CONTAINS
 
       END DO
 
+      max_diff = 0.0_dp
+      IF ( disorder_sl1 ) max_diff = MAX( max_diff, MAXVAL( ABS(sigma1_new - sigma1_old) ) )
+      IF ( disorder_sl2 ) max_diff = MAX( max_diff, MAXVAL( ABS(sigma2_new - sigma2_old) ) )
+
+      IF ( max_diff < tol ) THEN
+        sigma1_old   = sigma1_new
+        sigma2_old   = sigma2_new
+        converged    = .TRUE.
+        n_iter_used  = i_iter
+        EXIT soven_loop
+      END IF
+
+      IF ( disorder_sl1 ) &
+        sigma1_old = mixing_alpha * sigma1_new + (1.0_dp - mixing_alpha) * sigma1_old
+      IF ( disorder_sl2 ) &
+        sigma2_old = mixing_alpha * sigma2_new + (1.0_dp - mixing_alpha) * sigma2_old
+
+      n_iter_used = i_iter
+
+    END DO soven_loop
+
+    sigma1(1,:) = sigma1_old
+    sigma2(1,:) = sigma2_old
+
+    IF ( .NOT. converged ) THEN
+      WRITE(*,'(a,f10.4,a,i6,a,es12.4)') &
+        ' WARNING (cpa_multi_solver): not converged at E=', E, &
+        '  n_iter=', n_iter_used, '  max_diff=', max_diff
+    END IF
+
+    DEALLOCATE(work_arr)
+    DEALLOCATE(HK, Gk, ipiv)
+
+  END SUBROUTINE solve_sigma_shared
+
+
+  !=========================================================================
+  ! Matrix BEB update for one sublattice.  The chemical-space convention is
+  ! row (Q-1)*n_species+Qp.  This implements Koepernik et al. Eq. (65):
+  ! <T> = sum_q c_q [b^(q)-Gamma]^-1 = 0, with
+  ! delta Sigma = [I + <T> Gamma]^-1 <T>.
+  !===========================================================================
+
+  SUBROUTINE update_beb_sigma_block( n_species, onsite, concentration, gamma, &
+                                     sigma_old, sigma_new, ierr )
+
+    INTEGER, INTENT(IN) :: n_species
+    REAL(dp), DIMENSION(n_species,n_ref_states), INTENT(IN) :: onsite
+    REAL(dp), DIMENSION(n_species), INTENT(IN) :: concentration
+    COMPLEX(dp), DIMENSION(n_species,n_species,n_ref_states), INTENT(IN) :: gamma
+    COMPLEX(dp), DIMENSION(n_species*n_species,n_ref_states), INTENT(IN) :: sigma_old
+    COMPLEX(dp), DIMENSION(n_species*n_species,n_ref_states), INTENT(OUT) :: sigma_new
+    INTEGER, INTENT(OUT) :: ierr
+
+    COMPLEX(dp), ALLOCATABLE :: b_q(:,:), t_q(:,:), t_avg(:,:), lhs(:,:), delta(:,:)
+    COMPLEX(dp) :: v_q
+    INTEGER :: i_orb, q, qp, info
+    REAL(dp), PARAMETER :: INV_POTENTIAL_CUTOFF = 1.0d12
+    REAL(dp), PARAMETER :: V_TOL = 1.0d-12
+
+    ALLOCATE( b_q(n_species,n_species), t_q(n_species,n_species), &
+              t_avg(n_species,n_species), lhs(n_species,n_species), &
+              delta(n_species,n_species) )
+
+    ierr = 0
+    sigma_new = sigma_old
+
+    DO i_orb = 1, n_ref_states
+      t_avg = CMPLX(0.0_dp, 0.0_dp, dp)
+
+      DO q = 1, n_species
+        ! Only the actually occupied q channel is finite in b^(q).  The
+        ! zero entries represent absent chemical states, not zero onsite.
+        b_q = CMPLX(0.0_dp, 0.0_dp, dp)
+        v_q = CMPLX(onsite(q,i_orb), 0.0_dp, dp) - &
+              sigma_old((q-1)*n_species+q,i_orb)
+        IF ( ABS(v_q) > V_TOL ) THEN
+          b_q(q,q) = CMPLX(1.0_dp, 0.0_dp, dp) / v_q
+        ELSE
+          ! v_q=0 is the zero-scattering limit; represent its b->infinity
+          ! limit without risking a floating-point division by zero.
+          b_q(q,q) = CMPLX(INV_POTENTIAL_CUTOFF, 0.0_dp, dp)
+        END IF
+
+        t_q = b_q - gamma(:,:,i_orb)
+        CALL invert_complex_matrix( t_q, n_species, info )
+        IF ( info /= 0 ) THEN
+          ierr = info
+          EXIT
+        END IF
+        t_avg = t_avg + concentration(q) * t_q
+      END DO
+      IF ( ierr /= 0 ) EXIT
+
+      lhs = MATMUL(t_avg, gamma(:,:,i_orb))
+      DO q = 1, n_species
+        lhs(q,q) = lhs(q,q) + CMPLX(1.0_dp, 0.0_dp, dp)
+      END DO
+      CALL invert_complex_matrix( lhs, n_species, info )
+      IF ( info /= 0 ) THEN
+        ierr = info
+        EXIT
+      END IF
+
+      delta = MATMUL(lhs, t_avg)
+      DO q = 1, n_species
+        DO qp = 1, n_species
+          sigma_new((q-1)*n_species+qp,i_orb) = &
+            sigma_old((q-1)*n_species+qp,i_orb) + delta(q,qp)
+        END DO
+      END DO
+    END DO
+
+    DEALLOCATE( b_q, t_q, t_avg, lhs, delta )
+
+  END SUBROUTINE update_beb_sigma_block
+
+
+  !=========================================================================
+  ! odd_hopping = .TRUE. path: matrix BEB CPA. sigma1 and sigma2 are
+  ! flattened chemical-space matrices, shape (n_active_sl* ** 2,n_ref_states).
+  !=========================================================================
+
+  SUBROUTINE solve_sigma_odd( E, eta, params, kpts, n_k, &
+                               tol, max_iter, mixing_alpha, &
+                               sigma1, sigma2, converged, n_iter_used )
+
+    REAL(dp),               INTENT(IN)  :: E, eta
+    TYPE(cpa_multi_params), INTENT(IN)  :: params
+    REAL(dp), DIMENSION(:,:), INTENT(IN) :: kpts
+    INTEGER,                INTENT(IN)  :: n_k
+    REAL(dp),               INTENT(IN)  :: tol
+    INTEGER,                INTENT(IN)  :: max_iter
+    REAL(dp),               INTENT(IN)  :: mixing_alpha
+
+    COMPLEX(dp), DIMENSION(:,:), ALLOCATABLE, INTENT(OUT) :: sigma1, sigma2
+    LOGICAL,                              INTENT(OUT) :: converged
+    INTEGER,                              INTENT(OUT) :: n_iter_used
+
+    LOGICAL :: disorder_sl1, disorder_sl2
+    INTEGER :: n1, n2
+
+    COMPLEX(dp), ALLOCATABLE :: sigma1_old(:,:), sigma1_new(:,:)
+    COMPLEX(dp), ALLOCATABLE :: sigma2_old(:,:), sigma2_new(:,:)
+    COMPLEX(dp), ALLOCATABLE :: gamma1(:,:,:), gamma2(:,:,:)
+    REAL(dp), ALLOCATABLE :: onsite1(:,:), onsite2(:,:), concentration1(:), concentration2(:)
+
+    INTEGER :: ndim_loc
+    COMPLEX(dp), ALLOCATABLE :: HK(:,:), Gk(:,:)
+    INTEGER,     ALLOCATABLE :: ipiv(:)
+    COMPLEX(dp), ALLOCATABLE :: work_arr(:)
+    INTEGER :: lwork
+
+    COMPLEX(dp) :: z
+    REAL(dp) :: max_diff
+    REAL(dp), DIMENSION(n_ref_states) :: vca_onsite1, vca_onsite2
+
+    INTEGER :: i_iter, i_k, i_orb, ierr, q1, q2, qp1, qp2
+    INTEGER, ALLOCATABLE :: off_up_sl1(:), off_dn_sl1(:)
+    INTEGER, ALLOCATABLE :: off_up_sl2(:), off_dn_sl2(:)
+
+    n1 = params%n_active_sl1
+    n2 = params%n_active_sl2
+
+    ALLOCATE( sigma1(n1*n1,n_ref_states), sigma2(n2*n2,n_ref_states) )
+    ALLOCATE( sigma1_old(n1*n1,n_ref_states), sigma1_new(n1*n1,n_ref_states) )
+    ALLOCATE( sigma2_old(n2*n2,n_ref_states), sigma2_new(n2*n2,n_ref_states) )
+    ALLOCATE( gamma1(n1,n1,n_ref_states), gamma2(n2,n2,n_ref_states) )
+    ALLOCATE( onsite1(n1,n_ref_states), onsite2(n2,n_ref_states) )
+    ALLOCATE( concentration1(n1), concentration2(n2) )
+
+    DO q1 = 1, n1
+      onsite1(q1,:) = params%elem_sl1(params%active_sl1(q1))%onsite(:)
+      concentration1(q1) = params%elem_sl1(params%active_sl1(q1))%conc
+    END DO
+    DO q2 = 1, n2
+      onsite2(q2,:) = params%elem_sl2(params%active_sl2(q2))%onsite(:)
+      concentration2(q2) = params%elem_sl2(params%active_sl2(q2))%conc
+    END DO
+
+    disorder_sl1 = ( n1 > 1 )
+    disorder_sl2 = ( n2 > 1 )
+
+    sigma1_old = CMPLX(0.0_dp, 0.0_dp, dp)
+    sigma2_old = CMPLX(0.0_dp, 0.0_dp, dp)
+    vca_onsite1 = MATMUL(concentration1, onsite1)
+    vca_onsite2 = MATMUL(concentration2, onsite2)
+    DO q1 = 1, n1
+      IF ( disorder_sl1 ) THEN
+        sigma1_old((q1-1)*n1+q1,:) = CMPLX(vca_onsite1, -eta, dp)
+      ELSE
+        sigma1_old((q1-1)*n1+q1,:) = CMPLX(onsite1(q1,:), 0.0_dp, dp)
+      END IF
+    END DO
+    DO q2 = 1, n2
+      IF ( disorder_sl2 ) THEN
+        sigma2_old((q2-1)*n2+q2,:) = CMPLX(vca_onsite2, -eta, dp)
+      ELSE
+        sigma2_old((q2-1)*n2+q2,:) = CMPLX(onsite2(q2,:), 0.0_dp, dp)
+      END IF
+    END DO
+
+    IF ( .NOT. disorder_sl1 .AND. .NOT. disorder_sl2 ) THEN
+      sigma1      = sigma1_old
+      sigma2      = sigma2_old
+      converged   = .TRUE.
+      n_iter_used = 0
+      DEALLOCATE( sigma1_old, sigma1_new, sigma2_old, sigma2_new, gamma1, gamma2 )
+      DEALLOCATE( onsite1, onsite2, concentration1, concentration2 )
+      RETURN
+    END IF
+
+    ndim_loc = get_multi_HK_ndim( params )
+    lwork    = ndim_loc * ndim_loc
+    ALLOCATE( HK(ndim_loc,ndim_loc), Gk(ndim_loc,ndim_loc), ipiv(ndim_loc) )
+    ALLOCATE(work_arr(lwork))
+
+    ! Species-block offsets, matching build_multi_HK_odd's layout exactly:
+    ! ACTIVE sl1 species blocks first, then ACTIVE sl2 species blocks.
+    ALLOCATE( off_up_sl1(n1), off_dn_sl1(n1) )
+    ALLOCATE( off_up_sl2(n2), off_dn_sl2(n2) )
+    DO q1 = 1, n1
+      off_up_sl1(q1) = 2*n_ref_states*(q1-1)
+      off_dn_sl1(q1) = off_up_sl1(q1) + n_ref_states
+    END DO
+    DO q2 = 1, n2
+      off_up_sl2(q2) = 2*n_ref_states*n1 + 2*n_ref_states*(q2-1)
+      off_dn_sl2(q2) = off_up_sl2(q2) + n_ref_states
+    END DO
+
+    z = CMPLX(E, eta, dp)
+
+    converged = .FALSE.
+
+    soven_loop_odd: DO i_iter = 1, max_iter
+
+      ! Step 1: on-site coherent Green matrix Gamma_s^{Q,Qp}. The Q /= Qp
+      ! entries are required by the matrix BEB condition.
+
+      gamma1 = CMPLX(0.0_dp, 0.0_dp, dp)
+      gamma2 = CMPLX(0.0_dp, 0.0_dp, dp)
+
+      DO i_k = 1, n_k
+
+        CALL build_multi_HK_odd( kpts(:,i_k), params, sigma1_old, sigma2_old, HK )
+
+        Gk = -HK
+        DO i_orb = 1, ndim_loc
+          Gk(i_orb, i_orb) = Gk(i_orb, i_orb) + z
+        END DO
+
+        CALL invert_nxn( ndim_loc, Gk, ipiv, work_arr, lwork, ierr )
+
+        IF ( ierr /= 0 ) THEN
+          WRITE(*,*) 'ERROR (cpa_multi_solver): matrix inversion failed at i_k=', &
+                     i_k, '  ierr=', ierr
+          STOP 1
+        END IF
+
+        DO i_orb = 1, n_ref_states
+          DO q1 = 1, n1
+            DO qp1 = 1, n1
+              gamma1(q1,qp1,i_orb) = gamma1(q1,qp1,i_orb) + &
+                0.5_dp * ( Gk(off_up_sl1(q1)+i_orb, off_up_sl1(qp1)+i_orb) + &
+                           Gk(off_dn_sl1(q1)+i_orb, off_dn_sl1(qp1)+i_orb) )
+            END DO
+          END DO
+          DO q2 = 1, n2
+            DO qp2 = 1, n2
+              gamma2(q2,qp2,i_orb) = gamma2(q2,qp2,i_orb) + &
+                0.5_dp * ( Gk(off_up_sl2(q2)+i_orb, off_up_sl2(qp2)+i_orb) + &
+                           Gk(off_dn_sl2(q2)+i_orb, off_dn_sl2(qp2)+i_orb) )
+            END DO
+          END DO
+        END DO
+
+      END DO
+
+      gamma1 = gamma1 / REAL(n_k, dp)
+      gamma2 = gamma2 / REAL(n_k, dp)
+
+      ! Step 2: concentration-weighted matrix BEB update.
+
+      sigma1_new = sigma1_old
+      sigma2_new = sigma2_old
+
+      IF ( disorder_sl1 ) THEN
+        CALL update_beb_sigma_block(n1, onsite1, concentration1, gamma1, &
+                                    sigma1_old, sigma1_new, ierr)
+        IF ( ierr /= 0 ) THEN
+          WRITE(*,*) 'ERROR (cpa_multi_solver): BEB update failed on sublattice 1, ierr=', ierr
+          STOP 1
+        END IF
+      END IF
+
+      IF ( disorder_sl2 ) THEN
+        CALL update_beb_sigma_block(n2, onsite2, concentration2, gamma2, &
+                                    sigma2_old, sigma2_new, ierr)
+        IF ( ierr /= 0 ) THEN
+          WRITE(*,*) 'ERROR (cpa_multi_solver): BEB update failed on sublattice 2, ierr=', ierr
+          STOP 1
+        END IF
+      END IF
+
       !------------------------------------------------------------------------
-      ! Step 3: Convergence check (max over the sublattice(s) with disorder)
+      ! Step 3: Convergence check (max over ALL active species, both
+      ! sublattices, that carry disorder)
       !------------------------------------------------------------------------
 
       max_diff = 0.0_dp
@@ -330,7 +677,7 @@ CONTAINS
         sigma2_old   = sigma2_new
         converged    = .TRUE.
         n_iter_used  = i_iter
-        EXIT soven_loop
+        EXIT soven_loop_odd
       END IF
 
       !------------------------------------------------------------------------
@@ -344,7 +691,7 @@ CONTAINS
 
       n_iter_used = i_iter
 
-    END DO soven_loop
+    END DO soven_loop_odd
 
     sigma1 = sigma1_old
     sigma2 = sigma2_old
@@ -357,11 +704,11 @@ CONTAINS
 
     DEALLOCATE(work_arr)
     DEALLOCATE(HK, Gk, ipiv)
-    IF ( params%odd_hopping ) THEN
-      DEALLOCATE( off_up_sl1, off_dn_sl1, off_up_sl2, off_dn_sl2 )
-    END IF
+    DEALLOCATE( off_up_sl1, off_dn_sl1, off_up_sl2, off_dn_sl2 )
+    DEALLOCATE( sigma1_old, sigma1_new, sigma2_old, sigma2_new, gamma1, gamma2 )
+    DEALLOCATE( onsite1, onsite2, concentration1, concentration2 )
 
-  END SUBROUTINE cpa_multi_solve_sigma_at_z
+  END SUBROUTINE solve_sigma_odd
 
 
   !===========================================================================
@@ -405,7 +752,10 @@ CONTAINS
     ! Local variables
     !=========================================================================
 
-    COMPLEX(dp), DIMENSION(n_ref_states) :: sigma1, sigma2
+    ! Coherent potential: shape (1,n_ref_states) when odd_hopping = .FALSE.,
+    ! and (n_active_sl* ** 2,n_ref_states) in the matrix BEB path. Row
+    ! (Q-1)*n_active+Qp is Sigma^{Q,Qp}.
+    COMPLEX(dp), DIMENSION(:,:), ALLOCATABLE :: sigma1, sigma2
     INTEGER :: ndim_loc
     COMPLEX(dp), ALLOCATABLE :: HK(:,:), Gk(:,:)
     INTEGER,     ALLOCATABLE :: ipiv(:)
@@ -443,6 +793,8 @@ CONTAINS
     WRITE(*,'(a,i6,a,i6)') '   n_k_bz=', n_k_bz, '  n_k_path=', n_k_path
     WRITE(*,'(a,i3,a,i3)') '   n_real_elem_sl1=', params%n_real_elem_sl1, &
                             '  n_real_elem_sl2=', params%n_real_elem_sl2
+    WRITE(*,'(a,i3,a,i3)') '   n_active_sl1=', params%n_active_sl1, &
+                            '  n_active_sl2=', params%n_active_sl2
     WRITE(*,'(a,l2,a,i5)') '   odd_hopping=', params%odd_hopping, &
                             '  HK dimension=', ndim_loc
     WRITE(*,'(a)') ' ============================================'
@@ -458,6 +810,9 @@ CONTAINS
       !------------------------------------------------------------------------
       ! Step 1: Soven self-consistency for sigma1, sigma2 at z = E + i*eta
       !------------------------------------------------------------------------
+
+      IF ( ALLOCATED(sigma1) ) DEALLOCATE(sigma1)
+      IF ( ALLOCATED(sigma2) ) DEALLOCATE(sigma2)
 
       CALL cpa_multi_solve_sigma_at_z( E, eta, params, kpts_bz, n_k_bz, &
                                         tol, max_iter, mixing_alpha, &
@@ -477,7 +832,7 @@ CONTAINS
         IF ( params%odd_hopping ) THEN
           CALL build_multi_HK_odd( kpts_path(:,i_kp), params, sigma1, sigma2, HK )
         ELSE
-          CALL build_multi_HK( kpts_path(:,i_kp), params, sigma1, sigma2, HK )
+          CALL build_multi_HK( kpts_path(:,i_kp), params, sigma1(1,:), sigma2(1,:), HK )
         END IF
 
         Gk = -HK
@@ -556,6 +911,8 @@ CONTAINS
 
     DEALLOCATE(work_arr, A_matrix)
     DEALLOCATE(HK, Gk, ipiv)
+    IF ( ALLOCATED(sigma1) ) DEALLOCATE(sigma1)
+    IF ( ALLOCATED(sigma2) ) DEALLOCATE(sigma2)
 
   END SUBROUTINE cpa_multi_compute_spectral_function
 

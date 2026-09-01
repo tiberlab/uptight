@@ -71,10 +71,12 @@ CONTAINS
     TYPE(cpa_config_t),     INTENT(IN)  :: cfg
     TYPE(cpa_multi_params), INTENT(OUT) :: params
 
-    INTEGER :: i, j
+    INTEGER :: i, j, ia, ja
     REAL(dp) :: conc_ij
     CHARACTER(LEN=LST) :: work_path
     TYPE(material_data) :: mat_ij
+    INTEGER, ALLOCATABLE :: active_map_sl1(:), active_map_sl2(:)
+    REAL(dp), PARAMETER :: CONC_EPS = 1.0d-10
 
     CHARACTER(LEN=5), DIMENSION(:), POINTER :: ref_states    => NULL()
     CHARACTER(LEN=5), DIMENSION(:), POINTER :: ref_couplings => NULL()
@@ -100,21 +102,59 @@ CONTAINS
 
     params%odd_hopping = cfg%odd_hopping
 
+    ! Active (nonzero-concentration) species list. A species with conc=0
+    ! must be excluded from the BEB augmented Hilbert space altogether --
+    ! see cpa_multi_types.f90 for the physical justification (Koepernik
+    ! 1997, Sec. III B). Built unconditionally (cheap) so downstream code
+    ! never needs to special-case odd_hopping = .FALSE.
+    ALLOCATE( active_map_sl1(cfg%n_sl1), active_map_sl2(cfg%n_sl2) )
+    active_map_sl1 = 0
+    active_map_sl2 = 0
+    params%n_active_sl1 = 0
+    DO i = 1, cfg%n_sl1
+      IF ( cfg%x1(i) > CONC_EPS ) THEN
+        params%n_active_sl1 = params%n_active_sl1 + 1
+        active_map_sl1(i)   = params%n_active_sl1
+      END IF
+    END DO
+    params%n_active_sl2 = 0
+    DO j = 1, cfg%n_sl2
+      IF ( cfg%x2(j) > CONC_EPS ) THEN
+        params%n_active_sl2 = params%n_active_sl2 + 1
+        active_map_sl2(j)   = params%n_active_sl2
+      END IF
+    END DO
+    ALLOCATE( params%active_sl1(params%n_active_sl1) )
+    ALLOCATE( params%active_sl2(params%n_active_sl2) )
+    DO i = 1, cfg%n_sl1
+      IF ( active_map_sl1(i) > 0 ) params%active_sl1(active_map_sl1(i)) = i
+    END DO
+    DO j = 1, cfg%n_sl2
+      IF ( active_map_sl2(j) > 0 ) params%active_sl2(active_map_sl2(j)) = j
+    END DO
+    IF ( params%n_active_sl1 < params%n_real_elem_sl1 .OR. &
+         params%n_active_sl2 < params%n_real_elem_sl2 ) THEN
+      WRITE(*,'(a,a,i0,a,i0,a,i0,a,i0,a)') &
+        ' (cpa_multi_build) excluding zero-concentration species from', &
+        ' active list: sl1 ', params%n_active_sl1, '/', params%n_real_elem_sl1, &
+        ' active, sl2 ', params%n_active_sl2, '/', params%n_real_elem_sl2, ' active'
+    END IF
+
     ALLOCATE( params%elem_sl1(params%n_real_elem_sl1) )
     ALLOCATE( params%elem_sl2(params%n_real_elem_sl2) )
     ALLOCATE( params%hopping_vca(n_ref_couplings) )
 
-    ! ODD hopping (BEB): one pair_hopping entry per (species on sl1, species
-    ! on sl2) combination -- same M*N enumeration as the binary loop below,
-    ! but each entry keeps its OWN hopping instead of being VCA-averaged away.
+    ! ODD hopping (BEB): one pair_hopping entry per (ACTIVE species on sl1,
+    ! ACTIVE species on sl2) combination only -- zero-concentration species
+    ! never get a block/pair in the augmented basis (see above).
     IF ( params%odd_hopping ) THEN
-      ALLOCATE( params%pairs(params%n_real_elem_sl1 * params%n_real_elem_sl2) )
-      DO i = 1, params%n_real_elem_sl1
-        DO j = 1, params%n_real_elem_sl2
-          ALLOCATE( params%pairs((i-1)*params%n_real_elem_sl2 + j)%t(n_ref_couplings) )
-          params%pairs((i-1)*params%n_real_elem_sl2 + j)%i_elem1 = i
-          params%pairs((i-1)*params%n_real_elem_sl2 + j)%i_elem2 = j
-          params%pairs((i-1)*params%n_real_elem_sl2 + j)%t       = 0.0_dp
+      ALLOCATE( params%pairs(params%n_active_sl1 * params%n_active_sl2) )
+      DO ia = 1, params%n_active_sl1
+        DO ja = 1, params%n_active_sl2
+          ALLOCATE( params%pairs((ia-1)*params%n_active_sl2 + ja)%t(n_ref_couplings) )
+          params%pairs((ia-1)*params%n_active_sl2 + ja)%i_elem1 = ia
+          params%pairs((ia-1)*params%n_active_sl2 + ja)%i_elem2 = ja
+          params%pairs((ia-1)*params%n_active_sl2 + ja)%t       = 0.0_dp
         END DO
       END DO
     END IF
@@ -225,7 +265,14 @@ CONTAINS
         CALL compute_hopping_at_vegard( mat_ij, cfg%scheme, i_ion_sl1, i_ion_sl2, &
                                         params%dist_vegard, t_ij )
         IF ( params%odd_hopping ) THEN
-          params%pairs((i-1)*params%n_real_elem_sl2 + j)%t = t_ij
+          ! Only store the pair hopping if BOTH species are active
+          ! (nonzero concentration); an inactive species has no block in
+          ! the augmented basis at all, so its binary's hopping must not
+          ! be written anywhere.
+          IF ( active_map_sl1(i) > 0 .AND. active_map_sl2(j) > 0 ) THEN
+            ia = active_map_sl1(i);  ja = active_map_sl2(j)
+            params%pairs((ia-1)*params%n_active_sl2 + ja)%t = t_ij
+          END IF
         ELSE
           params%hopping_vca  = params%hopping_vca  + conc_ij * t_ij
         END IF
@@ -273,12 +320,13 @@ CONTAINS
     WRITE(*,'(a,f10.6)') ' (cpa_multi_build) so_p_sl2_vca (2nd VCA pass) = ', params%so_p_sl2_vca
 
     IF ( params%odd_hopping ) THEN
-      WRITE(*,'(a)') ' (cpa_multi_build) odd_hopping = T: hopping kept per species-pair (BEB)'
-      DO i = 1, params%n_real_elem_sl1
-        DO j = 1, params%n_real_elem_sl2
-          WRITE(*,'(a,a2,a,a2,a,5f10.4)') '   pair ', params%elem_sl1(i)%name, '-', &
-            params%elem_sl2(j)%name, '  t(1..5) = ', &
-            params%pairs((i-1)*params%n_real_elem_sl2 + j)%t(1:5)
+      WRITE(*,'(a)') ' (cpa_multi_build) odd_hopping = T: hopping kept per active species-pair (BEB)'
+      DO ia = 1, params%n_active_sl1
+        DO ja = 1, params%n_active_sl2
+          WRITE(*,'(a,a2,a,a2,a,5f10.4)') '   pair ', &
+            params%elem_sl1(params%active_sl1(ia))%name, '-', &
+            params%elem_sl2(params%active_sl2(ja))%name, '  t(1..5) = ', &
+            params%pairs((ia-1)*params%n_active_sl2 + ja)%t(1:5)
         END DO
       END DO
     ELSE
@@ -286,6 +334,7 @@ CONTAINS
     END IF
 
     DEALLOCATE( ref_states, ref_couplings )
+    DEALLOCATE( active_map_sl1, active_map_sl2 )
 
   END SUBROUTINE build_multi_cpa_params
 

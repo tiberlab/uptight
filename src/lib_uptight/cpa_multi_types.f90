@@ -77,8 +77,8 @@ MODULE cpa_multi_types
 
   TYPE pair_hopping
 
-    INTEGER :: i_elem1   ! index into elem_sl1(:)
-    INTEGER :: i_elem2   ! index into elem_sl2(:)
+    INTEGER :: i_elem1   ! ACTIVE index (1..n_active_sl1); use elem_sl1(active_sl1(i_elem1))
+    INTEGER :: i_elem2   ! ACTIVE index (1..n_active_sl2); use elem_sl2(active_sl2(i_elem2))
 
     ! This pair's own hopping at dist_vegard, in reference-coupling order
     ! (size n_ref_couplings)
@@ -116,6 +116,23 @@ MODULE cpa_multi_types
     ! species on sl2) combination, size n_real_elem_sl1 * n_real_elem_sl2.
     LOGICAL :: odd_hopping
     TYPE(pair_hopping), ALLOCATABLE :: pairs(:)
+
+    ! Active (nonzero-concentration) species actually present in the BEB
+    ! augmented Hilbert space. A species with conc = 0 MUST be removed
+    ! from the augmented basis entirely -- it is NOT enough to give it
+    ! zero weight in the Soven average, because its bare hopping block
+    ! would otherwise stay fully "alive" in the coherent Hamiltonian and
+    ! contaminate the real species' Green's function even at conc = 0
+    ! exactly (Koepernik, Velicky, Hayn, Eschrig, PRB 55, 5717 (1997),
+    ! Sec. III B: "for c_i^Q=0 ... configurations (iQ) with c_i^Q=0 must
+    ! be removed from the beginning"). n_active_sl1/2 and active_sl1/2(:)
+    ! are the species count/index-map (active index -> elem_sl1/2 index)
+    ! actually used to size and build the augmented Hamiltonian when
+    ! odd_hopping = .TRUE.; pair_hopping%i_elem1/i_elem2 above are indices
+    ! into this ACTIVE list, not into elem_sl1/elem_sl2 directly.
+    INTEGER :: n_active_sl1, n_active_sl2
+    INTEGER, ALLOCATABLE :: active_sl1(:)
+    INTEGER, ALLOCATABLE :: active_sl2(:)
 
     ! SOC: 2nd VCA pass -- average of elem_sl*(:)%so_p weighted by
     ! elem_sl*(:)%conc, giving one effective SOC parameter per sublattice.
@@ -172,6 +189,9 @@ CONTAINS
       END DO
       DEALLOCATE(params%pairs)
     END IF
+
+    IF ( ALLOCATED(params%active_sl1) ) DEALLOCATE(params%active_sl1)
+    IF ( ALLOCATED(params%active_sl2) ) DEALLOCATE(params%active_sl2)
 
   END SUBROUTINE destroy_cpa_multi_params
 
