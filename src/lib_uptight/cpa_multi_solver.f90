@@ -887,7 +887,7 @@ CONTAINS
       WRITE(*,'(a,f10.5,a)') ' Band Gap: ', band_gap, ' eV'
       
       ! Check if direct or indirect
-      IF ( ABS(VBM_k - CBM_k) < 1.0d-6 ) THEN
+      IF ( ABS(VBM_k - CBM_k) < 1.0d-2 ) THEN
         WRITE(*,'(a)') ' Band Gap Type: DIRECT'
       ELSE
         WRITE(*,'(a)') ' Band Gap Type: INDIRECT'
