@@ -88,6 +88,20 @@ AC_DEFUN([TC_LAPACK],
  ])dnl
 ])dnl
 
+dnl optional METIS graph partitioner
+AC_DEFUN([TC_METIS],
+[AC_ARG_WITH([metis], AS_HELP_STRING([--with-metis=DIR],
+  [enable METIS coarse-graining support from DIR]),
+  [METIS_DIR="$with_metis"; HAVE_METIS=yes
+   METIS_INCLUDES="-I$with_metis/include"
+   METIS_LIBS="-L$with_metis/lib -lmetis"],
+  [HAVE_METIS=no; METIS_DIR=; METIS_INCLUDES=; METIS_LIBS=])
+ AC_SUBST([HAVE_METIS])
+ AC_SUBST([METIS_DIR])
+ AC_SUBST([METIS_INCLUDES])
+ AC_SUBST([METIS_LIBS])
+])dnl
+
 dnl which SVN version to use
 dnl
 AC_DEFUN([TC_SUBVERSION],
@@ -103,5 +117,4 @@ AC_DEFUN([TC_SUBVERSION],
   AC_SUBST([SVN])
  fi
 ])dnl
-
 

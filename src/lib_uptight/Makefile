@@ -19,6 +19,8 @@ FPPFLAGS += -D__COMPDATE='"$(shell date +'%F')"'
 
 # Link against LAPACK and BLAS libraries
 LIBMKLIB += -llapack -lblas
+LIBMKLIB += $(METISLIB)
+INCLUDE += $(METISINC)
 
 #LIBS =	$(LIBMKL) $(LIBMPI) $(LIBCUDA) 
 
@@ -54,8 +56,9 @@ SOURCES = precision.f90 \
  	  sort.f90 \
  	  neighbours.f90 \
  	  struct_building.f90 \
-          sparse_matrix.f90 \
- 	  upt_param.f90 \
+	  sparse_matrix.f90 \
+	  upt_param.f90 \
+	  coarse_grain.f90 \
           alloys.f90 \
  	  latt_fun.f90 \
  	  rota.f90 \
@@ -88,6 +91,14 @@ FEASTFSOURCES = feast_banded.f90 \
                 feast_sparse.f90 
 
 OBJECTS = $(SOURCES:.f90=.o) $(SOURCES2:.F90=.o)
+OBJECTS += coarse_grain_metis.o
+
+ifeq ($(have_metis),yes)
+  CFLAGS += -DUPT_HAVE_METIS
+endif
+
+coarse_grain_metis.o: coarse_grain_metis.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 ifdef CUDA
   OBJECTS += lanczos_cuda.o JD_N_PC_Mxprec_cuda.o

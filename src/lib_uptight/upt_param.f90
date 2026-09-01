@@ -25,7 +25,16 @@ module upt_param
   private
 
 
-  public :: OUPT, set_defaults
+  public :: OUPT, set_defaults, CGBlock
+
+  ! Local retained basis for one coarse-grained atom partition.
+  type CGBlock
+     integer :: nrow = 0
+     integer :: nret = 0
+     integer, dimension(:), pointer :: rows => null()
+     real(dp), dimension(:), pointer :: eval => null()
+     complex(dp), dimension(:,:), pointer :: q => null()
+  end type CGBlock
 
   !!* Parameters needed during UPT calculations  
   type OUPT
@@ -80,6 +89,14 @@ module upt_param
      type(CSR_ex) :: ham2           ! Sparse Hamiltonian Matrix
      type(CSR)    :: ham            ! Sparse Hamiltonian Matrix
      type(CSR)    :: U              ! Time-reversal symmetry operator
+
+     ! Coarse-grained solver state.  ham always remains the physical matrix;
+     ! cg_ham is used only by eigensolver drivers when cg_ready is true.
+     logical :: cg_enabled, cg_ready
+     integer :: cg_num_blocks, cg_original_dim, cg_reduced_dim
+     real(dp) :: cg_emin, cg_emax, cg_imbalance, cg_cut_fraction
+     type(CSR) :: cg_ham, cg_U
+     type(CGBlock), dimension(:), pointer :: cg_blocks => null()
  
      REAL ( dp ),   DIMENSION( : ),    POINTER     :: eigen_values
      COMPLEX ( dp ), DIMENSION( :,: ),    POINTER  :: eigen_vectors
@@ -147,7 +164,17 @@ contains
    upt%optmat = .false.              ! Computes optical matrix elements
    upt%check_bondmap = .false.      ! Checks bondmap consistency
    upt%hybrid_passivation = .true.  ! Set on the hybrid orbital passivation 
-                                    ! (PRB 69, 045316 2004)
+                                   ! (PRB 69, 045316 2004)
+
+   upt%cg_enabled = .false.
+   upt%cg_ready = .false.
+   upt%cg_num_blocks = 1
+   upt%cg_original_dim = 0
+   upt%cg_reduced_dim = 0
+   upt%cg_emin = -huge(1.0_dp)
+   upt%cg_emax = huge(1.0_dp)
+   upt%cg_imbalance = 0.03_dp
+   upt%cg_cut_fraction = 0.0_dp
 
    upt%vol_fraction = 0.60         ! cutoff isosurface    
    upt%grid_step = 0.5d0           ! step for output grid

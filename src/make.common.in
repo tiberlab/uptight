@@ -4,6 +4,9 @@ FC := @FC@
 
 
 have_cuda=@HAVE_CUDA@
+have_metis=@HAVE_METIS@
+METISINC=@METIS_INCLUDES@
+METISLIB=@METIS_LIBS@
 
 OMP=Y
 
@@ -74,4 +77,3 @@ ifdef CUDA
  FPPFLAGS += -D__CUDA
 endif
 #-----------------------------------
-
