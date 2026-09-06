@@ -24,11 +24,12 @@ int upt_cg_metis_partition(int nvtxs, const int *xadj, const int *adjncy,
   for (i=0;i<=nvtxs;i++) xa[i] = (idx_t)xadj[i];
   for (i=0;i<nedge;i++) { ad[i] = (idx_t)adjncy[i]; aw[i] = (idx_t)adjwgt[i]; }
   for (i=0;i<nvtxs;i++) vw[i] = (idx_t)vwgt[i];
+  idx_t ncon = 1;
   METIS_SetDefaultOptions(options);
   options[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_CUT;
   options[METIS_OPTION_UFACTOR] = (idx_t)ufactor;
   options[METIS_OPTION_SEED] = (idx_t)seed;
-  if (METIS_PartGraphKway(&nv, NULL, xa, ad, vw, NULL, aw, &nc, NULL,
+  if (METIS_PartGraphKway(&nv, &ncon, xa, ad, vw, NULL, aw, &nc, NULL,
                           NULL, options, &edgecut, pt) != METIS_OK) goto fail;
   for (i=0;i<nvtxs;i++) part[i] = (int)pt[i];
   free(xa); free(ad); free(vw); free(aw); free(pt);

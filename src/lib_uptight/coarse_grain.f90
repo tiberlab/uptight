@@ -86,7 +86,7 @@ contains
     integer, allocatable :: counts(:), cursor(:), offsets(:), bsize(:)
     integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
     real(dp), allocatable :: edge_weight(:)
-    real(dp) :: max_weight, all_weight, cut_weight
+    real(dp) :: max_weight, all_weight, cut_weight, workspace_mib
     type(CGPair), allocatable :: pairs(:)
 
     ierr = 0
@@ -105,6 +105,9 @@ contains
     end if
     if (.not.associated(upt%ham%M)) then
        ierr = 4; write(*,*) '(coarse grain) Hamiltonian is not initialized'; return
+    end if
+    if (upt%cg_num_blocks == 1 .and. upt%verbose > 0) then
+       write(*,*) '(coarse grain) one block selected; energy window controls rank'
     end if
 
     allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
@@ -164,8 +167,14 @@ contains
     end do
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%cg_num_blocks,c_int), int(nint(1000.0_dp*upt%cg_imbalance),c_int), 42_c_int, part)
-    if (status /= 0) then
-       ierr = 8; write(*,*) '(coarse grain) METIS is unavailable or failed'; return
+    if (status /= 0) then       ! METIS not available - fallback to simple sequential partitioning
+       if (upt%verbose > 0) then
+          write(*,*) '(coarse grain) METIS unavailable, using sequential partitioning'
+       end if
+       ! Simple partition: divide atoms sequentially into blocks
+       do i = 1, na
+          part(i) = int((i-1) * upt%cg_num_blocks / na, c_int)
+       end do
     end if
     do i = 1, na
        label(i) = int(part(i)) + 1
@@ -193,6 +202,11 @@ contains
        upt%cg_blocks(i)%nrow = counts(i)
        allocate(upt%cg_blocks(i)%rows(counts(i)))
     end do
+    ! ZHEEVD needs the dense matrix plus work arrays.  This is deliberately
+    ! only a prediction: the allocation itself remains inside diagonalize_block.
+    workspace_mib = 16.0_dp * real(maxval(counts),dp)**2 / (1024.0_dp**2)
+    if (upt%verbose > 0) write(*,'(a,i0,a,f10.2,a)') '(coarse grain) largest dense block ', &
+         maxval(counts), ', matrix workspace at least ', workspace_mib, ' MiB'
     cursor = 0
     do i = 1, na
        br = label(i)
@@ -223,6 +237,7 @@ contains
     if (total_ret == 0) then
        ierr = 9; write(*,*) '(coarse grain) energy window retained no states'; return
     end if
+    ! No check needed - we will compute ALL eigenvalues of reduced matrix
     upt%cg_original_dim = n; upt%cg_reduced_dim = total_ret
 
     call build_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, ierr)
@@ -241,6 +256,10 @@ contains
     complex(dp), allocatable :: h(:,:)
     real(dp), allocatable :: w(:)
     ierr = 0; n = upt%cg_blocks(ib)%nrow
+    if (n == 0) then
+       upt%cg_blocks(ib)%nret = 0
+       return
+    end if
     allocate(h(n,n), w(n)); h = (0.0_dp,0.0_dp)
     do r = 1, upt%ham%nrow
        if (local(r) == 0) cycle
@@ -279,6 +298,7 @@ contains
     real(dp), allocatable :: rwork(:)
     integer, allocatable :: iwork(:)
     n=size(w)
+    if (n == 0) then; ierr=0; return; end if
     call zheevd('V','U',n,a,n,w,workq,-1,rworkq,-1,iworkq,-1,info)
     if (info /= 0) then; ierr=10; return; end if
     lwork=max(1,int(real(workq(1)))); lrwork=max(1,int(rworkq(1))); liwork=max(1,iworkq(1))

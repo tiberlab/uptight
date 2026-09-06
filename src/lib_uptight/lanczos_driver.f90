@@ -21,6 +21,7 @@ MODULE lanczos_driver
   USE errors
   USE lanczos_diag
   USE savemofile, only : append_eigenstate
+  USE coarse_grain, only : cg_active, cg_lift
 
   IMPLICIT NONE
   PRIVATE
@@ -48,6 +49,10 @@ MODULE lanczos_driver
  
       CHARACTER(LEN=:), ALLOCATABLE :: states_file
 
+      if (cg_active(upt)) then
+         call lanczos_coarse(upt)
+         return
+      end if
       ! clear the states files, but only after all processes have read the states
       ! NOTE: maybe it would be more elegant to broadcast the vectors?
       if (id0) then
@@ -189,6 +194,49 @@ MODULE lanczos_driver
       ! -------------------------------------------------------------------------
 
     end subroutine lanczos
+
+    subroutine lanczos_coarse(upt)
+      type(OUPT) :: upt
+      integer :: nred,nfull,err,i,file_num
+      real(dp), allocatable, target :: rval(:)
+      complex(dp), allocatable, target :: rvec(:,:)
+      real(dp), pointer :: pval(:)
+      complex(dp), pointer :: pvec(:,:)
+      character(len=:), allocatable :: statesfile
+      
+      nred=upt%cg_ham%nrow; nfull=upt%ham%nrow
+      
+      ! Solve for ALL eigenvalues of reduced matrix
+      allocate(rval(nred),rvec(nred,nred),stat=err)
+      if(err/=0) stop '(Lanczos coarse grain) allocation failed'
+      rval=0.0_dp; rvec=(0.0_dp,0.0_dp)
+      
+      ! Point to the entire arrays
+      pval => rval
+      pvec => rvec
+      
+      ! Call Lanczos to get all eigenvalues
+      call LANCZOS_EV(upt%cg_ham,upt%cg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
+         1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol,upt%ort_tol, &
+         0,upt%dynamic,upt%bitoff,.false.,upt%verbose)
+      
+      if(associated(upt%eigen_values)) deallocate(upt%eigen_values)
+      if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+      if(associated(upt%particles)) deallocate(upt%particles)
+      allocate(upt%eigen_values(nred),upt%eigen_vectors(nfull,nred),upt%particles(nred))
+      upt%eigen_values=rval
+      upt%particles=0
+      call cg_lift(upt,rvec,upt%eigen_vectors)
+      
+      if(id0) then
+         statesfile=trim(upt%state_file)
+         call open_file(statesfile,file_num,operation='write',replace_flag=.true.,output_flag=.false.); close(file_num)
+         do i=1,nred
+            call append_eigenstate(statesfile,upt%eigen_vectors(:,i),upt%eigen_values(i),upt%particles(i))
+         end do
+      end if
+      deallocate(rval,rvec)
+    end subroutine lanczos_coarse
 
 
 END MODULE lanczos_driver

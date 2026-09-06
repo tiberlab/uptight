@@ -20,6 +20,7 @@ MODULE lapack_driver
   USE input_output
   use errors
   USE exceptions
+  USE coarse_grain, only : cg_active, cg_lift
 
   implicit none
   private
@@ -43,6 +44,10 @@ contains
       integer :: num_conv, file_num
       CHARACTER(200) :: file_name
 
+      if (cg_active(upt)) then
+         call lapack_coarse(upt)
+         return
+      end if
       n_ham = upt%ham%nrow
       num_ev = upt%num_vb + upt%num_cb
 
@@ -148,6 +153,39 @@ contains
       deallocate(ham,tmp_eigvals)
  
     end subroutine lapack
+
+    subroutine lapack_coarse(upt)
+      type(OUPT) :: upt
+      integer :: nred,nfull,i,err
+      complex(dp), allocatable :: h(:,:)
+      real(dp), allocatable :: eval(:)
+      nred=upt%cg_ham%nrow; nfull=upt%ham%nrow
+      
+      ! With coarse-graining, solve for ALL eigenvalues of reduced matrix
+      allocate(h(nred,nred),eval(nred),stat=err)
+      if(err/=0) call alloc_error('lapack coarse','allocate','work')
+      
+      call assemble_dense_H(upt%cg_ham%M,upt%cg_ham%Mj,upt%cg_ham%Mi,upt%cg_ham%sparse_fmt,nred,h)
+      call diagonalize_ham(h,nred,eval)
+      
+      if(associated(upt%eigen_values)) deallocate(upt%eigen_values)
+      if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+      if(associated(upt%particles)) deallocate(upt%particles)
+      
+      ! Return ALL nred eigenvalues
+      allocate(upt%eigen_values(nred),upt%eigen_vectors(nfull,nred),upt%particles(nred))
+      
+      do i=1,nred
+         upt%eigen_values(i)=eval(i)
+         ! Don't assign particles for coarse-graining (or set all to 0)
+         upt%particles(i)=0
+      end do
+      
+      ! Lift ALL eigenvectors
+      call cg_lift(upt,h,upt%eigen_vectors)
+      
+      deallocate(h,eval)
+    end subroutine lapack_coarse
 
       
    subroutine Diagonalize_ham(HAM, N, eigval)

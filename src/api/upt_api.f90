@@ -536,6 +536,42 @@ subroutine upt_createhamiltonian(handler,sparse_fmt)
 
 end subroutine upt_createhamiltonian
 
+!!* Configure optional block-basis coarse graining before creating the Hamiltonian.
+subroutine upt_set_coarse_graining(handler, enabled, n_blocks, emin, emax, imbalance)
+  use precision, only : dp
+  use uptightAPICommon  ! if:mod:use
+  use uptight, only : upt_configure_coarse_graining ! if:mod:use
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: enabled ! if:var:in
+  integer :: n_blocks ! if:var:in
+  real(dp) :: emin ! if:var:in
+  real(dp) :: emax ! if:var:in
+  real(dp) :: imbalance ! if:var:in
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_configure_coarse_graining(pUPTs%pUPT, enabled /= 0, n_blocks, emin, emax, imbalance)
+end subroutine upt_set_coarse_graining
+
+!!* Return coarse-graining reduction statistics after Hamiltonian creation.
+subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)
+  use precision, only : dp
+  use uptightAPICommon  ! if:mod:use
+  use uptight, only : upt_get_coarse_graining_info_f => upt_get_coarse_graining_info ! if:mod:use
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: ready ! if:var:out
+  integer :: original_dim ! if:var:out
+  integer :: reduced_dim ! if:var:out
+  integer :: n_blocks ! if:var:out
+  real(dp) :: cut_fraction ! if:var:out
+  logical :: is_ready
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_get_coarse_graining_info_f(pUPTs%pUPT,is_ready,original_dim,reduced_dim,n_blocks,cut_fraction)
+  ready = merge(1,0,is_ready)
+end subroutine upt_get_coarse_graining_info
+
 !!* Computes the system hamiltonian
 !!* @param handler Number for the UPTIGHT instance.
 subroutine upt_printhamiltonian(handler)

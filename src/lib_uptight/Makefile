@@ -94,7 +94,7 @@ OBJECTS = $(SOURCES:.f90=.o) $(SOURCES2:.F90=.o)
 OBJECTS += coarse_grain_metis.o
 
 ifeq ($(have_metis),yes)
-  CFLAGS += -DUPT_HAVE_METIS
+  CFLAGS += -DUPT_HAVE_METIS $(METISINC)
 endif
 
 coarse_grain_metis.o: coarse_grain_metis.c
@@ -127,6 +127,9 @@ all: PARAMETERIZER
 PARAMETERIZER: parameterizer.o f_exceptions.o $(OBJECTS) 
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
+test_supercell: test_supercell.o f_exceptions.o $(OBJECTS)
+		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB) $(METISLIB)
+
 # pUPT: test8.o f_exceptions.o  $(OBJECTS) 
 #		@$(FC) $(SHOW) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
 #		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LIBMPI) $(LIBCUDA) $(LIBMKLIB)
@@ -147,6 +150,9 @@ FEAST:
 	
 uptight.a: $(OBJECTS) 
 	ar cq $@ $^
+
+test_coarse_grain: test_coarse_grain.o $(OBJECTS)
+		$(FC) $(LDFLAGS) -o $@ $^ $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
 
 ifdef CUDA
@@ -203,7 +209,7 @@ $(SOURCES):
 
 .PHONY: clean check
 clean:
-	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT
+	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT test_coarse_grain
 
 check:
 	@echo $(have_cuda)

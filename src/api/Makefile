@@ -8,6 +8,7 @@ include ../make.common
 API = $(shell pwd)
 
 TARGET = libuptight_$(ARCH1).a
+LFLAGS += $(LIBMKLIB)
 
 CSOURCES = UptInitException.C \
       	   UptSolverException.C 
@@ -77,7 +78,6 @@ clean:
 
 tar_source:
 	tar cvf uptight.tar ${SOURCES} Makefile
-
 
 
 

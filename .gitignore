@@ -31,3 +31,7 @@ TEST/INIshell/GaN.etb
 TEST/INIshell/kpoints
 TEST/INIshell/tb.upg
 TEST/INIshell/test_GUI.ini
+COARSE_GRAINING_GUIDE.md
+.freebuff/project-id
+src/lib_uptight/coarse-grain_plan.md
+src/lib_uptight/test_supercell

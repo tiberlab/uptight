@@ -21,6 +21,7 @@ MODULE jd_driver
   USE errors
   USE jd_diag
   USE savemofile, only : append_eigenstate
+  USE coarse_grain, only : cg_active, cg_lift
 
   IMPLICIT NONE
   PRIVATE
@@ -49,6 +50,10 @@ MODULE jd_driver
       INTEGER :: len, verbose
 
 
+      if (cg_active(upt)) then
+         call jd_coarse(upt)
+         return
+      end if
       num_ev = upt%num_vb + upt%num_cb
       num_cb = upt%num_cb - upt%start_cb + 1
       num_vb = upt%num_vb - upt%start_vb + 1
@@ -187,6 +192,50 @@ MODULE jd_driver
 
 
     end subroutine jd
+
+    subroutine jd_coarse(upt)
+      type(OUPT) :: upt
+      integer :: nred, nfull, err, i, file_num
+      real(dp), allocatable, target :: rval(:)
+      complex(dp), allocatable, target :: rvec(:,:)
+      real(dp), pointer :: pval(:)
+      complex(dp), pointer :: pvec(:,:)
+      character(len=:), allocatable :: statesfile
+
+      nred=upt%cg_ham%nrow; nfull=upt%ham%nrow
+      
+      ! Solve for ALL eigenvalues of reduced matrix
+      allocate(rval(nred),rvec(nred,nred),stat=err)
+      if(err/=0) stop '(JD coarse grain) allocation failed'
+      rval=0.0_dp; rvec=(0.0_dp,0.0_dp)
+      
+      ! Point to the entire arrays
+      pval => rval
+      pvec => rvec
+      
+      ! Call JD to get all eigenvalues
+      call JD_EV(upt%cg_ham,upt%cg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
+           1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol, &
+           upt%ort_tol,0,upt%dynamic,.false.,upt%verbose,1)
+      
+      if(associated(upt%eigen_values)) deallocate(upt%eigen_values)
+      if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+      if(associated(upt%particles)) deallocate(upt%particles)
+      allocate(upt%eigen_values(nred),upt%eigen_vectors(nfull,nred),upt%particles(nred))
+      upt%eigen_values=rval
+      upt%particles=0
+      call cg_lift(upt,rvec,upt%eigen_vectors)
+      
+      if(id0) then
+         statesfile=trim(upt%state_file)
+         call open_file(statesfile,file_num,operation='write',replace_flag=.true.,output_flag=.false.)
+         close(file_num)
+         do i=1,nred
+            call append_eigenstate(statesfile,upt%eigen_vectors(:,i),upt%eigen_values(i),upt%particles(i))
+         end do
+      end if
+      deallocate(rval,rvec)
+    end subroutine jd_coarse
 
 
 END MODULE jd_driver

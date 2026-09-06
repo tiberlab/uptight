@@ -15,12 +15,19 @@
 !
 program test_upt_api
 
-integer :: handler(4)
+integer :: handler(4), ready, original_dim, reduced_dim, n_blocks
+real(8) :: cut_fraction
 
 write(*,*) 'initializing UPT ...'
 call upt_initsession(handler)
 
 write(*,*) 'handler recieved',handler
+
+! Public API smoke test.  This remains disabled so it is independent of an
+! optional METIS installation.
+call upt_set_coarse_graining(handler, 0, 1, -1.0d0, 1.0d0, 0.03d0)
+call upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)
+if (ready /= 0 .or. original_dim /= 0 .or. reduced_dim /= 0 .or. n_blocks /= 1) stop 1
 
 write(*,*) 'kill UPT ...'
 call upt_destructsession(handler)

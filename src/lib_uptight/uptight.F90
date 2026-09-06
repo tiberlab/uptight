@@ -32,6 +32,7 @@ module UPTIGHT
                                    sort_states
   USE alloys, only : init_mat_ion
   USE TB_ham, only : sparse_ham, hermitianize, check_if_hermitian
+  USE coarse_grain, only : cg_prepare, cg_clear, cg_configure
   USE lanczos_driver, only : lanczos
   USE lapack_driver, only : lapack
   USE jd_driver, only : jd
@@ -50,6 +51,7 @@ module UPTIGHT
   PUBLIC :: upt_jd, upt_lapack
   public :: upt_write_eigenvectors, upt_get_mat_el, upt_nullify_all
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
+  public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
   public :: upt_writehamiltonian
 
   !interface init
@@ -75,6 +77,12 @@ contains
     NULLIFY(upt%ham%M)
     NULLIFY(upt%ham%Mj)
     NULLIFY(upt%ham%Mi)
+    NULLIFY(upt%cg_ham%M)
+    NULLIFY(upt%cg_ham%Mj)
+    NULLIFY(upt%cg_ham%Mi)
+    NULLIFY(upt%cg_U%M)
+    NULLIFY(upt%cg_U%Mj)
+    NULLIFY(upt%cg_U%Mi)
     NULLIFY(upt%ref_states)
     NULLIFY(upt%ref_couplings)
 
@@ -251,6 +259,7 @@ contains
     INTEGER :: i
 
     call destroy_matrix(upt%ham)
+    call cg_clear(upt)
 
     !write(*,*) '(debug) deallocate basis'
     call destroy_basis(upt%basis)
@@ -308,12 +317,20 @@ contains
   subroutine UPT_hamiltonian(upt)
 
     TYPE(OUPT), pointer :: upt 
+    integer :: ierr
 
     if(upt%verbose.gt.0) write(*,*) '(uptight) clear any prev. matrix'    
     call destroy_matrix(upt%ham)
 
     if(upt%verbose.gt.0) write(*,*) '(uptight) compute new matrix'
     call sparse_ham(upt)
+    if (upt%cg_enabled) then
+       call cg_prepare(upt, ierr)
+       if (ierr /= 0) then
+          write(*,*) '(uptight) coarse-graining preparation failed'
+          stop 1
+       end if
+    end if
 
     ! VERY IMPORTANT NOTE: The full H is non-hermitian when there are 
     ! interfaces Alloy/Alloy or Alloy/Pure since there is no symmetry 
@@ -331,6 +348,23 @@ contains
     !end if
 
   end subroutine UPT_hamiltonian
+
+  subroutine UPT_configure_coarse_graining(upt, enabled, nblocks, emin, emax, imbalance)
+    type(OUPT), intent(inout) :: upt
+    logical, intent(in) :: enabled
+    integer, intent(in) :: nblocks
+    real(dp), intent(in) :: emin, emax, imbalance
+    call cg_configure(upt, enabled, nblocks, emin, emax, imbalance)
+  end subroutine UPT_configure_coarse_graining
+
+  subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+    use coarse_grain, only : cg_get_info
+    type(OUPT), intent(in) :: upt
+    logical, intent(out) :: ready
+    integer, intent(out) :: original_dim, reduced_dim, nblocks
+    real(dp), intent(out) :: cut_fraction
+    call cg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+  end subroutine UPT_get_coarse_graining_info
 
   !---------------------------------------------------------------------
   subroutine UPT_writehamiltonian(upt)
