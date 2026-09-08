@@ -190,13 +190,6 @@ program test_supercell
   do i = 1, upt%nr_mat
      call sort_states(upt%materials(i), upt%ref_states, upt%ref_couplings)
   end do
-  do i = 1, size(upt%materials)
-     do j = 1, size(upt%materials)
-        if (associated(upt%interfaces(i,j)%nr_parents)) then
-           call sort_states(upt%interfaces(i,j), upt%ref_states, upt%ref_couplings)
-        end if
-     end do
-  end do
 
   write(*,*) 'Setting max order...'
   call set_max_order(upt%materials)

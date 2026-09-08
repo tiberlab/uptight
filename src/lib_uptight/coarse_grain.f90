@@ -133,7 +133,7 @@ contains
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
           if (atom_of(r) == atom_of(c)) cycle
-          if (upt%ham%sparse_fmt == 'F' .and. r > c) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           nedge = nedge + 1
           if (nedge > maxedge) then
              ierr = 6; return
@@ -158,7 +158,7 @@ contains
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
           if (atom_of(r) == atom_of(c)) cycle
-          if (upt%ham%sparse_fmt == 'F' .and. r > c) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           br = atom_of(r); bc = atom_of(c)
           p = max(1, nint(abs(upt%ham%M(k))**2 / max_weight * 1000000.0_dp))
           adjncy(cursor(br)) = int(bc-1, c_int); adjwgt(cursor(br)) = int(p, c_int); cursor(br)=cursor(br)+1
@@ -185,7 +185,7 @@ contains
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
           if (atom_of(r) == atom_of(c)) cycle
-          if (upt%ham%sparse_fmt == 'F' .and. r > c) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           all_weight = all_weight + abs(upt%ham%M(k))**2
           if (label(atom_of(r)) /= label(atom_of(c))) cut_weight = cut_weight + abs(upt%ham%M(k))**2
        end do
@@ -266,8 +266,9 @@ contains
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
           if (local(c) == 0) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           h(local(r),local(c)) = upt%ham%M(k)
-          if (upt%ham%sparse_fmt /= 'F' .and. r /= c) h(local(c),local(r)) = conjg(upt%ham%M(k))
+          if (r /= c) h(local(c),local(r)) = conjg(upt%ham%M(k))
        end do
     end do
     call dense_eigh(h, w, ierr)
@@ -307,6 +308,23 @@ contains
     deallocate(work,rwork,iwork); ierr=info
   end subroutine dense_eigh
 
+  logical function stored_entry(fmt, r, c)
+    character(1), intent(in) :: fmt
+    integer, intent(in) :: r, c
+    select case (fmt)
+    case ('U', 'u')
+       stored_entry = (r <= c)
+    case ('L', 'l')
+       stored_entry = (r >= c)
+    case default
+       ! The Hamiltonian builder may emit a complete matrix even when the
+       ! sparse format is labelled F.  Process one triangle here; the
+       ! projected matrix is completed by its Hermitian conjugate below.
+       stored_entry = (r <= c)
+    end select
+  end function stored_entry
+
+
   subroutine build_reduced_hamiltonian(upt, atom_of, label, local, pairs, npair, ierr)
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: atom_of(:), label(:)
@@ -326,7 +344,7 @@ contains
           c=upt%ham%Mj(k); a=label(atom_of(r)); b=label(atom_of(c))
           if(a==b) cycle
           if(upt%cg_blocks(a)%nret==0 .or. upt%cg_blocks(b)%nret==0) cycle
-          if(upt%ham%sparse_fmt=='F' .and. r>c) cycle
+          if(.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           ia=min(a,b); ib=max(a,b)
           slot=pair_slot(pairs,npair,ia,ib,upt)
           if(slot==0) then; ierr=11; return; end if
