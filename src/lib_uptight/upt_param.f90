@@ -32,8 +32,11 @@ module upt_param
      integer :: nrow = 0
      integer :: nret = 0
      integer, dimension(:), pointer :: rows => null()
-     real(dp), dimension(:), pointer :: eval => null()
-     complex(dp), dimension(:,:), pointer :: q => null()
+     real(dp), dimension(:), pointer :: eval => null()      ! retained eigenvalues (nret)
+     complex(dp), dimension(:,:), pointer :: q => null()    ! retained eigenvectors (nrow, nret)
+     ! Full eigensystem — kept only during cg_prepare, freed after projection
+     real(dp), dimension(:), pointer :: evals_full => null()  ! all nrow eigenvalues
+     complex(dp), dimension(:,:), pointer :: S_full => null() ! all nrow eigenvectors (nrow, nrow)
   end type CGBlock
 
   !!* Parameters needed during UPT calculations  
