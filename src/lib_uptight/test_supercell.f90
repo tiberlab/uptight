@@ -15,12 +15,12 @@
 !   9:  lambda_cb  (eV)
 !   10: n_blocks   (CG & ICG)
 !   11: cg_emin    (eV)
-!   13: cg_emax    (eV)
-!   14: imbalance  (METIS)
-!   15: icg_core_emin  (eV)
-!   16: icg_core_emax  (eV)
-!   17: icg_e_buffer   (eV)
-!   18: icg_epsilon    (threshold factor)
+!   12: cg_emax    (eV)
+!   13: imbalance  (METIS)
+!   14: icg_core_emin  (eV)
+!   15: icg_core_emax  (eV)
+!   16: icg_e_buffer   (eV)
+!   17: icg_epsilon    (threshold factor)
 program test_supercell
 
   USE precision
