@@ -26,6 +26,7 @@ MODULE lapack_driver
   private
   
   public :: lapack
+  public :: lapack_icg_solve
 
   private :: assemble_dense_H, diagonalize_ham_i
   private :: diagonalize_ham
@@ -388,5 +389,20 @@ contains
 
     end subroutine printmat_fc
 
+  ! Public wrapper: assemble dense reduced H from icg_ham, diagonalize,
+  ! return eigenvectors in h (columns) and eigenvalues in eval.
+  subroutine lapack_icg_solve(upt, h, eval)
+    use upt_param, only : OUPT
+    type(OUPT), intent(in)                        :: upt
+    complex(dp), intent(out), allocatable         :: h(:,:)
+    real(dp),    intent(out), allocatable         :: eval(:)
+    integer :: nred, err
+    nred = upt%icg_ham%nrow
+    allocate(h(nred,nred), eval(nred), stat=err)
+    if (err /= 0) call alloc_error('lapack_icg_solve','allocate','work')
+    call assemble_dense_H(upt%icg_ham%M, upt%icg_ham%Mj, upt%icg_ham%Mi, &
+                          upt%icg_ham%sparse_fmt, nred, h)
+    call diagonalize_ham(h, nred, eval)
+  end subroutine lapack_icg_solve
 
 END MODULE lapack_driver

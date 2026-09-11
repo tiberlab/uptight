@@ -37,6 +37,7 @@ module upt_param
      ! Full eigensystem — kept only during cg_prepare, freed after projection
      real(dp), dimension(:), pointer :: evals_full => null()  ! all nrow eigenvalues
      complex(dp), dimension(:,:), pointer :: S_full => null() ! all nrow eigenvectors (nrow, nrow)
+     integer, dimension(:), pointer :: retained_idx => null() ! indices of retained states in S_full (nret)
   end type CGBlock
 
   !!* Parameters needed during UPT calculations  
@@ -100,6 +101,16 @@ module upt_param
      real(dp) :: cg_emin, cg_emax, cg_imbalance, cg_cut_fraction
      type(CSR) :: cg_ham, cg_U
      type(CGBlock), dimension(:), pointer :: cg_blocks => null()
+
+     ! Improved coarse-graining state (core + buffer + level-1 acquaintance)
+     logical :: icg_enabled, icg_ready
+     integer :: icg_num_blocks, icg_original_dim, icg_reduced_dim
+     real(dp) :: icg_core_emin, icg_core_emax  ! core window
+     real(dp) :: icg_e_buffer                  ! buffer half-width
+     real(dp) :: icg_epsilon                   ! acquaintance threshold factor
+     real(dp) :: icg_imbalance, icg_cut_fraction
+     type(CSR) :: icg_ham, icg_U
+     type(CGBlock), dimension(:), pointer :: icg_blocks => null()
  
      REAL ( dp ),   DIMENSION( : ),    POINTER     :: eigen_values
      COMPLEX ( dp ), DIMENSION( :,: ),    POINTER  :: eigen_vectors
