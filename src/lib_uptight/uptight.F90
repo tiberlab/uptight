@@ -33,7 +33,8 @@ module UPTIGHT
   USE alloys, only : init_mat_ion
   USE TB_ham, only : sparse_ham, hermitianize, check_if_hermitian
   USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, &
-                           icg_prepare, icg_clear, icg_configure
+                           icg_prepare, icg_clear, icg_configure, &
+                           icgn_prepare, icgn_clear, icgn_configure
   USE lanczos_driver, only : lanczos
   USE lapack_driver, only : lapack
   USE jd_driver, only : jd
@@ -54,6 +55,7 @@ module UPTIGHT
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
   public :: upt_configure_improved_cg, upt_get_improved_cg_info
+  public :: upt_configure_icgn, upt_get_icgn_info
   public :: upt_writehamiltonian
 
   !interface init
@@ -340,6 +342,13 @@ contains
           stop 1
        end if
     end if
+    if (upt%icgn_enabled) then
+       call icgn_prepare(upt, ierr)
+       if (ierr /= 0) then
+          write(*,*) '(uptight) ICGN preparation failed'
+          stop 1
+       end if
+    end if
 
     ! VERY IMPORTANT NOTE: The full H is non-hermitian when there are 
     ! interfaces Alloy/Alloy or Alloy/Pure since there is no symmetry 
@@ -392,6 +401,25 @@ contains
     real(dp), intent(out) :: cut_fraction
     call icg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
   end subroutine UPT_get_improved_cg_info
+
+  subroutine UPT_configure_icgn(upt, enabled, nblocks, core_emin, core_emax, &
+                                 e_buffer, epsilon, selfenergy_order, E0, imbalance)
+    type(OUPT), intent(inout) :: upt
+    logical, intent(in) :: enabled
+    integer, intent(in) :: nblocks, selfenergy_order
+    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance
+    call icgn_configure(upt, enabled, nblocks, core_emin, core_emax, e_buffer, epsilon, &
+         selfenergy_order, E0, imbalance)
+  end subroutine UPT_configure_icgn
+
+  subroutine UPT_get_icgn_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+    use coarse_grain, only : icgn_get_info
+    type(OUPT), intent(in) :: upt
+    logical, intent(out) :: ready
+    integer, intent(out) :: original_dim, reduced_dim, nblocks
+    real(dp), intent(out) :: cut_fraction
+    call icgn_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+  end subroutine UPT_get_icgn_info
 
   !---------------------------------------------------------------------
   subroutine UPT_writehamiltonian(upt)

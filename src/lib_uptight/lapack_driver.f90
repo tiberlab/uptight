@@ -26,7 +26,7 @@ MODULE lapack_driver
   private
   
   public :: lapack
-  public :: lapack_icg_solve
+  public :: lapack_icg_solve, lapack_icg, lapack_icgn_solve, lapack_icgn
 
   private :: assemble_dense_H, diagonalize_ham_i
   private :: diagonalize_ham
@@ -404,5 +404,61 @@ contains
                           upt%icg_ham%sparse_fmt, nred, h)
     call diagonalize_ham(h, nred, eval)
   end subroutine lapack_icg_solve
+
+  subroutine lapack_icg(upt)
+    use coarse_grain, only : icg_lift
+    type(OUPT), intent(inout) :: upt
+    complex(dp), allocatable :: h(:,:), phys(:,:)
+    real(dp), allocatable :: eval(:)
+    integer :: nred, nfull, num_ev, err
+    call lapack_icg_solve(upt, h, eval)
+    nred  = size(eval)
+    nfull = upt%ham%nrow
+    num_ev = min(upt%num_vb + upt%num_cb, nred)
+    if (.not. associated(upt%eigen_values))  allocate(upt%eigen_values(num_ev))
+    if (.not. associated(upt%eigen_vectors)) allocate(upt%eigen_vectors(nfull, num_ev))
+    if (.not. associated(upt%particles))     allocate(upt%particles(num_ev))
+    upt%eigen_values(1:num_ev)   = eval(1:num_ev)
+    upt%particles(1:num_ev)      = 0
+    allocate(phys(nfull, num_ev), stat=err)
+    call icg_lift(upt, h(:, 1:num_ev), phys)
+    upt%eigen_vectors(:, 1:num_ev) = phys
+    deallocate(h, eval, phys)
+  end subroutine lapack_icg
+
+  subroutine lapack_icgn_solve(upt, h, eval)
+    use upt_param, only : OUPT
+    type(OUPT), intent(in)                        :: upt
+    complex(dp), intent(out), allocatable         :: h(:,:)
+    real(dp),    intent(out), allocatable         :: eval(:)
+    integer :: nred, err
+    nred = upt%icgn_ham%nrow
+    allocate(h(nred,nred), eval(nred), stat=err)
+    if (err /= 0) call alloc_error('lapack_icgn_solve','allocate','work')
+    call assemble_dense_H(upt%icgn_ham%M, upt%icgn_ham%Mj, upt%icgn_ham%Mi, &
+                          upt%icgn_ham%sparse_fmt, nred, h)
+    call diagonalize_ham(h, nred, eval)
+  end subroutine lapack_icgn_solve
+
+  subroutine lapack_icgn(upt)
+    use coarse_grain, only : icgn_lift
+    type(OUPT), intent(inout) :: upt
+    complex(dp), allocatable :: h(:,:), phys(:,:)
+    real(dp), allocatable :: eval(:)
+    integer :: nred, nfull, num_ev, err
+    call lapack_icgn_solve(upt, h, eval)
+    nred  = size(eval)
+    nfull = upt%ham%nrow
+    num_ev = min(upt%num_vb + upt%num_cb, nred)
+    if (.not. associated(upt%eigen_values))  allocate(upt%eigen_values(num_ev))
+    if (.not. associated(upt%eigen_vectors)) allocate(upt%eigen_vectors(nfull, num_ev))
+    if (.not. associated(upt%particles))     allocate(upt%particles(num_ev))
+    upt%eigen_values(1:num_ev) = eval(1:num_ev)
+    upt%particles(1:num_ev)    = 0
+    allocate(phys(nfull, num_ev), stat=err)
+    call icgn_lift(upt, h(:, 1:num_ev), phys)
+    upt%eigen_vectors(:, 1:num_ev) = phys
+    deallocate(h, eval, phys)
+  end subroutine lapack_icgn
 
 END MODULE lapack_driver

@@ -1,7 +1,20 @@
-! Test driver for 3 solve modes:
+! Test driver for 4 solve modes:
 !   (1) Standard full diagonalization
 !   (2) Original coarse-graining (Liu et al. 2022)
 !   (3) Improved coarse-graining (core + buffer + level-1 acquaintance)
+!   (4) Improved CG + Neumann self-energy correction (ICGN)
+!
+! TIMING: The sparse Hamiltonian is built once and reused.  For each mode
+! the clock starts when that mode receives the already-built H and stops
+! after eigenvectors have been lifted back to the original orbital basis.
+! For modes 2/3/4 this therefore includes: reduced-H preparation
+! (cg_prepare / icg_prepare / icgn_prepare) + eigensolver + lift.
+! For mode 1 it includes only: eigensolver (no lift needed).
+!
+! AAD: eigenvalues from modes 2/3/4 are compared to the reference from
+! mode 1.  Both sets are sorted ascending before comparison.
+!   n_up:   the n_up smallest *positive* eigenvalues (closest to 0 from above)
+!   n_down: the n_down largest *negative* eigenvalues (closest to 0 from below)
 !
 ! Config file format (one value per line):
 !   1:  structure file (.upg)
@@ -13,7 +26,7 @@
 !   7:  nCB  (standard mode)
 !   8:  lambda_vb  (eV)
 !   9:  lambda_cb  (eV)
-!   10: n_blocks   (CG & ICG)
+!   10: n_blocks   (CG & ICG & ICGN)
 !   11: cg_emin    (eV)
 !   12: cg_emax    (eV)
 !   13: imbalance  (METIS)
@@ -21,6 +34,10 @@
 !   15: icg_core_emax  (eV)
 !   16: icg_e_buffer   (eV)
 !   17: icg_epsilon    (threshold factor)
+!   18: icgn_selfenergy_order (0,1,2,...)
+!   19: icgn_E0     (eV, 0.0 = auto = core window midpoint)
+!   20: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
+!   21: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
 program test_supercell
 
   USE precision
@@ -39,33 +56,35 @@ program test_supercell
                                   UPT_get_coarse_graining_info,    &
                                   UPT_configure_improved_cg,       &
                                   UPT_get_improved_cg_info,        &
+                                  UPT_configure_icgn,              &
+                                  UPT_get_icgn_info,               &
                                   upt_hamiltonian
-  USE lapack_driver,       only : lapack, lapack_icg_solve
+  USE lapack_driver,       only : lapack, lapack_icg, lapack_icgn
   USE JD_driver,           only : jd
   USE lanczos_driver,      only : lanczos
   USE sparse_matrix,       only : destroy_matrix
   USE clock,               only : set_clock, get_sclock
-  USE coarse_grain,        only : icg_lift
 
   IMPLICIT NONE
 
   TYPE(OUPT), TARGET  :: upt
   TYPE(OUPT), POINTER :: pupt
 
-  INTEGER        :: i, j, err, n_ham, num_ev
+  INTEGER        :: i, err, n_ham, num_ev
   CHARACTER(LST) :: config_file
   CHARACTER(MST) :: solver_choice
   INTEGER        :: n_blocks, nVB, nCB
   REAL(dp)       :: cg_emin, cg_emax, imbalance
   REAL(dp)       :: icg_core_emin, icg_core_emax, icg_e_buffer, icg_epsilon
+  INTEGER        :: icgn_selfenergy_order
+  REAL(dp)       :: icgn_E0
+  INTEGER        :: n_up, n_down
   REAL(sp)       :: solve_time
-  INTEGER        :: file_out
-  LOGICAL        :: cg_ready, icg_ready_flag
+  LOGICAL        :: cg_ready, icg_ready_flag, icgn_ready_flag
   INTEGER        :: orig_dim, red_dim, nb_out
   REAL(dp)       :: cut_frac
-  REAL(dp), ALLOCATABLE :: sorted_e(:)
-  INTEGER,  ALLOCATABLE :: sidx(:)
-  REAL(dp)       :: tmp_swap
+  ! Reference eigenvalues from mode 1 (sorted ascending, allocated after mode 1)
+  REAL(dp), ALLOCATABLE :: ref_evals(:)
 
   call upt_mpi_init(0)
   pupt => upt
@@ -102,18 +121,25 @@ program test_supercell
   read(10,*) icg_core_emax
   read(10,*) icg_e_buffer
   read(10,*) icg_epsilon
+  read(10,*) icgn_selfenergy_order
+  read(10,*) icgn_E0
+  read(10,*) n_up
+  read(10,*) n_down
   close(10)
 
   write(*,'(a)') '========================================'
-  write(*,'(a,a)')   ' Structure:      ', trim(upt%gen_filename)
-  write(*,'(a,l1)')  ' Relativistic:   ', upt%relat
-  write(*,'(a,l1)')  ' Scaling:        ', upt%scaling
-  write(*,'(a,a)')   ' Solver:         ', trim(solver_choice)
-  write(*,'(a,i0)')  ' n_blocks:       ', n_blocks
-  write(*,'(a,2f8.3)') ' CG window:    ', cg_emin, cg_emax
-  write(*,'(a,2f8.3)') ' ICG core:     ', icg_core_emin, icg_core_emax
-  write(*,'(a,f8.3)')  ' ICG buffer:   ', icg_e_buffer
-  write(*,'(a,es10.2)')' ICG epsilon:  ', icg_epsilon
+  write(*,'(a,a)')     ' Structure:    ', trim(upt%gen_filename)
+  write(*,'(a,l1)')    ' Relativistic: ', upt%relat
+  write(*,'(a,l1)')    ' Scaling:      ', upt%scaling
+  write(*,'(a,a)')     ' Solver:       ', trim(solver_choice)
+  write(*,'(a,i0)')    ' n_blocks:     ', n_blocks
+  write(*,'(a,2f8.3)') '  CG window:   ', cg_emin, cg_emax
+  write(*,'(a,2f8.3)') '  ICG core:    ', icg_core_emin, icg_core_emax
+  write(*,'(a,f8.3)')  '  ICG buffer:  ', icg_e_buffer
+  write(*,'(a,es10.2)')'  ICG epsilon: ', icg_epsilon
+  write(*,'(a,i0)')    '  ICGN order:  ', icgn_selfenergy_order
+  write(*,'(a,f8.3)')  '  ICGN E0:     ', icgn_E0
+  write(*,'(a,i0,a,i0)') '  AAD bands: +', n_up, ' / -', n_down
   write(*,'(a)') '========================================'
 
   ! ---- misc params ----------------------------------------------------------
@@ -130,12 +156,6 @@ program test_supercell
   upt%check_bondmap   = .false.
   upt%n_spin = merge(2, 1, upt%relat)
 
-  ! ---- configure both CG modes (always enabled) ----------------------------
-  call UPT_configure_coarse_graining(upt, .true., n_blocks, &
-       cg_emin, cg_emax, imbalance)
-  call UPT_configure_improved_cg(upt, .true., n_blocks, &
-       icg_core_emin, icg_core_emax, icg_e_buffer, icg_epsilon, imbalance)
-
   ! ---- solver bookkeeping ---------------------------------------------------
   upt%num_vb   = nVB;  upt%num_cb   = nCB
   upt%start_vb = 1;    upt%start_cb = 1
@@ -145,7 +165,7 @@ program test_supercell
   upt%seed_flag   = .false.; upt%bitoff = 0.1_dp
   upt%k_point = (/ 0.0d0, 0.0d0, 0.0d0 /)
 
-  ! ---- build structure ------------------------------------------------------
+  ! ---- build structure (done once) -----------------------------------------
   write(*,'(a)') ' Building structure...'
   call set_machine_acc
   call init_structure(upt%verbose, upt%structure, upt%materials, upt%nr_mat, &
@@ -171,197 +191,335 @@ program test_supercell
   call subs_dg_ions(upt%basis, upt%materials, upt%nn_map)
   call init_n_st(upt%basis, upt%materials)
 
-  ! ---- build Hamiltonian (triggers cg_prepare + icg_prepare if enabled) ----
-  write(*,'(a)') '========================================'
-  write(*,'(a)') ' Building Hamiltonian...'
-  call set_clock()
+  ! ---- build the sparse Hamiltonian once (no CG); record n_ham -------------
+  upt%cg_enabled   = .false.
+  upt%icg_enabled  = .false.
+  upt%icgn_enabled = .false.
+  upt%verbose = 0
   call upt_hamiltonian(pupt)
   n_ham = upt%ham%nrow
   write(*,'(a,i0)') ' Full Hamiltonian dimension: ', n_ham
-
-  ! query CG info
-  call UPT_get_coarse_graining_info(upt, cg_ready, orig_dim, red_dim, nb_out, cut_frac)
-  call UPT_get_improved_cg_info(upt, icg_ready_flag, orig_dim, red_dim, nb_out, cut_frac)
+  ! Keep upt%ham alive — all modes reuse it.
 
   ! ==========================================================================
   ! MODE 1: Standard full diagonalization
+  !   Clock starts: eigensolver receives H (no prepare step)
+  !   Clock stops:  eigenvectors are in original orbital basis (no lift)
   ! ==========================================================================
   write(*,'(a)') '========================================'
   write(*,'(a)') ' MODE 1: Standard full diagonalization'
   write(*,'(a)') '========================================'
 
-  ! Temporarily disable CG for the standard solve
-  upt%cg_enabled  = .false.
-  upt%icg_enabled = .false.
-  upt%num_vb = nVB; upt%num_cb = nCB
-
+  upt%cg_enabled   = .false.
+  upt%icg_enabled  = .false.
+  upt%icgn_enabled = .false.
   num_ev = nVB + nCB
   allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
            upt%particles(num_ev), stat=err)
   upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
-  upt%verbose = 0
-  call set_clock()
+
+  call set_clock()          ! --- start timing ---
   select case (trim(solver_choice))
   case ('LK'); call lapack(upt)
   case ('JD'); call jd(upt)
   case ('LO'); call lanczos(upt)
   case default; write(*,*) 'Unknown solver: ', trim(solver_choice); stop 1
   end select
-  solve_time = get_sclock()
-  write(*,'(a,i0)')   ' Bands found:  ', size(upt%eigen_values)
-  write(*,'(a,f10.3)') ' Solve time:   ', solve_time
+  solve_time = get_sclock() ! --- stop timing ---
+
+  write(*,'(a,i0)')     ' Bands found:  ', size(upt%eigen_values)
+  write(*,'(a,f10.3)')  ' Total time:   ', solve_time
   write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
+
+  ! Save sorted reference eigenvalues for AAD
+  allocate(ref_evals(size(upt%eigen_values)))
+  ref_evals = upt%eigen_values
+  call sort_ascending(ref_evals)
+
   call write_eigenvalues('eigenvalues_standard.dat', upt%eigen_values, solve_time, &
-       'STANDARD', n_ham, n_ham, 0.0_dp)
+       'STANDARD', n_ham, n_ham, 0.0_dp, ref_evals, 0, 0)
   deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
 
   ! ==========================================================================
   ! MODE 2: Original coarse-graining (Liu et al.)
+  !   Clock starts: cg_prepare receives H  (inside upt_hamiltonian)
+  !   Clock stops:  eigenvectors lifted to original orbital basis
   ! ==========================================================================
   write(*,'(a)') '========================================'
   write(*,'(a)') ' MODE 2: Original coarse-graining (Liu et al.)'
   write(*,'(a)') '========================================'
+
+  ! Re-build with only CG enabled so prepare is included in the timed region
+  call destroy_matrix(upt%ham)
+  call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance)
+  call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
+       icg_e_buffer, icg_epsilon, imbalance)
+  call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
+       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance)
+
+  call set_clock()          ! --- start timing (includes cg_prepare) ---
+  call upt_hamiltonian(pupt)
+
   call UPT_get_coarse_graining_info(upt, cg_ready, orig_dim, red_dim, nb_out, cut_frac)
-  upt%cg_enabled  = .true.
-  upt%icg_enabled = .false.
-     if (cg_ready) then
-        write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
-             '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
-        write(*,'(a,f6.4)') ' Cut fraction: ', cut_frac
-        num_ev = red_dim
-     else
-        write(*,*) ' WARNING: CG not ready, skipping mode 2'
-        goto 300
-     end if
-     allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
-              upt%particles(num_ev), stat=err)
-     upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
-     upt%verbose = 0
-     call set_clock()
-     select case (trim(solver_choice))
-     case ('LK'); call lapack(upt)
-     case ('JD'); call jd(upt)
-     case ('LO'); call lanczos(upt)
-     end select
-     solve_time = get_sclock()
-     write(*,'(a,i0)')   ' Bands found:  ', size(upt%eigen_values)
-     write(*,'(a,f10.3)') ' Solve time:   ', solve_time
-     write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
-     call write_eigenvalues('eigenvalues_cg.dat', upt%eigen_values, solve_time, &
-          'CG', orig_dim, red_dim, cut_frac)
-     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
+  if (.not. cg_ready) then
+     write(*,*) ' WARNING: CG not ready, skipping mode 2'
+     call destroy_matrix(upt%ham); goto 300
+  end if
+  write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
+       '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
+  num_ev = red_dim
+  allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
+           upt%particles(num_ev), stat=err)
+  upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
+  upt%cg_enabled = .true.
+  select case (trim(solver_choice))
+  case ('LK'); call lapack(upt)   ! lapack calls cg_lift internally
+  case ('JD'); call jd(upt)
+  case ('LO'); call lanczos(upt)
+  end select
+  solve_time = get_sclock() ! --- stop timing (after lift) ---
+
+  write(*,'(a,i0)')     ' Bands found:  ', size(upt%eigen_values)
+  write(*,'(a,f10.3)')  ' Total time:   ', solve_time
+  write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
+  call write_eigenvalues('eigenvalues_cg.dat', upt%eigen_values, solve_time, &
+       'CG', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down)
+  call destroy_matrix(upt%ham)
+  deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
 300 continue
 
   ! ==========================================================================
   ! MODE 3: Improved coarse-graining
+  !   Clock starts: icg_prepare receives H
+  !   Clock stops:  eigenvectors lifted to original orbital basis
   ! ==========================================================================
   write(*,'(a)') '========================================'
   write(*,'(a)') ' MODE 3: Improved coarse-graining'
   write(*,'(a)') '========================================'
+
+  call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
+  call UPT_configure_improved_cg    (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
+       icg_e_buffer, icg_epsilon, imbalance)
+  call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
+       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance)
+
+  call set_clock()          ! --- start timing (includes icg_prepare) ---
+  call upt_hamiltonian(pupt)
+
   call UPT_get_improved_cg_info(upt, icg_ready_flag, orig_dim, red_dim, nb_out, cut_frac)
-  upt%cg_enabled  = .false.
+  if (.not. icg_ready_flag) then
+     write(*,*) ' WARNING: ICG not ready, skipping mode 3'
+     call destroy_matrix(upt%ham); goto 400
+  end if
+  write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
+       '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
+  num_ev = red_dim
+  allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
+           upt%particles(num_ev), stat=err)
+  upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
   upt%icg_enabled = .true.
-     if (icg_ready_flag) then
-        write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
-             '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
-        write(*,'(a,f6.4)') ' Cut fraction: ', cut_frac
-        num_ev = red_dim
-     else
-        write(*,*) ' WARNING: ICG not ready, skipping mode 3'
-        goto 400
-     end if
-     allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
-              upt%particles(num_ev), stat=err)
-     upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
-     upt%verbose = 0
-     call set_clock()
-     select case (trim(solver_choice))
-     case ('LK'); call lapack_icg(upt)
-     case default
-        write(*,*) ' ICG currently supports LK solver only'
-        deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
-        goto 400
-     end select
-     solve_time = get_sclock()
-     write(*,'(a,i0)')   ' Bands found:  ', size(upt%eigen_values)
-     write(*,'(a,f10.3)') ' Solve time:   ', solve_time
-     write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
-     call write_eigenvalues('eigenvalues_icg.dat', upt%eigen_values, solve_time, &
-          'ICG', orig_dim, red_dim, cut_frac)
-     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
+  select case (trim(solver_choice))
+  case ('LK'); call lapack_icg(upt)   ! includes icg_lift
+  case default
+     write(*,*) ' ICG currently supports LK solver only'
+     call destroy_matrix(upt%ham)
+     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles); goto 400
+  end select
+  solve_time = get_sclock() ! --- stop timing (after lift) ---
+
+  write(*,'(a,i0)')     ' Bands found:  ', size(upt%eigen_values)
+  write(*,'(a,f10.3)')  ' Total time:   ', solve_time
+  write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
+  call write_eigenvalues('eigenvalues_icg.dat', upt%eigen_values, solve_time, &
+       'ICG', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down)
+  call destroy_matrix(upt%ham)
+  deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
 400 continue
 
-  ! ---- cleanup --------------------------------------------------------------
+  ! ==========================================================================
+  ! MODE 4: Improved CG + Neumann self-energy correction (ICGN)
+  !   Clock starts: icgn_prepare receives H (includes self-energy build)
+  !   Clock stops:  eigenvectors lifted to original orbital basis
+  ! ==========================================================================
+  write(*,'(a)') '========================================'
+  write(*,'(a)') ' MODE 4: ICGN (Neumann self-energy)'
+  write(*,'(a)') '========================================'
+
+  call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
+  call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
+       icg_e_buffer, icg_epsilon, imbalance)
+  call UPT_configure_icgn           (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
+       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance)
+
+  call set_clock()          ! --- start timing (includes icgn_prepare) ---
+  call upt_hamiltonian(pupt)
+
+  call UPT_get_icgn_info(upt, icgn_ready_flag, orig_dim, red_dim, nb_out, cut_frac)
+  if (.not. icgn_ready_flag) then
+     write(*,*) ' WARNING: ICGN not ready, skipping mode 4'
+     call destroy_matrix(upt%ham); goto 500
+  end if
+  write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
+       '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
+  num_ev = red_dim
+  allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
+           upt%particles(num_ev), stat=err)
+  upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
+  upt%icgn_enabled = .true.
+  select case (trim(solver_choice))
+  case ('LK'); call lapack_icgn(upt)  ! includes icgn_lift
+  case default
+     write(*,*) ' ICGN currently supports LK solver only'
+     call destroy_matrix(upt%ham)
+     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles); goto 500
+  end select
+  solve_time = get_sclock() ! --- stop timing (after lift) ---
+
+  write(*,'(a,i0)')     ' Bands found:  ', size(upt%eigen_values)
+  write(*,'(a,f10.3)')  ' Total time:   ', solve_time
+  write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
+  call write_eigenvalues('eigenvalues_icgn.dat', upt%eigen_values, solve_time, &
+       'ICGN', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down)
   call destroy_matrix(upt%ham)
+  deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
+500 continue
+
+  ! ---- cleanup --------------------------------------------------------------
+  if (allocated(ref_evals)) deallocate(ref_evals)
   call upt_mpi_end
 
 contains
 
   ! ---------------------------------------------------------------------------
-  subroutine write_eigenvalues(fname, evals, t, mode, ndim, nred, cut)
-    character(*), intent(in) :: fname, mode
-    real(dp), intent(in)     :: evals(:), cut
-    real(sp), intent(in)     :: t
-    integer, intent(in)      :: ndim, nred
-    integer :: n, fu, ii, jj, itmp
-    real(dp), allocatable :: se(:)
-    integer,  allocatable :: si(:)
-    real(dp) :: stmp
-    n = size(evals)
-    allocate(se(n), si(n))
-    se = evals
-    do ii = 1, n; si(ii) = ii; end do
-    do ii = 1, n-1          ! bubble sort descending
-       do jj = ii+1, n
-          if (se(jj) > se(ii)) then
-             itmp=si(ii); si(ii)=si(jj); si(jj)=itmp
-             stmp=se(ii); se(ii)=se(jj); se(jj)=stmp
-          end if
+  ! In-place ascending sort (insertion sort)
+  subroutine sort_ascending(a)
+    real(dp), intent(inout) :: a(:)
+    integer  :: i, j
+    real(dp) :: tmp
+    do i = 2, size(a)
+       tmp = a(i); j = i - 1
+       do while (j >= 1 .and. a(j) > tmp)
+          a(j+1) = a(j); j = j - 1
        end do
+       a(j+1) = tmp
     end do
+  end subroutine sort_ascending
+
+  ! ---------------------------------------------------------------------------
+  ! Compute AAD for:
+  !   n_up   smallest positive eigenvalues (closest to 0 from above)
+  !   n_down largest  negative eigenvalues (closest to 0 from below)
+  ! Both `evals` and `ref` must be sorted ascending on entry.
+  ! Returns -1.0 when there are not enough matching bands.
+  subroutine compute_aad(evals, ref, n_up, n_down, aad_up, aad_down)
+    real(dp), intent(in)  :: evals(:), ref(:)
+    integer,  intent(in)  :: n_up, n_down
+    real(dp), intent(out) :: aad_up, aad_down
+
+    integer  :: n_ev, n_ref, i
+    integer  :: first_pos_ev, first_pos_ref   ! first index ≥ 0 in each array
+    integer  :: last_neg_ev,  last_neg_ref    ! last  index <  0 in each array
+
+    n_ev  = size(evals)
+    n_ref = size(ref)
+
+    ! ---- locate sign boundaries ----
+    first_pos_ev  = n_ev  + 1
+    first_pos_ref = n_ref + 1
+    do i = 1, n_ev;  if (evals(i) >= 0.0_dp) then; first_pos_ev  = i; exit; end if; end do
+    do i = 1, n_ref; if (ref(i)   >= 0.0_dp) then; first_pos_ref = i; exit; end if; end do
+
+    last_neg_ev  = first_pos_ev  - 1
+    last_neg_ref = first_pos_ref - 1
+
+    ! ---- AAD for n_up smallest positives ----
+    aad_up = -1.0_dp
+    if (n_up > 0) then
+       ! Need at least n_up positive values in both arrays
+       if ((n_ev - first_pos_ev + 1 >= n_up) .and. &
+           (n_ref - first_pos_ref + 1 >= n_up)) then
+          aad_up = 0.0_dp
+          do i = 0, n_up - 1
+             aad_up = aad_up + abs(evals(first_pos_ev + i) - ref(first_pos_ref + i))
+          end do
+          aad_up = aad_up / real(n_up, dp)
+       end if
+    end if
+
+    ! ---- AAD for n_down largest negatives ----
+    aad_down = -1.0_dp
+    if (n_down > 0) then
+       ! Need at least n_down negative values in both arrays
+       if ((last_neg_ev >= n_down) .and. (last_neg_ref >= n_down)) then
+          aad_down = 0.0_dp
+          do i = 0, n_down - 1
+             aad_down = aad_down + abs(evals(last_neg_ev - i) - ref(last_neg_ref - i))
+          end do
+          aad_down = aad_down / real(n_down, dp)
+       end if
+    end if
+  end subroutine compute_aad
+
+  ! ---------------------------------------------------------------------------
+  subroutine write_eigenvalues(fname, evals, t, mode, ndim, nred, cut, ref, nu, nd)
+    character(*), intent(in) :: fname, mode
+    real(dp),     intent(in) :: evals(:), cut, ref(:)
+    real(sp),     intent(in) :: t
+    integer,      intent(in) :: ndim, nred, nu, nd
+
+    integer  :: n, fu, ii
+    real(dp), allocatable :: se(:)
+    real(dp) :: aad_up, aad_down
+
+    n = size(evals)
+    allocate(se(n))
+    se = evals
+    call sort_ascending(se)
+
+    aad_up = -1.0_dp; aad_down = -1.0_dp
+    if ((nu > 0 .or. nd > 0) .and. size(ref) > 0) then
+       ! ref is already sorted ascending (saved that way from mode 1)
+       call compute_aad(se, ref, nu, nd, aad_up, aad_down)
+    end if
+
     open(newunit=fu, file=trim(fname), status='replace', action='write')
-    write(fu,'(a,a)')   '# Mode: ', trim(mode)
-    write(fu,'(a,i0)')  '# Full dimension:    ', ndim
-    write(fu,'(a,i0)')  '# Reduced dimension: ', nred
+    write(fu,'(a,a)')     '# Mode: ', trim(mode)
+    write(fu,'(a,i0)')    '# Full dimension:    ', ndim
+    write(fu,'(a,i0)')    '# Reduced dimension: ', nred
     write(fu,'(a,f8.2,a)') '# Rank reduction: ', &
          100.0_dp*(1.0_dp - real(nred,dp)/real(ndim,dp)), ' %'
-    write(fu,'(a,f10.4)') '# Cut fraction:   ', cut
-    write(fu,'(a,f12.6)') '# Solve time (s): ', t
-    write(fu,'(a,i0)')  '# Total bands:    ', n
+    write(fu,'(a,f10.4)') '# Cut fraction:      ', cut
+    write(fu,'(a,f12.6)') '# Total time (s):    ', t
+    write(fu,'(a,i0)')    '# Total bands:       ', n
+    if (nu > 0) then
+       if (aad_up >= 0.0_dp) then
+          write(fu,'(a,i0,a,es14.6,a)') &
+               '# AAD ', nu, ' smallest positive evals (eV): ', aad_up, ''
+       else
+          write(fu,'(a,i0,a)') '# AAD ', nu, ' smallest positive evals (eV): N/A'
+       end if
+    end if
+    if (nd > 0) then
+       if (aad_down >= 0.0_dp) then
+          write(fu,'(a,i0,a,es14.6,a)') &
+               '# AAD ', nd, ' largest  negative evals (eV): ', aad_down, ''
+       else
+          write(fu,'(a,i0,a)') '# AAD ', nd, ' largest  negative evals (eV): N/A'
+       end if
+    end if
     write(fu,'(a)') '#'
     write(fu,'(a)') '# Index    Energy(eV)'
     do ii = 1, n
        write(fu,'(i6,2x,f16.8)') ii, se(ii)
     end do
     close(fu)
-    write(*,'(a,a)') ' Output: ', trim(fname)
-    deallocate(se, si)
-  end subroutine write_eigenvalues
 
-  ! ---------------------------------------------------------------------------
-  ! ICG LAPACK solver: assembles dense icg_ham, diagonalizes, lifts to physical.
-  subroutine lapack_icg(upt)
-    use lapack_driver, only : lapack_icg_solve
-    use coarse_grain,  only : icg_lift
-    use precision,     only : dp
-    use upt_param,     only : OUPT
-    type(OUPT), intent(inout) :: upt
-    integer :: nred, nfull, ii
-    complex(dp), allocatable :: h(:,:)
-    real(dp),    allocatable :: eval(:)
-    nred  = upt%icg_ham%nrow
-    nfull = upt%ham%nrow
-    call lapack_icg_solve(upt, h, eval)
-    if (associated(upt%eigen_values))  deallocate(upt%eigen_values)
-    if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
-    if (associated(upt%particles))     deallocate(upt%particles)
-    allocate(upt%eigen_values(nred), upt%eigen_vectors(nfull,nred), upt%particles(nred))
-    do ii = 1, nred
-       upt%eigen_values(ii) = eval(ii)
-       upt%particles(ii)    = 0
-    end do
-    call icg_lift(upt, h, upt%eigen_vectors)
-    deallocate(h, eval)
-  end subroutine lapack_icg
+    write(*,'(a,a)') ' Output: ', trim(fname)
+    if (nu > 0 .and. aad_up   >= 0.0_dp) &
+         write(*,'(a,i0,a,es12.4)') '  AAD ', nu, ' smallest pos: ', aad_up
+    if (nd > 0 .and. aad_down >= 0.0_dp) &
+         write(*,'(a,i0,a,es12.4)') '  AAD ', nd, ' largest  neg: ', aad_down
+    deallocate(se)
+  end subroutine write_eigenvalues
 
 end program test_supercell

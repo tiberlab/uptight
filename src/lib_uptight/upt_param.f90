@@ -111,6 +111,17 @@ module upt_param
      real(dp) :: icg_imbalance, icg_cut_fraction
      type(CSR) :: icg_ham, icg_U
      type(CGBlock), dimension(:), pointer :: icg_blocks => null()
+
+     ! Improved CG with Neumann self-energy correction (same P-space as ICG)
+     logical :: icgn_enabled, icgn_ready
+     integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
+     real(dp) :: icgn_core_emin, icgn_core_emax
+     real(dp) :: icgn_e_buffer, icgn_epsilon
+     real(dp) :: icgn_imbalance, icgn_cut_fraction
+     integer :: icgn_selfenergy_order          ! Neumann series order (0,1,2,...)
+     real(dp) :: icgn_E0                       ! self-energy expansion point
+     type(CSR) :: icgn_ham, icgn_U
+     type(CGBlock), dimension(:), pointer :: icgn_blocks => null()
  
      REAL ( dp ),   DIMENSION( : ),    POINTER     :: eigen_values
      COMPLEX ( dp ), DIMENSION( :,: ),    POINTER  :: eigen_vectors

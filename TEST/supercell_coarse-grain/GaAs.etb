@@ -55,8 +55,8 @@ As onsite
 's*'   19.4220D0   1
 'd'    13.1023D0   5
 
-Ga offset = 0.0D0
-As offset = 0.0D0
+Ga offset = -0.8D0
+As offset = -0.8D0
 
 
 # strain coefficient for the d orbitals
