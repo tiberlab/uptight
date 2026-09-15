@@ -38,6 +38,8 @@
 !   19: icgn_E0     (eV, 0.0 = auto = core window midpoint)
 !   20: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
 !   21: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
+!   22: icgn_check_convergence (.true./.false.)
+!   23: icgn_pi_tol  (power-iteration tolerance, e.g. 1e-6)
 program test_supercell
 
   USE precision
@@ -78,6 +80,9 @@ program test_supercell
   REAL(dp)       :: icg_core_emin, icg_core_emax, icg_e_buffer, icg_epsilon
   INTEGER        :: icgn_selfenergy_order
   REAL(dp)       :: icgn_E0
+  LOGICAL        :: icgn_check_conv
+  REAL(dp)       :: icgn_pi_tol
+  INTEGER        :: icgn_pi_maxiter
   INTEGER        :: n_up, n_down
   REAL(sp)       :: solve_time
   LOGICAL        :: cg_ready, icg_ready_flag, icgn_ready_flag
@@ -85,6 +90,9 @@ program test_supercell
   REAL(dp)       :: cut_frac
   ! Reference eigenvalues from mode 1 (sorted ascending, allocated after mode 1)
   REAL(dp), ALLOCATABLE :: ref_evals(:)
+  ! ICGN convergence results (from icgn_get_info)
+  REAL(dp)   :: sigma_T2
+  LOGICAL    :: pi_converged
 
   call upt_mpi_init(0)
   pupt => upt
@@ -125,7 +133,11 @@ program test_supercell
   read(10,*) icgn_E0
   read(10,*) n_up
   read(10,*) n_down
+  read(10,*) icgn_check_conv
+  read(10,*) icgn_pi_tol
   close(10)
+
+  icgn_pi_maxiter = 2000   ! default for power iteration
 
   write(*,'(a)') '========================================'
   write(*,'(a,a)')     ' Structure:    ', trim(upt%gen_filename)
@@ -139,6 +151,10 @@ program test_supercell
   write(*,'(a,es10.2)')'  ICG epsilon: ', icg_epsilon
   write(*,'(a,i0)')    '  ICGN order:  ', icgn_selfenergy_order
   write(*,'(a,f8.3)')  '  ICGN E0:     ', icgn_E0
+  write(*,'(a,l1)')    '  ICGN check convergence: ', icgn_check_conv
+  if (icgn_check_conv) then
+     write(*,'(a,es10.2,a,i0)') '  ICGN PI tol: ', icgn_pi_tol, '  maxiter: ', icgn_pi_maxiter
+  end if
   write(*,'(a,i0,a,i0)') '  AAD bands: +', n_up, ' / -', n_down
   write(*,'(a)') '========================================'
 
@@ -255,7 +271,8 @@ program test_supercell
   call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
        icg_e_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance)
+       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+       icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes cg_prepare) ---
   call upt_hamiltonian(pupt)
@@ -301,7 +318,8 @@ program test_supercell
   call UPT_configure_improved_cg    (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
        icg_e_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance)
+       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+       icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes icg_prepare) ---
   call upt_hamiltonian(pupt)
@@ -349,18 +367,34 @@ program test_supercell
   call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
        icg_e_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance)
+       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+       icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes icgn_prepare) ---
   call upt_hamiltonian(pupt)
 
-  call UPT_get_icgn_info(upt, icgn_ready_flag, orig_dim, red_dim, nb_out, cut_frac)
+  call UPT_get_icgn_info(upt, icgn_ready_flag, orig_dim, red_dim, nb_out, cut_frac, &
+       sigma_T2, pi_converged)
   if (.not. icgn_ready_flag) then
      write(*,*) ' WARNING: ICGN not ready, skipping mode 4'
      call destroy_matrix(upt%ham); goto 500
   end if
   write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
        '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
+  if (icgn_check_conv) then
+     write(*,'(a,l1)') '  Power iteration converged: ', pi_converged
+     if (sigma_T2 < 0.0_dp) then
+        write(*,'(a)') '  Spectral norm sigma_T2: N/A (no Q-Q edges found)'
+     else
+        if (sigma_T2 >= 1.0_dp) then
+           write(*,'(a,es12.4,a)') '  Spectral norm ||T||_2 = ', sigma_T2, &
+                ' >= 1 (WARNING: full Neumann series not guaranteed to converge)'
+        else
+           write(*,'(a,es12.4,a)') '  Spectral norm ||T||_2 = ', sigma_T2, &
+                ' < 1  (Neumann series on solid footing)'
+        end if
+     end if
+  end if
   num_ev = red_dim
   allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
            upt%particles(num_ev), stat=err)
@@ -379,7 +413,8 @@ program test_supercell
   write(*,'(a,f10.3)')  ' Total time:   ', solve_time
   write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
   call write_eigenvalues('eigenvalues_icgn.dat', upt%eigen_values, solve_time, &
-       'ICGN', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down)
+       'ICGN', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down, &
+       sigma_T2=sigma_T2, pi_conv=pi_converged)
   call destroy_matrix(upt%ham)
   deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
 500 continue
@@ -461,11 +496,14 @@ contains
   end subroutine compute_aad
 
   ! ---------------------------------------------------------------------------
-  subroutine write_eigenvalues(fname, evals, t, mode, ndim, nred, cut, ref, nu, nd)
+  subroutine write_eigenvalues(fname, evals, t, mode, ndim, nred, cut, ref, nu, nd, &
+       sigma_T2, pi_conv)
     character(*), intent(in) :: fname, mode
     real(dp),     intent(in) :: evals(:), cut, ref(:)
     real(sp),     intent(in) :: t
     integer,      intent(in) :: ndim, nred, nu, nd
+    real(dp),     intent(in), optional :: sigma_T2
+    logical,      intent(in), optional :: pi_conv
 
     integer  :: n, fu, ii
     real(dp), allocatable :: se(:)
@@ -491,6 +529,21 @@ contains
     write(fu,'(a,f10.4)') '# Cut fraction:      ', cut
     write(fu,'(a,f12.6)') '# Total time (s):    ', t
     write(fu,'(a,i0)')    '# Total bands:       ', n
+    ! ICGN convergence metadata
+    if (present(sigma_T2)) then
+       if (sigma_T2 < 0.0_dp) then
+          write(fu,'(a)') '# Neumann ||T||_2: N/A (no Q-Q edges)'
+       else
+          if (sigma_T2 >= 1.0_dp) then
+             write(fu,'(a,es14.6,a)') '# Neumann ||T||_2 = ', sigma_T2, &
+                  ' (WARNING: >= 1, convergence not guaranteed)'
+          else
+             write(fu,'(a,es14.6,a)') '# Neumann ||T||_2 = ', sigma_T2, &
+                  ' (< 1, series on solid footing)'
+          end if
+       end if
+       if (present(pi_conv)) write(fu,'(a,l1)') '# Power iter converged: ', pi_conv
+    end if
     if (nu > 0) then
        if (aad_up >= 0.0_dp) then
           write(fu,'(a,i0,a,es14.6,a)') &

@@ -1094,11 +1094,12 @@ contains
   ! ==========================================================================
 
   subroutine icgn_configure(upt, enabled, nblocks, core_emin, core_emax, &
-       e_buffer, epsilon, selfenergy_order, E0, imbalance)
+       e_buffer, epsilon, selfenergy_order, E0, imbalance, &
+       check_convergence, pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
-    logical, intent(in) :: enabled
-    integer, intent(in) :: nblocks, selfenergy_order
-    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance
+    logical, intent(in) :: enabled, check_convergence
+    integer, intent(in) :: nblocks, selfenergy_order, pi_maxiter
+    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance, pi_tol
     upt%icgn_enabled = enabled
     upt%icgn_num_blocks = nblocks
     upt%icgn_core_emin = core_emin
@@ -1108,6 +1109,11 @@ contains
     upt%icgn_selfenergy_order = selfenergy_order
     upt%icgn_E0 = E0
     upt%icgn_imbalance = imbalance
+    upt%icgn_check_convergence = check_convergence
+    upt%icgn_pi_maxiter = pi_maxiter
+    upt%icgn_pi_tol     = pi_tol
+    upt%icgn_sigma_T2   = -1.0_dp
+    upt%icgn_pi_converged = .true.
     upt%icgn_ready = .false.
   end subroutine icgn_configure
 
@@ -1116,16 +1122,19 @@ contains
     icgn_active = upt%icgn_enabled .and. upt%icgn_ready
   end function icgn_active
 
-  subroutine icgn_get_info(upt, ready, orig_dim, red_dim, nblocks, cut_frac)
+  subroutine icgn_get_info(upt, ready, orig_dim, red_dim, nblocks, cut_frac, &
+       sigma_T2, pi_converged)
     type(OUPT), intent(in) :: upt
-    logical, intent(out) :: ready
+    logical, intent(out) :: ready, pi_converged
     integer, intent(out) :: orig_dim, red_dim, nblocks
-    real(dp), intent(out) :: cut_frac
-    ready    = upt%icgn_ready
-    orig_dim = upt%icgn_original_dim
-    red_dim  = upt%icgn_reduced_dim
-    nblocks  = upt%icgn_num_blocks
-    cut_frac = upt%icgn_cut_fraction
+    real(dp), intent(out) :: cut_frac, sigma_T2
+    ready        = upt%icgn_ready
+    orig_dim     = upt%icgn_original_dim
+    red_dim      = upt%icgn_reduced_dim
+    nblocks      = upt%icgn_num_blocks
+    cut_frac     = upt%icgn_cut_fraction
+    sigma_T2     = upt%icgn_sigma_T2
+    pi_converged = upt%icgn_pi_converged
   end subroutine icgn_get_info
 
   subroutine icgn_clear(upt)
@@ -1568,8 +1577,8 @@ contains
        deallocate(g_full)
     end do
 
-    ! Build Q-Q edge list if order >= 1
-    if (upt%icgn_selfenergy_order >= 1) then
+    ! Build Q-Q edge list if order >= 1 or convergence check is requested
+    if (upt%icgn_selfenergy_order >= 1 .or. upt%icgn_check_convergence) then
        ! Both directions: cnt_qq * 2 (upper bound)
        cnt_qq = 0
        do i = 1, npair
@@ -1636,6 +1645,38 @@ contains
     end do
     call destroy_pairs(pairs)
 
+    ! ---- Convergence check: estimate ||T||_2 = ||(E0-D)^-1 W||_2 -----------
+    ! Uses qq_i/qq_j/qq_v already built. Only meaningful when order >= 1.
+    upt%icgn_sigma_T2     = -1.0_dp
+    upt%icgn_pi_converged = .true.
+    E0_used = upt%icgn_E0
+    if (E0_used == 0.0_dp) E0_used = (upt%icgn_core_emin + upt%icgn_core_emax) / 2.0_dp
+    if (upt%icgn_check_convergence .and. nqq > 0) then
+       call icgn_power_iteration(evals_q, nstates_total, &
+            qq_i, qq_j, qq_v, nqq, E0_used, &
+            upt%icgn_pi_maxiter, upt%icgn_pi_tol, &
+            upt%icgn_sigma_T2, upt%icgn_pi_converged)
+       if (.not. upt%icgn_pi_converged) then
+          write(*,'(a,i0,a)') &
+               '  (icgn) WARNING: power iteration did not converge in ', &
+               upt%icgn_pi_maxiter, ' sweeps — ||T||_2 estimate may be unreliable.'
+       end if
+       if (upt%icgn_sigma_T2 >= 1.0_dp) then
+          write(*,'(a,f10.6,a)') &
+               '  (icgn) WARNING: ||T||_2 = ', upt%icgn_sigma_T2, &
+               ' >= 1 — Neumann series not guaranteed to converge at this E0.'
+          if (upt%icgn_selfenergy_order == 0) write(*,'(a)') &
+               '  (icgn) NOTE: order=0 does not use the Q-Q coupling W, so this' // &
+               ' warning is informational only for this run.'
+       else if (upt%verbose > 0) then
+          write(*,'(a,f10.6,a,l1)') &
+               '  (icgn) ||T||_2 = ', upt%icgn_sigma_T2, &
+               ', power-iter converged: ', upt%icgn_pi_converged
+          if (upt%icgn_selfenergy_order == 0) write(*,'(a)') &
+               '  (icgn) NOTE: order=0 ignores W — norm above is for diagnostics only.'
+       end if
+    end if
+
     ! ---- Compute Sigma and add to H_dense ----------------------------------
     allocate(Sigma(nred, nred))
     Sigma = cmplx(0.0_dp, 0.0_dp, kind=dp)
@@ -1684,7 +1725,9 @@ contains
 
     deallocate(amp_vec, next_vec)
     deallocate(pq_p, pq_q, pq_v)
-    if (nqq > 0) deallocate(qq_i, qq_j, qq_v)
+    if (upt%icgn_selfenergy_order >= 1 .or. upt%icgn_check_convergence) then
+       if (allocated(qq_i)) deallocate(qq_i, qq_j, qq_v)
+    end if
     deallocate(block_of_state, local_of_state, evals_q, ret_offset)
     deallocate(roff_blk, local_ret_idx)
 
@@ -1890,6 +1933,121 @@ contains
        off = off + upt%icgn_blocks(i)%nret
     end do
   end subroutine icgn_lift
+
+  ! ---------------------------------------------------------------------------
+  ! Power iteration to estimate ||T||_2, T = (E0-D)^{-1} W
+  ! where D = diag(evals_q restricted to Q) and W = Q-Q coupling matrix
+  ! stored as the edge list (qq_i, qq_j, qq_v, nqq), BOTH directions.
+  !
+  ! Algorithm: standard power method on T^dagger T (same as Julia prototype).
+  !   v_0   = random unit vector on Q states with at least one Q-Q edge
+  !   u     = T * v_k         (apply_T)
+  !   w     = T^dagger * u    (apply_T_adjoint)
+  !   v_{k+1} = w / ||w||
+  !   sigma_est = ||u|| = ||T v_k||   (Rayleigh quotient)
+  !   stop when ||v_{k+1} - v_k|| < tol or k == maxiter
+  !
+  ! Uses dense arrays indexed by flat state index (faster than Dict).
+  ! Only states appearing in the Q-Q graph need nonzero entries.
+  subroutine icgn_power_iteration(evals_q, nstates_total, &
+       qq_i_arr, qq_j_arr, qq_v_arr, nqq, E0, maxiter, tol, &
+       sigma_out, converged_out)
+    real(dp),     intent(in)  :: evals_q(:)
+    integer,      intent(in)  :: nstates_total
+    integer,      intent(in)  :: qq_i_arr(:), qq_j_arr(:)
+    complex(dp),  intent(in)  :: qq_v_arr(:)
+    integer,      intent(in)  :: nqq, maxiter
+    real(dp),     intent(in)  :: E0, tol
+    real(dp),     intent(out) :: sigma_out
+    logical,      intent(out) :: converged_out
+
+    integer  :: k, e, qi, qj
+    real(dp) :: nrm, sigma_est, diff2, res_qi
+    complex(dp) :: amp
+    complex(dp), allocatable :: v(:), u(:), w(:), v_next(:)
+
+    sigma_out     = 0.0_dp
+    converged_out = .true.
+
+    if (nqq == 0) return
+
+    allocate(v(nstates_total), u(nstates_total), w(nstates_total), v_next(nstates_total))
+
+    ! ---- initialise v as random unit vector on Q-Q support -----------------
+    call random_number_cx(v, nstates_total, qq_i_arr, nqq)
+    nrm = sqrt(real(dot_product(v, v), kind=dp))
+    if (nrm < 1.0e-14_dp) then; sigma_out = 0.0_dp; converged_out = .true.; return; end if
+    v = v / nrm
+
+    converged_out = .false.
+    sigma_est     = 0.0_dp
+
+    do k = 1, maxiter
+
+       ! u = T * v = (E0 - D)^{-1} W v
+       ! Step 1: w_tmp = W * v  (sparse matvec over qq edges, both directions stored)
+       u = cmplx(0.0_dp, 0.0_dp, kind=dp)
+       do e = 1, nqq
+          qi = qq_i_arr(e); qj = qq_j_arr(e)
+          u(qj) = u(qj) + qq_v_arr(e) * v(qi)
+       end do
+       ! Step 2: scale by resolvent  u(q) = u(q) / (E0 - evals_q(q))
+       do qi = 1, nstates_total
+          if (abs(u(qi)) < 1.0e-300_dp) cycle
+          res_qi = 1.0_dp / (E0 - evals_q(qi))
+          u(qi) = u(qi) * res_qi
+       end do
+
+       ! sigma_est = ||u|| = ||T v||
+       sigma_est = sqrt(real(dot_product(u, u), kind=dp))
+
+       ! w = T^dagger * u = W^dagger * (E0-D)^{-1} * u
+       ! Step 1: scale by resolvent (E0-D is real diagonal, self-adjoint)
+       w = cmplx(0.0_dp, 0.0_dp, kind=dp)
+       do qi = 1, nstates_total
+          if (abs(u(qi)) < 1.0e-300_dp) cycle
+          w(qi) = u(qi) / (E0 - evals_q(qi))
+       end do
+       ! Step 2: apply W^dagger via conjugated edge walk
+       v_next = cmplx(0.0_dp, 0.0_dp, kind=dp)
+       do e = 1, nqq
+          qi = qq_i_arr(e); qj = qq_j_arr(e)
+          v_next(qi) = v_next(qi) + conjg(qq_v_arr(e)) * w(qj)
+       end do
+
+       ! normalize v_{k+1}
+       nrm = sqrt(real(dot_product(v_next, v_next), kind=dp))
+       if (nrm < 1.0e-14_dp) then
+          sigma_out = 0.0_dp; converged_out = .true.; return
+       end if
+       v_next = v_next / nrm
+
+       ! convergence: ||v_{k+1} - v_k||
+       diff2 = real(dot_product(v_next - v, v_next - v), kind=dp)
+       v = v_next
+
+       if (sqrt(diff2) < tol) then
+          converged_out = .true.
+          exit
+       end if
+    end do
+
+    sigma_out = sigma_est
+    deallocate(v, u, w, v_next)
+  end subroutine icgn_power_iteration
+
+  ! Fill v with random complex values on the support of qq edges, zeros elsewhere
+  subroutine random_number_cx(v, n, qi_arr, nqq)
+    complex(dp), intent(out) :: v(:)
+    integer,     intent(in)  :: n, nqq, qi_arr(:)
+    real(dp) :: rr, ri
+    integer  :: e
+    v = cmplx(0.0_dp, 0.0_dp, kind=dp)
+    do e = 1, nqq
+       call random_number(rr); call random_number(ri)
+       v(qi_arr(e)) = cmplx(rr - 0.5_dp, ri - 0.5_dp, kind=dp)
+    end do
+  end subroutine random_number_cx
 
   ! Helper: grow integer array
   subroutine grow_int_array(arr, new_size)

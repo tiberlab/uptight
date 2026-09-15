@@ -403,22 +403,25 @@ contains
   end subroutine UPT_get_improved_cg_info
 
   subroutine UPT_configure_icgn(upt, enabled, nblocks, core_emin, core_emax, &
-                                 e_buffer, epsilon, selfenergy_order, E0, imbalance)
+                                 e_buffer, epsilon, selfenergy_order, E0, imbalance, &
+                                 check_convergence, pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
-    logical, intent(in) :: enabled
-    integer, intent(in) :: nblocks, selfenergy_order
-    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance
+    logical, intent(in) :: enabled, check_convergence
+    integer, intent(in) :: nblocks, selfenergy_order, pi_maxiter
+    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance, pi_tol
     call icgn_configure(upt, enabled, nblocks, core_emin, core_emax, e_buffer, epsilon, &
-         selfenergy_order, E0, imbalance)
+         selfenergy_order, E0, imbalance, check_convergence, pi_maxiter, pi_tol)
   end subroutine UPT_configure_icgn
 
-  subroutine UPT_get_icgn_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+  subroutine UPT_get_icgn_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction, &
+       sigma_T2, pi_converged)
     use coarse_grain, only : icgn_get_info
     type(OUPT), intent(in) :: upt
-    logical, intent(out) :: ready
+    logical, intent(out) :: ready, pi_converged
     integer, intent(out) :: original_dim, reduced_dim, nblocks
-    real(dp), intent(out) :: cut_fraction
-    call icgn_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+    real(dp), intent(out) :: cut_fraction, sigma_T2
+    call icgn_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction, &
+         sigma_T2, pi_converged)
   end subroutine UPT_get_icgn_info
 
   !---------------------------------------------------------------------

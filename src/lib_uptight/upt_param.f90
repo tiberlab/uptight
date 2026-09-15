@@ -120,6 +120,12 @@ module upt_param
      real(dp) :: icgn_imbalance, icgn_cut_fraction
      integer :: icgn_selfenergy_order          ! Neumann series order (0,1,2,...)
      real(dp) :: icgn_E0                       ! self-energy expansion point
+     ! Convergence check: power iteration to estimate ||T||_2 = ||(E0-D)^-1 W||_2
+     logical  :: icgn_check_convergence        ! .true. to run power iteration check
+     integer  :: icgn_pi_maxiter               ! max power-iteration sweeps (e.g. 200)
+     real(dp) :: icgn_pi_tol                   ! convergence tolerance (e.g. 1e-6)
+     real(dp) :: icgn_sigma_T2                 ! estimated ||T||_2 (output; -1 if not run)
+     logical  :: icgn_pi_converged             ! .true. if power iteration converged
      type(CSR) :: icgn_ham, icgn_U
      type(CGBlock), dimension(:), pointer :: icgn_blocks => null()
  
