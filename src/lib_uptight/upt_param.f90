@@ -25,7 +25,7 @@ module upt_param
   private
 
 
-  public :: OUPT, set_defaults, CGBlock
+  public :: OUPT, set_defaults, CGBlock, classify_vb_cb
 
   ! Local retained basis for one coarse-grained atom partition.
   type CGBlock
@@ -233,5 +233,80 @@ contains
    upt%estimate_factor = 1.0
 
  end subroutine set_defaults
+
+  ! -------------------------------------------------------------------------
+  ! classify_vb_cb: assign particles(-1/+1), select and store eigen_values /
+  ! eigen_vectors from a full sorted-ascending diagonalization result.
+  ! Mirrors the logic in the standard lapack() solver.
+  !
+  !   eval(1:ntot)        — all eigenvalues sorted ascending
+  !   h(nfull,ntot)       — corresponding eigenvectors in the physical basis
+  !   lambda_vb           — boundary energy: states below are VB (holes)
+  !   num_vb, num_cb      — how many VB/CB states to return
+  !
+  ! Output layout in upt (arrays (re)allocated here):
+  !   eigen_values(1:num_vb)        — VB eigenvalues, highest→lowest
+  !   eigen_values(num_vb+1:num_ev) — CB eigenvalues, lowest→highest
+  !   particles(1:num_vb)   = -1    — holes
+  !   particles(num_vb+1:)  = +1    — electrons
+  ! -------------------------------------------------------------------------
+  subroutine classify_vb_cb(upt, eval, h, ntot, nfull)
+    type(OUPT),  intent(inout) :: upt
+    integer,     intent(in)    :: ntot, nfull
+    real(dp),    intent(in)    :: eval(ntot)
+    complex(dp), intent(in)    :: h(nfull, ntot)
+
+    integer :: i_k, i, num_ev, nvb, ncb
+
+    ! count states strictly below lambda_vb
+    i_k = 0
+    do i = 1, ntot
+       if (eval(i) < upt%lambda_vb) then
+          i_k = i
+       else
+          exit
+       end if
+    end do
+
+    nvb = min(upt%num_vb, i_k)
+    ncb = min(upt%num_cb, ntot - i_k)
+
+    if (nvb < upt%num_vb) write(*,'(a,i0,a,i0,a,f8.3)') &
+         '  (classify_vb_cb) WARNING: only ', nvb, &
+         ' VB states available, requested ', upt%num_vb, &
+         '.  lambda_vb = ', upt%lambda_vb
+    if (ncb < upt%num_cb) write(*,'(a,i0,a,i0,a,f8.3)') &
+         '  (classify_vb_cb) WARNING: only ', ncb, &
+         ' CB states available, requested ', upt%num_cb, &
+         '.  lambda_vb = ', upt%lambda_vb
+
+    num_ev = nvb + ncb
+    if (num_ev == 0) then
+       write(*,'(a)') '  (classify_vb_cb) ERROR: zero states to return.'
+       return
+    end if
+
+    if (associated(upt%eigen_values))  deallocate(upt%eigen_values)
+    if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+    if (associated(upt%particles))     deallocate(upt%particles)
+    allocate(upt%eigen_values(num_ev))
+    allocate(upt%eigen_vectors(nfull, num_ev))
+    allocate(upt%particles(num_ev))
+
+    ! VB: store highest -> lowest
+    upt%particles(1:nvb) = -1
+    do i = 1, nvb
+       upt%eigen_values(i)     = eval(i_k - i + 1)
+       upt%eigen_vectors(:, i) = h(:, i_k - i + 1)
+    end do
+
+    ! CB: store lowest -> highest
+    upt%particles(nvb+1:num_ev) = 1
+    do i = 1, ncb
+       upt%eigen_values(nvb + i)     = eval(i_k + i)
+       upt%eigen_vectors(:, nvb + i) = h(:, i_k + i)
+    end do
+
+  end subroutine classify_vb_cb
 
 end module upt_param

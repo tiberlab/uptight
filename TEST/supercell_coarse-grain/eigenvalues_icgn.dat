@@ -3,9 +3,9 @@
 # Reduced dimension: 1294
 # Rank reduction:    33.98 %
 # Cut fraction:          0.0408
-# Total time (s):        1.998000
+# Total time (s):        1.969000
 # Total bands:       1294
-# Neumann ||T||_2 =   1.511182E-01 (< 1, series on solid footing)
+# Neumann ||T||_2 =   1.511198E-01 (< 1, series on solid footing)
 # Power iter converged: T
 # AAD 100 smallest positive evals (eV):   5.966546E-03
 # AAD 100 largest  negative evals (eV):   2.685034E-03

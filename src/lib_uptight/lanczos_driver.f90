@@ -196,10 +196,12 @@ MODULE lanczos_driver
     end subroutine lanczos
 
     subroutine lanczos_coarse(upt)
+      use upt_param, only : classify_vb_cb
       type(OUPT) :: upt
-      integer :: nred,nfull,err,i,file_num
+      integer :: nred,nfull,err,i,file_num,num_ev_out
       real(dp), allocatable, target :: rval(:)
       complex(dp), allocatable, target :: rvec(:,:)
+      complex(dp), allocatable :: lifted(:,:)
       real(dp), pointer :: pval(:)
       complex(dp), pointer :: pvec(:,:)
       character(len=:), allocatable :: statesfile
@@ -223,15 +225,17 @@ MODULE lanczos_driver
       if(associated(upt%eigen_values)) deallocate(upt%eigen_values)
       if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
       if(associated(upt%particles)) deallocate(upt%particles)
-      allocate(upt%eigen_values(nred),upt%eigen_vectors(nfull,nred),upt%particles(nred))
-      upt%eigen_values=rval
-      upt%particles=0
-      call cg_lift(upt,rvec,upt%eigen_vectors)
-      
+      ! Lift ALL eigenvectors to the full basis, then classify VB/CB via lambda_vb
+      allocate(lifted(nfull,nred),stat=err)
+      if(err/=0) stop '(Lanczos coarse grain) lift allocation failed'
+      call cg_lift(upt,rvec,lifted)
+      call classify_vb_cb(upt, rval, lifted, nred, nfull)
+      deallocate(lifted)
+      num_ev_out = size(upt%eigen_values)
       if(id0) then
          statesfile=trim(upt%state_file)
          call open_file(statesfile,file_num,operation='write',replace_flag=.true.,output_flag=.false.); close(file_num)
-         do i=1,nred
+         do i=1,num_ev_out
             call append_eigenstate(statesfile,upt%eigen_vectors(:,i),upt%eigen_values(i),upt%particles(i))
          end do
       end if
