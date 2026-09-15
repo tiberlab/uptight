@@ -46,7 +46,7 @@ Installation
 - **Mathematical Libraries:**
   - BLAS and LAPACK (standard linear algebra libraries)
   - Optionally, ARPACK (for eigenvalue problems)
-- **Optional:** MPI libraries (OpenMPI or MPICH) for parallel computations
+- **Optional:** MPI libraries (OpenMPI or MPICH) for parallel computations, METIS library for optimal paritioning of Hamiltonian matrix (in coarse-graining modes)
 
 ### Installing dependencies
 

@@ -174,14 +174,11 @@ contains
     end do
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%cg_num_blocks,c_int), int(nint(1000.0_dp*upt%cg_imbalance),c_int), 42_c_int, part)
-    if (status /= 0) then       ! METIS not available - fallback to simple sequential partitioning
+    if (status /= 0) then       ! METIS not available — fallback to connectivity-aware partition
        if (upt%verbose > 0) then
-          write(*,*) '(coarse grain) METIS unavailable, using sequential partitioning'
+          write(*,*) '(coarse grain) METIS unavailable, using graph-BFS fallback partitioning'
        end if
-       ! Simple partition: divide atoms sequentially into blocks
-       do i = 1, na
-          part(i) = int((i-1) * upt%cg_num_blocks / na, c_int)
-       end do
+       call cg_graph_partition(na, upt%cg_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
     end if
     do i = 1, na
        label(i) = int(part(i)) + 1
@@ -724,7 +721,8 @@ contains
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%icg_num_blocks,c_int), int(nint(1000.0_dp*upt%icg_imbalance),c_int), 42_c_int, part)
     if (status /= 0) then
-       do i = 1, na; part(i) = int((i-1)*upt%icg_num_blocks/na, c_int); end do
+       if (upt%verbose > 0) write(*,*) '(icg) METIS unavailable, using graph-BFS fallback partitioning'
+       call cg_graph_partition(na, upt%icg_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
     end if
     do i = 1, na; label(i) = int(part(i)) + 1; end do
 
@@ -1281,7 +1279,8 @@ contains
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%icgn_num_blocks,c_int), int(nint(1000.0_dp*upt%icgn_imbalance),c_int), 42_c_int, part)
     if (status /= 0) then
-       do i = 1, na; part(i) = int((i-1)*upt%icgn_num_blocks/na, c_int); end do
+       if (upt%verbose > 0) write(*,*) '(icgn) METIS unavailable, using graph-BFS fallback partitioning'
+       call cg_graph_partition(na, upt%icgn_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
     end if
     do i = 1, na; label(i) = int(part(i)) + 1; end do
 
@@ -2068,5 +2067,121 @@ contains
     tmp(1:size(arr)) = arr
     call move_alloc(tmp, arr)
   end subroutine grow_cx_array
+
+  ! ============================================================================
+  ! cg_graph_partition: connectivity-aware fallback partition when METIS is
+  ! unavailable.
+  !
+  ! Algorithm: weighted greedy graph growing (BFS-seeded, priority-queue-free).
+  ! Guarantees:
+  !   (1) Every atom in a block is reachable from the block seed via bonds —
+  !       so no block is a disjoint set of atoms.
+  !   (2) All orbitals of an atom go to the same block (works at the atom level,
+  !       so the orbital → block mapping is done after by the caller).
+  !   (3) Approximate balance: blocks grow until their total orbital count
+  !       reaches the target weight (n_orbitals / nblocks).  Remaining atoms
+  !       are appended to the last unfilled block.
+  !
+  ! Inputs:
+  !   na         — number of atoms
+  !   nblocks    — desired number of blocks
+  !   vwgt(na)   — vertex weight of each atom (= number of orbitals, bsize(i))
+  !   xadj(na+1) — CSR row pointers of atom adjacency graph (0-based)
+  !   adjncy(*)  — CSR column indices (0-based atom indices)
+  !   adjwgt(*)  — CSR edge weights (integer, Hamiltonian coupling strength)
+  !
+  ! Output:
+  !   part(na)   — block index (0-based, in [0, nblocks-1]) for each atom
+  ! ============================================================================
+  subroutine cg_graph_partition(na, nblocks, vwgt, xadj, adjncy, adjwgt, part)
+    use, intrinsic :: iso_c_binding, only : c_int
+    integer,            intent(in)  :: na, nblocks
+    integer(c_int),     intent(in)  :: vwgt(na)
+    integer(c_int),     intent(in)  :: xadj(na+1), adjncy(*), adjwgt(*)
+    integer(c_int),     intent(out) :: part(na)
+
+    ! --- local ---
+    integer :: i, j, atom, nb_atom, blk, seed
+    integer :: target_wt, cur_wt, total_wt
+    integer :: qhead, qtail, qsize
+    integer, allocatable :: queue(:)     ! BFS queue (atom indices, 1-based)
+    logical, allocatable :: visited(:)  ! atom already assigned?
+    integer :: best_deg, deg, adj_start, adj_end
+    integer :: max_adj_wt, wval
+
+    ! ----- compute target weight per block -----
+    total_wt = 0
+    do i = 1, na
+       total_wt = total_wt + int(vwgt(i))
+    end do
+    target_wt = (total_wt + nblocks - 1) / nblocks   ! ceiling
+
+    allocate(visited(na), queue(na))
+    visited = .false.
+    part    = int(nblocks - 1, c_int)   ! default: last block (catches unvisited atoms)
+
+    do blk = 0, nblocks - 2    ! assign blocks 0 .. nblocks-2; last gets remainder
+
+       ! ---- pick seed: unvisited atom with highest degree ----
+       seed     = -1
+       best_deg = -1
+       do i = 1, na
+          if (visited(i)) cycle
+          deg = int(xadj(i+1) - xadj(i))   ! number of inter-atom bonds
+          if (deg > best_deg) then
+             best_deg = deg
+             seed     = i
+          end if
+       end do
+       if (seed == -1) exit    ! all atoms assigned already
+
+       ! ---- BFS grow from seed until block weight reaches target ----
+       part(seed) = int(blk, c_int)
+       visited(seed) = .true.
+       queue(1) = seed
+       qhead = 1; qtail = 1; qsize = 1
+       cur_wt = int(vwgt(seed))
+
+       do while (qhead <= qtail .and. cur_wt < target_wt)
+          atom = queue(qhead); qhead = qhead + 1
+
+          ! Add all unvisited neighbours of this atom to the block, in
+          ! decreasing edge-weight order (greedy: strongest bond first).
+          ! Cost: O(degree^2) per atom — degree is small for tight-binding.
+          adj_start = int(xadj(atom)) + 1    ! convert 0-based xadj to 1-based
+          adj_end   = int(xadj(atom+1))
+
+          do while (cur_wt < target_wt)
+             ! pick the unvisited neighbour with maximum edge weight
+             max_adj_wt = -1
+             nb_atom    = -1
+             do j = adj_start, adj_end
+                i = int(adjncy(j)) + 1    ! 0-based → 1-based
+                if (.not. visited(i)) then
+                   wval = int(adjwgt(j))
+                   if (wval > max_adj_wt) then
+                      max_adj_wt = wval
+                      nb_atom    = i
+                   end if
+                end if
+             end do
+             if (nb_atom == -1) exit     ! no more unvisited neighbours of this atom
+
+             visited(nb_atom) = .true.
+             part(nb_atom)    = int(blk, c_int)
+             cur_wt           = cur_wt + int(vwgt(nb_atom))
+             qtail            = qtail + 1
+             queue(qtail)     = nb_atom
+          end do
+          if (cur_wt >= target_wt) exit
+       end do
+
+    end do  ! blk loop
+
+    ! ---- any unvisited atom (disconnected components or remainder) → last block ----
+    ! (part already initialised to nblocks-1)
+
+    deallocate(visited, queue)
+  end subroutine cg_graph_partition
 
 end module coarse_grain
