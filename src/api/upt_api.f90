@@ -553,6 +553,39 @@ subroutine upt_set_coarse_graining(handler, enabled, n_blocks, emin, emax, imbal
   call upt_configure_coarse_graining(pUPTs%pUPT, enabled /= 0, n_blocks, emin, emax, imbalance)
 end subroutine upt_set_coarse_graining
 
+subroutine upt_set_coarse_graining_mode(handler, mode, subsolver, subsolver_type, n_blocks, &
+    imbalance, energy_min, energy_max, core_energy_min, core_energy_max, energy_buffer, &
+    epsilon, neumann_order, expansion_energy, check_convergence, &
+    power_iteration_max_iterations, power_iteration_tolerance)
+  use precision, only : dp
+  use uptightAPICommon ! if:mod:use
+  use uptight, only : upt_configure_coarse_graining_mode ! if:mod:use
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: mode ! if:var:in
+  integer :: subsolver ! if:var:in
+  integer :: subsolver_type ! if:var:in
+  integer :: n_blocks ! if:var:in
+  real(dp) :: imbalance ! if:var:in
+  real(dp) :: energy_min ! if:var:in
+  real(dp) :: energy_max ! if:var:in
+  real(dp) :: core_energy_min ! if:var:in
+  real(dp) :: core_energy_max ! if:var:in
+  real(dp) :: energy_buffer ! if:var:in
+  real(dp) :: epsilon ! if:var:in
+  integer :: neumann_order ! if:var:in
+  real(dp) :: expansion_energy ! if:var:in
+  integer :: check_convergence ! if:var:in
+  integer :: power_iteration_max_iterations ! if:var:in
+  real(dp) :: power_iteration_tolerance ! if:var:in
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_configure_coarse_graining_mode(pUPTs%pUPT, mode, subsolver, subsolver_type, &
+      n_blocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
+      energy_buffer, epsilon, neumann_order, expansion_energy, check_convergence /= 0, &
+      power_iteration_max_iterations, power_iteration_tolerance)
+end subroutine upt_set_coarse_graining_mode
+
 !!* Return coarse-graining reduction statistics after Hamiltonian creation.
 subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)
   use precision, only : dp

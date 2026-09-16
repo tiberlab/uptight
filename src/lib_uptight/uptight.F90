@@ -56,6 +56,7 @@ module UPTIGHT
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
   public :: upt_configure_improved_cg, upt_get_improved_cg_info
   public :: upt_configure_icgn, upt_get_icgn_info
+  public :: upt_configure_coarse_graining_mode
   public :: upt_writehamiltonian
 
   !interface init
@@ -87,6 +88,18 @@ contains
     NULLIFY(upt%cg_U%M)
     NULLIFY(upt%cg_U%Mj)
     NULLIFY(upt%cg_U%Mi)
+    NULLIFY(upt%icg_ham%M)
+    NULLIFY(upt%icg_ham%Mj)
+    NULLIFY(upt%icg_ham%Mi)
+    NULLIFY(upt%icg_U%M)
+    NULLIFY(upt%icg_U%Mj)
+    NULLIFY(upt%icg_U%Mi)
+    NULLIFY(upt%icgn_ham%M)
+    NULLIFY(upt%icgn_ham%Mj)
+    NULLIFY(upt%icgn_ham%Mi)
+    NULLIFY(upt%icgn_U%M)
+    NULLIFY(upt%icgn_U%Mj)
+    NULLIFY(upt%icgn_U%Mi)
     NULLIFY(upt%ref_states)
     NULLIFY(upt%ref_couplings)
 
@@ -329,6 +342,8 @@ contains
     if(upt%verbose.gt.0) write(*,*) '(uptight) compute new matrix'
     call sparse_ham(upt)
     if (upt%cg_enabled) then
+       if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain subsolver ', upt%cg_subsolver, &
+            ' backend ', upt%cg_subsolver_type
        call cg_prepare(upt, ierr)
        if (ierr /= 0) then
           write(*,*) '(uptight) coarse-graining preparation failed'
@@ -336,6 +351,8 @@ contains
        end if
     end if
     if (upt%icg_enabled) then
+       if (upt%verbose > 0) write(*,*) '(uptight) ICG subsolver ', upt%icg_subsolver, &
+            ' backend ', upt%icg_subsolver_type
        call icg_prepare(upt, ierr)
        if (ierr /= 0) then
           write(*,*) '(uptight) improved coarse-graining preparation failed'
@@ -343,10 +360,21 @@ contains
        end if
     end if
     if (upt%icgn_enabled) then
+       if (upt%verbose > 0) write(*,*) '(uptight) ICGN subsolver ', upt%icgn_subsolver, &
+            ' backend ', upt%icgn_subsolver_type
        call icgn_prepare(upt, ierr)
        if (ierr /= 0) then
           write(*,*) '(uptight) ICGN preparation failed'
           stop 1
+       end if
+       if (upt%icgn_check_convergence) then
+          if (.not. upt%icgn_pi_converged) then
+             write(*,*) '(icgn) WARNING: Neumann norm estimate is unreliable; power iteration did not converge'
+          else if (upt%icgn_sigma_T2 < 1.0_dp) then
+             write(*,*) '(icgn) Neumann norm < 1: series is valid', upt%icgn_sigma_T2
+          else
+             write(*,*) '(icgn) WARNING: Neumann norm >= 1: series is not guaranteed to converge', upt%icgn_sigma_T2
+          end if
        end if
     end if
 
@@ -374,6 +402,38 @@ contains
     real(dp), intent(in) :: emin, emax, imbalance
     call cg_configure(upt, enabled, nblocks, emin, emax, imbalance)
   end subroutine UPT_configure_coarse_graining
+
+  subroutine UPT_configure_coarse_graining_mode(upt, mode, subsolver, subsolver_type, &
+      nblocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
+      energy_buffer, epsilon, neumann_order, expansion_energy, check_convergence, &
+      pi_maxiter, pi_tol)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: mode, subsolver, subsolver_type, nblocks, neumann_order, pi_maxiter
+    real(dp), intent(in) :: imbalance, energy_min, energy_max, core_energy_min, core_energy_max
+    real(dp), intent(in) :: energy_buffer, epsilon, expansion_energy, pi_tol
+    logical, intent(in) :: check_convergence
+
+    call cg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, imbalance)
+    call icg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, epsilon, imbalance)
+    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, epsilon, 0, 0.0_dp, &
+        imbalance, .false., pi_maxiter, pi_tol)
+    select case (mode)
+    case (1)
+       call cg_configure(upt, .true., nblocks, energy_min, energy_max, imbalance)
+       upt%cg_subsolver = subsolver; upt%cg_subsolver_type = subsolver_type
+    case (2)
+       call icg_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
+           energy_buffer, epsilon, imbalance)
+       upt%icg_subsolver = subsolver; upt%icg_subsolver_type = subsolver_type
+    case (3)
+       call icgn_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
+           energy_buffer, epsilon, neumann_order, expansion_energy, imbalance, &
+           check_convergence, pi_maxiter, pi_tol)
+       upt%icgn_subsolver = subsolver; upt%icgn_subsolver_type = subsolver_type
+    case default
+       write(*,*) '(uptight) invalid coarse-graining mode'; stop 1
+    end select
+  end subroutine UPT_configure_coarse_graining_mode
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
     use coarse_grain, only : cg_get_info

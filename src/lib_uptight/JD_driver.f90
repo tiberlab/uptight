@@ -21,7 +21,7 @@ MODULE jd_driver
   USE errors
   USE jd_diag
   USE savemofile, only : append_eigenstate
-  USE coarse_grain, only : cg_active, cg_lift
+  USE coarse_grain, only : cg_active, cg_lift, icg_active, icg_lift, icgn_active, icgn_lift
 
   IMPLICIT NONE
   PRIVATE
@@ -50,7 +50,7 @@ MODULE jd_driver
       INTEGER :: len, verbose
 
 
-      if (cg_active(upt)) then
+      if (cg_active(upt) .or. icg_active(upt) .or. icgn_active(upt)) then
          call jd_coarse(upt)
          return
       end if
@@ -204,7 +204,14 @@ MODULE jd_driver
       complex(dp), pointer :: pvec(:,:)
       character(len=:), allocatable :: statesfile
 
-      nred=upt%cg_ham%nrow; nfull=upt%ham%nrow
+      if (cg_active(upt)) then
+         nred=upt%cg_ham%nrow
+      else if (icg_active(upt)) then
+         nred=upt%icg_ham%nrow
+      else
+         nred=upt%icgn_ham%nrow
+      end if
+      nfull=upt%ham%nrow
       
       ! Solve for ALL eigenvalues of reduced matrix
       allocate(rval(nred),rvec(nred,nred),stat=err)
@@ -216,9 +223,19 @@ MODULE jd_driver
       pvec => rvec
       
       ! Call JD to get all eigenvalues
-      call JD_EV(upt%cg_ham,upt%cg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
-           1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol, &
-           upt%ort_tol,0,upt%dynamic,.false.,upt%verbose,1)
+      if (cg_active(upt)) then
+         call JD_EV(upt%cg_ham,upt%cg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
+              1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol, &
+              upt%ort_tol,0,upt%dynamic,.false.,upt%verbose,1)
+      else if (icg_active(upt)) then
+         call JD_EV(upt%icg_ham,upt%icg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
+              1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol, &
+              upt%ort_tol,0,upt%dynamic,.false.,upt%verbose,1)
+      else
+         call JD_EV(upt%icgn_ham,upt%icgn_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
+              1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol, &
+              upt%ort_tol,0,upt%dynamic,.false.,upt%verbose,1)
+      end if
       
       if(associated(upt%eigen_values)) deallocate(upt%eigen_values)
       if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
@@ -226,7 +243,13 @@ MODULE jd_driver
       ! Lift ALL eigenvectors to the full basis, then classify VB/CB via lambda_vb
       allocate(lifted(nfull,nred),stat=err)
       if(err/=0) stop '(JD coarse grain) lift allocation failed'
-      call cg_lift(upt,rvec,lifted)
+      if (cg_active(upt)) then
+         call cg_lift(upt,rvec,lifted)
+      else if (icg_active(upt)) then
+         call icg_lift(upt,rvec,lifted)
+      else
+         call icgn_lift(upt,rvec,lifted)
+      end if
       call classify_vb_cb(upt, rval, lifted, nred, nfull)
       deallocate(lifted)
       num_ev_out = size(upt%eigen_values)

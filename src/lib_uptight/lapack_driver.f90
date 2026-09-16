@@ -20,7 +20,7 @@ MODULE lapack_driver
   USE input_output
   use errors
   USE exceptions
-  USE coarse_grain, only : cg_active, cg_lift
+  USE coarse_grain, only : cg_active, cg_lift, icg_active, icgn_active
 
   implicit none
   private
@@ -47,6 +47,14 @@ contains
 
       if (cg_active(upt)) then
          call lapack_coarse(upt)
+         return
+      end if
+      if (icg_active(upt)) then
+         call lapack_icg(upt)
+         return
+      end if
+      if (icgn_active(upt)) then
+         call lapack_icgn(upt)
          return
       end if
       n_ham = upt%ham%nrow

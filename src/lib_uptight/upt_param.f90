@@ -98,6 +98,7 @@ module upt_param
      ! cg_ham is used only by eigensolver drivers when cg_ready is true.
      logical :: cg_enabled, cg_ready
      integer :: cg_num_blocks, cg_original_dim, cg_reduced_dim
+     integer :: cg_subsolver, cg_subsolver_type
      real(dp) :: cg_emin, cg_emax, cg_imbalance, cg_cut_fraction
      type(CSR) :: cg_ham, cg_U
      type(CGBlock), dimension(:), pointer :: cg_blocks => null()
@@ -105,6 +106,7 @@ module upt_param
      ! Improved coarse-graining state (core + buffer + level-1 acquaintance)
      logical :: icg_enabled, icg_ready
      integer :: icg_num_blocks, icg_original_dim, icg_reduced_dim
+     integer :: icg_subsolver, icg_subsolver_type
      real(dp) :: icg_core_emin, icg_core_emax  ! core window
      real(dp) :: icg_e_buffer                  ! buffer half-width
      real(dp) :: icg_epsilon                   ! acquaintance threshold factor
@@ -115,6 +117,7 @@ module upt_param
      ! Improved CG with Neumann self-energy correction (same P-space as ICG)
      logical :: icgn_enabled, icgn_ready
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
+     integer :: icgn_subsolver, icgn_subsolver_type
      real(dp) :: icgn_core_emin, icgn_core_emax
      real(dp) :: icgn_e_buffer, icgn_epsilon
      real(dp) :: icgn_imbalance, icgn_cut_fraction
@@ -200,12 +203,49 @@ contains
    upt%cg_enabled = .false.
    upt%cg_ready = .false.
    upt%cg_num_blocks = 1
+   upt%cg_subsolver = 0
+   upt%cg_subsolver_type = 0
    upt%cg_original_dim = 0
    upt%cg_reduced_dim = 0
    upt%cg_emin = -huge(1.0_dp)
    upt%cg_emax = huge(1.0_dp)
    upt%cg_imbalance = 0.03_dp
    upt%cg_cut_fraction = 0.0_dp
+
+   upt%icg_enabled = .false.
+   upt%icg_ready = .false.
+   upt%icg_num_blocks = 1
+   upt%icg_subsolver = 0
+   upt%icg_subsolver_type = 0
+   upt%icg_original_dim = 0
+   upt%icg_reduced_dim = 0
+   upt%icg_core_emin = -huge(1.0_dp)
+   upt%icg_core_emax = huge(1.0_dp)
+   upt%icg_e_buffer = 0.0_dp
+   upt%icg_epsilon = 1.e-3_dp
+   upt%icg_imbalance = 0.03_dp
+   upt%icg_cut_fraction = 0.0_dp
+
+   upt%icgn_enabled = .false.
+   upt%icgn_ready = .false.
+   upt%icgn_num_blocks = 1
+   upt%icgn_subsolver = 0
+   upt%icgn_subsolver_type = 0
+   upt%icgn_original_dim = 0
+   upt%icgn_reduced_dim = 0
+   upt%icgn_core_emin = -huge(1.0_dp)
+   upt%icgn_core_emax = huge(1.0_dp)
+   upt%icgn_e_buffer = 0.0_dp
+   upt%icgn_epsilon = 1.e-3_dp
+   upt%icgn_imbalance = 0.03_dp
+   upt%icgn_cut_fraction = 0.0_dp
+   upt%icgn_selfenergy_order = 0
+   upt%icgn_E0 = 0.0_dp
+   upt%icgn_check_convergence = .false.
+   upt%icgn_pi_maxiter = 1000
+   upt%icgn_pi_tol = 1.e-3_dp
+   upt%icgn_sigma_T2 = -1.0_dp
+   upt%icgn_pi_converged = .true.
 
    upt%vol_fraction = 0.60         ! cutoff isosurface    
    upt%grid_step = 0.5d0           ! step for output grid
