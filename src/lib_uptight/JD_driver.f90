@@ -22,7 +22,7 @@ MODULE jd_driver
   USE errors
   USE jd_diag
   USE savemofile, only : append_eigenstate
-  USE coarse_grain, only : cg_active, cg_lift, icg_active, icg_lift, icgn_active, icgn_lift
+   USE coarse_grain, only : cg_active, icg_active, icgn_active, cg_get_active, cg_lift_active
 
   IMPLICIT NONE
   PRIVATE
@@ -68,6 +68,7 @@ MODULE jd_driver
       if ( .not.all(equiv(upt%k_point,0.d0,1.0d-13,.false.)) ) then
           spin_deg = .false.
       endif
+        if (upt%n_spin == 1) spin_deg = .false.
 
       ! -------------------------------------------------------------------
       !  ALLOCATIONS
@@ -200,6 +201,8 @@ MODULE jd_driver
          type(CSR) :: physical_ham, physical_u
          logical :: active, cg_was_enabled, icg_was_enabled, icgn_was_enabled
          integer :: nfull, nred, num_ev, err
+         integer :: old_shift_init, old_shift_end
+         integer :: old_shift_init_mi, old_shift_end_mi
          complex(dp), allocatable :: reduced_vectors(:,:), lifted(:,:)
 
       call cg_get_active(upt, active_ham, active_u, active)
@@ -220,7 +223,19 @@ MODULE jd_driver
       if (associated(upt%eigen_values)) deallocate(upt%eigen_values)
       if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
       if (associated(upt%particles)) deallocate(upt%particles)
+      old_shift_init = shift_init
+      old_shift_end = shift_end
+         old_shift_init_mi = shift_init_Mi(id)
+         old_shift_end_mi = shift_end_Mi(id)
+      shift_init = 1
+      shift_end = nred
+         shift_init_Mi(id) = 1
+         shift_end_Mi(id) = nred
       call jd(upt)
+      shift_init = old_shift_init
+      shift_end = old_shift_end
+         shift_init_Mi(id) = old_shift_init_mi
+         shift_end_Mi(id) = old_shift_end_mi
       if (.not.associated(upt%eigen_vectors)) then
          upt%ham = physical_ham; upt%U = physical_u
          upt%cg_enabled = cg_was_enabled

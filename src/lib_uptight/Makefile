@@ -100,6 +100,8 @@ endif
 coarse_grain_metis.o: coarse_grain_metis.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+coarse_grain.o: lanczos.o JD.o
+
 ifdef CUDA
   OBJECTS += lanczos_cuda.o JD_N_PC_Mxprec_cuda.o
   ifdef UPT_MPI

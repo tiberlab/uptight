@@ -32,7 +32,7 @@ module UPTIGHT
                                    sort_states
   USE alloys, only : init_mat_ion
   USE TB_ham, only : sparse_ham, hermitianize, check_if_hermitian
-  USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, &
+  USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, cg_log_progress, &
                            icg_prepare, icg_clear, icg_configure, &
                            icgn_prepare, icgn_clear, icgn_configure
   USE lanczos_driver, only : lanczos
@@ -354,6 +354,9 @@ contains
           write(*,*) '(uptight) coarse-graining preparation failed'
          return
        end if
+       if (upt%cg_check_neumann_convergence) then
+         call cg_log_progress(upt, 'mode=cg Neumann norm diagnostic is unavailable: CG has no discarded-state Q-Q operator')
+       end if
     end if
     if (upt%icg_enabled) then
        if (upt%verbose > 0) write(*,*) '(uptight) ICG subsolver ', upt%icg_subsolver, &
@@ -363,6 +366,9 @@ contains
          upt%cg_error = ierr
           write(*,*) '(uptight) improved coarse-graining preparation failed'
          return
+       end if
+       if (upt%cg_check_neumann_convergence) then
+         call cg_log_progress(upt, 'mode=icg Neumann norm diagnostic is unavailable: ICG has no retained Q-Q operator')
        end if
     end if
     if (upt%icgn_enabled) then
@@ -411,32 +417,38 @@ contains
   end subroutine UPT_configure_coarse_graining
 
   subroutine UPT_configure_coarse_graining_mode(upt, mode, subsolver, subsolver_type, &
-      nblocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
-      energy_buffer, epsilon, neumann_order, expansion_energy, check_convergence, &
+      sub_tolerance, nblocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
+      top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, check_neumann_convergence, &
       pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: mode, subsolver, subsolver_type, nblocks, neumann_order, pi_maxiter
     real(dp), intent(in) :: imbalance, energy_min, energy_max, core_energy_min, core_energy_max
-    real(dp), intent(in) :: energy_buffer, epsilon, expansion_energy, pi_tol
-    logical, intent(in) :: check_convergence
+    real(dp), intent(in) :: top_buffer, bottom_buffer, epsilon, expansion_energy, pi_tol, sub_tolerance
+    logical, intent(in) :: check_neumann_convergence
 
     call cg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, imbalance)
-    call icg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, epsilon, imbalance)
-    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, epsilon, 0, 0.0_dp, &
+    upt%cg_check_neumann_convergence = check_neumann_convergence
+    upt%cg_pi_maxiter = pi_maxiter
+    upt%cg_pi_tol = pi_tol
+    call icg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, imbalance)
+    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, 0, 0.0_dp, &
         imbalance, .false., pi_maxiter, pi_tol)
     select case (mode)
     case (1)
        call cg_configure(upt, .true., nblocks, energy_min, energy_max, imbalance)
-       upt%cg_subsolver = subsolver; upt%cg_subsolver_type = subsolver_type
+        upt%cg_subsolver = subsolver; upt%cg_subsolver_type = subsolver_type
+        upt%cg_sub_tolerance = sub_tolerance
     case (2)
        call icg_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
-           energy_buffer, epsilon, imbalance)
+           top_buffer, bottom_buffer, epsilon, imbalance)
        upt%icg_subsolver = subsolver; upt%icg_subsolver_type = subsolver_type
+       upt%cg_sub_tolerance = sub_tolerance
     case (3)
        call icgn_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
-           energy_buffer, epsilon, neumann_order, expansion_energy, imbalance, &
-           check_convergence, pi_maxiter, pi_tol)
-       upt%icgn_subsolver = subsolver; upt%icgn_subsolver_type = subsolver_type
+           top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, imbalance, &
+           check_neumann_convergence, pi_maxiter, pi_tol)
+      upt%icgn_subsolver = subsolver; upt%icgn_subsolver_type = subsolver_type
+      upt%cg_sub_tolerance = sub_tolerance
     case default
        write(*,*) '(uptight) invalid coarse-graining mode'; stop 1
     end select
@@ -444,7 +456,7 @@ contains
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
      use coarse_grain, only : cg_get_info, icg_get_info, icgn_get_info
-    type(OUPT), intent(in) :: upt
+    type(OUPT), intent(in), target :: upt
     logical, intent(out) :: ready
      logical :: pi_converged
     integer, intent(out) :: original_dim, reduced_dim, nblocks
@@ -473,12 +485,12 @@ contains
   end subroutine UPT_get_coarse_graining_error
 
   subroutine UPT_configure_improved_cg(upt, enabled, nblocks, core_emin, core_emax, &
-                                        e_buffer, epsilon, imbalance)
+                                        top_buffer, bottom_buffer, epsilon, imbalance)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled
     integer, intent(in) :: nblocks
-    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, imbalance
-    call icg_configure(upt, enabled, nblocks, core_emin, core_emax, e_buffer, epsilon, imbalance)
+    real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, imbalance
+    call icg_configure(upt, enabled, nblocks, core_emin, core_emax, top_buffer, bottom_buffer, epsilon, imbalance)
   end subroutine UPT_configure_improved_cg
 
   subroutine UPT_get_improved_cg_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
@@ -491,13 +503,13 @@ contains
   end subroutine UPT_get_improved_cg_info
 
   subroutine UPT_configure_icgn(upt, enabled, nblocks, core_emin, core_emax, &
-                                 e_buffer, epsilon, selfenergy_order, E0, imbalance, &
+                                 top_buffer, bottom_buffer, epsilon, selfenergy_order, E0, imbalance, &
                                  check_convergence, pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled, check_convergence
     integer, intent(in) :: nblocks, selfenergy_order, pi_maxiter
-    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance, pi_tol
-    call icgn_configure(upt, enabled, nblocks, core_emin, core_emax, e_buffer, epsilon, &
+    real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, E0, imbalance, pi_tol
+    call icgn_configure(upt, enabled, nblocks, core_emin, core_emax, top_buffer, bottom_buffer, epsilon, &
          selfenergy_order, E0, imbalance, check_convergence, pi_maxiter, pi_tol)
   end subroutine UPT_configure_icgn
 
@@ -526,6 +538,7 @@ contains
   subroutine UPT_feast(upt)
 
     TYPE(OUPT), pointer :: upt 
+    call UPT_validate_requested_states(upt)
     
     if(upt%verbose.gt.0) write(*,*) '(uptight) Feast eigensolver'
     write(*,*) 'FEAST SOLVER DISABLED'    
@@ -538,6 +551,7 @@ contains
   subroutine UPT_lanczos(upt)
 
     TYPE(OUPT), pointer :: upt 
+    call UPT_validate_requested_states(upt)
     
     if(upt%verbose.gt.0) write(*,*) '(uptight) Lanczos diagonalization'
 #ifdef UPT_MPI
@@ -551,6 +565,7 @@ contains
   subroutine UPT_jd(upt)
 
     TYPE(OUPT), pointer :: upt 
+    call UPT_validate_requested_states(upt)
     
     if(upt%verbose.gt.0) write(*,*) '(uptight) Jacobi-Davidson diagonalization'
     call jd(upt)
@@ -563,11 +578,49 @@ contains
   subroutine UPT_lapack(upt)
 
     TYPE(OUPT), pointer :: upt
+    call UPT_validate_requested_states(upt)
 
     if(upt%verbose.gt.0) write(*,*) '(uptight) LAPACK diagonalization'
     call lapack(upt)
 
   end subroutine UPT_lapack
+
+    subroutine UPT_validate_requested_states(upt)
+     use coarse_grain, only : cg_active, icg_active, icgn_active
+     type(OUPT), intent(in), target :: upt
+     integer :: matrix_dimension, requested_states
+     character(len=16) :: matrix_kind
+
+     matrix_dimension = upt%ham%nrow
+     matrix_kind = 'original'
+     if (cg_active(upt)) then
+       matrix_dimension = upt%cg_ham%nrow
+       matrix_kind = 'reduced CG'
+     else if (icg_active(upt)) then
+       matrix_dimension = upt%icg_ham%nrow
+       matrix_kind = 'reduced ICG'
+     else if (icgn_active(upt)) then
+       matrix_dimension = upt%icgn_ham%nrow
+       matrix_kind = 'reduced ICGN'
+     end if
+
+     requested_states = upt%num_vb + upt%num_cb
+     if (matrix_dimension <= 0) then
+       write(*,'(a)') '(uptight) ERROR: the active reduced Hamiltonian is empty.'
+       write(*,'(a,a)') '  active matrix: ', trim(matrix_kind)
+       write(*,'(a,i0)') '  active matrix dimension: ', matrix_dimension
+       write(*,'(a)') '  The selected energy window is too narrow; please widen it so the reduced Hamiltonian is non-empty.'
+       stop 1
+     end if
+     if (requested_states > matrix_dimension) then
+       write(*,'(a)') '(uptight) ERROR: requested eigenstate count exceeds the active Hamiltonian dimension.'
+       write(*,'(a,i0)') '  requested states: ', requested_states
+       write(*,'(a,i0)') '  active matrix dimension: ', matrix_dimension
+       write(*,'(a,a)') '  active matrix: ', trim(matrix_kind)
+       write(*,'(a)') '  Reduce the requested state count or increase the retained CG space.'
+       stop 1
+     end if
+    end subroutine UPT_validate_requested_states
 
   !---------------------------------------------------------------------
 

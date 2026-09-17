@@ -29,12 +29,17 @@ Config file format (one value per line):
   13: imbalance  (METIS)
   14: icg_core_emin  (eV)
   15: icg_core_emax  (eV)
-  16: icg_e_buffer   (eV)
-  17: icg_epsilon    (threshold factor, eV)
-  18: icgn_selfenergy_order (0,1,2,...)
-  19: icgn_E0     (eV, 0.0 = auto = core window midpoint)
-  20: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
-  21: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
+  16: icg_top_buffer   (eV)
+  17: icg_bottom_buffer (eV)
+  18: icg_epsilon    (threshold factor)
+  19: sub_tolerance (CG block solver tolerance)
+  20: icgn_selfenergy_order (0,1,2,...)
+  21: icgn_E0     (eV, 0.0 = auto = core window midpoint)
+  22: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
+  23: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
+  24: check_neumann_convergence (.true./.false.)
+  25: power_iteration_max_iterations
+  26: power_iteration_tolerance
 ```
 
 ## Running the Test

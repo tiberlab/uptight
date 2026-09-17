@@ -202,6 +202,8 @@ MODULE lanczos_driver
       type(CSR), pointer :: active_ham, active_u
       logical :: active
       integer :: nfull, nred, num_ev, num_cb, num_vb, end_cb, end_vb, err
+      integer :: old_shift_init, old_shift_end
+      integer :: old_shift_init_mi, old_shift_end_mi
       real(dp), allocatable, target :: raw_values(:)
       complex(dp), allocatable, target :: raw_vectors(:,:)
       real(dp), pointer :: raw_values_slice(:)
@@ -212,6 +214,10 @@ MODULE lanczos_driver
       if (.not.active) return
       nred = active_ham%nrow
       nfull = upt%ham%nrow
+       if (upt%verbose > 0 .and. id0) write(*,'(a,i0,a,i0,a,a1,a,i0,a,i0)') &
+          '(cg lanczos) active rows ', nred, ', nnz ', active_ham%nnz, &
+          ', format ', active_ham%sparse_fmt, ', Mi(1) ', active_ham%Mi(1), &
+          ', Mi(end) ', active_ham%Mi(nred+1)
       num_ev = upt%num_vb + upt%num_cb
       num_cb = upt%num_cb - upt%start_cb + 1
       num_vb = upt%num_vb - upt%start_vb + 1
@@ -219,6 +225,14 @@ MODULE lanczos_driver
       if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','vectors')
       raw_values = 0.0_dp
       raw_vectors = (0.0_dp, 0.0_dp)
+      old_shift_init = shift_init
+      old_shift_end = shift_end
+      old_shift_init_mi = shift_init_Mi(id)
+      old_shift_end_mi = shift_end_Mi(id)
+      shift_init = 1
+      shift_end = nred
+      shift_init_Mi(id) = 1
+      shift_end_Mi(id) = nred
 
       if (num_cb > 0) then
          raw_values_slice => raw_values(upt%num_vb+1:num_ev)
@@ -252,6 +266,10 @@ MODULE lanczos_driver
       allocate(lifted(nfull,num_ev), stat=err)
       if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','lifted')
       call cg_lift_active(upt, raw_vectors, lifted)
+      shift_init = old_shift_init
+      shift_end = old_shift_end
+      shift_init_Mi(id) = old_shift_init_mi
+      shift_end_Mi(id) = old_shift_end_mi
       upt%eigen_vectors = lifted
       deallocate(raw_values, raw_vectors, lifted)
     end subroutine lanczos_coarse

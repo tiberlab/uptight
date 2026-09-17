@@ -32,14 +32,17 @@
 !   13: imbalance  (METIS)
 !   14: icg_core_emin  (eV)
 !   15: icg_core_emax  (eV)
-!   16: icg_e_buffer   (eV)
-!   17: icg_epsilon    (threshold factor)
-!   18: icgn_selfenergy_order (0,1,2,...)
-!   19: icgn_E0     (eV, 0.0 = auto = core window midpoint)
-!   20: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
-!   21: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
-!   22: icgn_check_convergence (.true./.false.)
-!   23: icgn_pi_tol  (power-iteration tolerance, e.g. 1e-6)
+!   16: icg_top_buffer   (eV)
+!   17: icg_bottom_buffer (eV)
+!   18: icg_epsilon    (threshold factor)
+!   19: sub_tolerance (CG block solver tolerance)
+!   20: icgn_selfenergy_order (0,1,2,...)
+!   21: icgn_E0     (eV, 0.0 = auto = core window midpoint)
+!   22: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
+!   23: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
+!   24: check_neumann_convergence (.true./.false.)
+!   25: power_iteration_max_iterations
+!   26: power_iteration_tolerance
 program test_supercell
 
   USE precision
@@ -77,7 +80,8 @@ program test_supercell
   CHARACTER(MST) :: solver_choice
   INTEGER        :: n_blocks, nVB, nCB
   REAL(dp)       :: cg_emin, cg_emax, imbalance
-  REAL(dp)       :: icg_core_emin, icg_core_emax, icg_e_buffer, icg_epsilon
+   REAL(dp)       :: icg_core_emin, icg_core_emax, icg_top_buffer, icg_bottom_buffer, icg_epsilon
+   REAL(dp)       :: sub_tolerance
   INTEGER        :: icgn_selfenergy_order
   REAL(dp)       :: icgn_E0
   LOGICAL        :: icgn_check_conv
@@ -127,17 +131,18 @@ program test_supercell
   read(10,*) imbalance
   read(10,*) icg_core_emin
   read(10,*) icg_core_emax
-  read(10,*) icg_e_buffer
+   read(10,*) icg_top_buffer
+   read(10,*) icg_bottom_buffer
   read(10,*) icg_epsilon
-  read(10,*) icgn_selfenergy_order
+   read(10,*) sub_tolerance
+   read(10,*) icgn_selfenergy_order
   read(10,*) icgn_E0
   read(10,*) n_up
   read(10,*) n_down
-  read(10,*) icgn_check_conv
+   read(10,*) icgn_check_conv
+   read(10,*) icgn_pi_maxiter
   read(10,*) icgn_pi_tol
   close(10)
-
-  icgn_pi_maxiter = 2000   ! default for power iteration
 
   write(*,'(a)') '========================================'
   write(*,'(a,a)')     ' Structure:    ', trim(upt%gen_filename)
@@ -147,14 +152,15 @@ program test_supercell
   write(*,'(a,i0)')    ' n_blocks:     ', n_blocks
   write(*,'(a,2f8.3)') '  CG window:   ', cg_emin, cg_emax
   write(*,'(a,2f8.3)') '  ICG core:    ', icg_core_emin, icg_core_emax
-  write(*,'(a,f8.3)')  '  ICG buffer:  ', icg_e_buffer
+   write(*,'(a,f8.3)')  '  ICG top buffer:  ', icg_top_buffer
+   write(*,'(a,f8.3)')  '  ICG bottom buffer:  ', icg_bottom_buffer
   write(*,'(a,es10.2)')'  ICG epsilon: ', icg_epsilon
+   write(*,'(a,es10.2)')'  CG sub tolerance: ', sub_tolerance
   write(*,'(a,i0)')    '  ICGN order:  ', icgn_selfenergy_order
   write(*,'(a,f8.3)')  '  ICGN E0:     ', icgn_E0
   write(*,'(a,l1)')    '  ICGN check convergence: ', icgn_check_conv
-  if (icgn_check_conv) then
-     write(*,'(a,es10.2,a,i0)') '  ICGN PI tol: ', icgn_pi_tol, '  maxiter: ', icgn_pi_maxiter
-  end if
+  write(*,'(a,l1)') '  Neumann convergence check: ', icgn_check_conv
+  write(*,'(a,es10.2,a,i0)') '  Power iteration tol: ', icgn_pi_tol, '  maxiter: ', icgn_pi_maxiter
   write(*,'(a,i0,a,i0)') '  AAD bands: +', n_up, ' / -', n_down
   write(*,'(a)') '========================================'
 
@@ -177,6 +183,10 @@ program test_supercell
   upt%start_vb = 1;    upt%start_cb = 1
   upt%min_iter = 2;    upt%long_iter = 30;  upt%max_iter = 100000
   upt%fast_tol = 1.0d-1; upt%long_tol = 1.0d-10; upt%ort_tol = 1.0d-5
+   upt%cg_sub_tolerance = sub_tolerance
+   upt%cg_check_neumann_convergence = icgn_check_conv
+   upt%cg_pi_maxiter = icgn_pi_maxiter
+   upt%cg_pi_tol = icgn_pi_tol
   upt%solver_flag = 0;  upt%dynamic = .true.
   upt%seed_flag   = .false.; upt%bitoff = 0.1_dp
   upt%k_point = (/ 0.0d0, 0.0d0, 0.0d0 /)
@@ -269,9 +279,9 @@ program test_supercell
   call destroy_matrix(upt%ham)
   call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance)
   call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, imbalance)
+     icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+     icg_top_buffer, icg_bottom_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
        icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes cg_prepare) ---
@@ -316,9 +326,9 @@ program test_supercell
 
   call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
   call UPT_configure_improved_cg    (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, imbalance)
+     icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+     icg_top_buffer, icg_bottom_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
        icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes icg_prepare) ---
@@ -365,9 +375,9 @@ program test_supercell
 
   call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
   call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, imbalance)
+     icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
-       icg_e_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+     icg_top_buffer, icg_bottom_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
        icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes icgn_prepare) ---

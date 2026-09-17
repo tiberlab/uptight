@@ -100,7 +100,11 @@ module upt_param
    integer :: cg_error
      integer :: cg_num_blocks, cg_original_dim, cg_reduced_dim
      integer :: cg_subsolver, cg_subsolver_type
+    real(dp) :: cg_sub_tolerance
      real(dp) :: cg_emin, cg_emax, cg_imbalance, cg_cut_fraction
+    logical :: cg_check_neumann_convergence
+    integer :: cg_pi_maxiter
+    real(dp) :: cg_pi_tol
      type(CSR) :: cg_ham, cg_U
      type(CGBlock), dimension(:), pointer :: cg_blocks => null()
 
@@ -109,7 +113,7 @@ module upt_param
      integer :: icg_num_blocks, icg_original_dim, icg_reduced_dim
      integer :: icg_subsolver, icg_subsolver_type
      real(dp) :: icg_core_emin, icg_core_emax  ! core window
-     real(dp) :: icg_e_buffer                  ! buffer half-width
+    real(dp) :: icg_top_buffer, icg_bottom_buffer
      real(dp) :: icg_epsilon                   ! acquaintance threshold factor
      real(dp) :: icg_imbalance, icg_cut_fraction
      type(CSR) :: icg_ham, icg_U
@@ -120,7 +124,7 @@ module upt_param
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
      integer :: icgn_subsolver, icgn_subsolver_type
      real(dp) :: icgn_core_emin, icgn_core_emax
-     real(dp) :: icgn_e_buffer, icgn_epsilon
+    real(dp) :: icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon
      real(dp) :: icgn_imbalance, icgn_cut_fraction
      integer :: icgn_selfenergy_order          ! Neumann series order (0,1,2,...)
      real(dp) :: icgn_E0                       ! self-energy expansion point
@@ -207,12 +211,16 @@ contains
    upt%cg_num_blocks = 1
    upt%cg_subsolver = 0
    upt%cg_subsolver_type = 0
+  upt%cg_sub_tolerance = 1.e-9_dp
    upt%cg_original_dim = 0
    upt%cg_reduced_dim = 0
    upt%cg_emin = -huge(1.0_dp)
    upt%cg_emax = huge(1.0_dp)
    upt%cg_imbalance = 0.03_dp
    upt%cg_cut_fraction = 0.0_dp
+  upt%cg_check_neumann_convergence = .false.
+  upt%cg_pi_maxiter = 1000
+  upt%cg_pi_tol = 1.e-3_dp
 
    upt%icg_enabled = .false.
    upt%icg_ready = .false.
@@ -223,7 +231,8 @@ contains
    upt%icg_reduced_dim = 0
    upt%icg_core_emin = -huge(1.0_dp)
    upt%icg_core_emax = huge(1.0_dp)
-   upt%icg_e_buffer = 0.0_dp
+  upt%icg_top_buffer = 0.0_dp
+  upt%icg_bottom_buffer = 0.0_dp
    upt%icg_epsilon = 1.e-3_dp
    upt%icg_imbalance = 0.03_dp
    upt%icg_cut_fraction = 0.0_dp
@@ -237,7 +246,8 @@ contains
    upt%icgn_reduced_dim = 0
    upt%icgn_core_emin = -huge(1.0_dp)
    upt%icgn_core_emax = huge(1.0_dp)
-   upt%icgn_e_buffer = 0.0_dp
+  upt%icgn_top_buffer = 0.0_dp
+  upt%icgn_bottom_buffer = 0.0_dp
    upt%icgn_epsilon = 1.e-3_dp
    upt%icgn_imbalance = 0.03_dp
    upt%icgn_cut_fraction = 0.0_dp

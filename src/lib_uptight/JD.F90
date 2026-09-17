@@ -122,8 +122,12 @@ SUBROUTINE JD_EV(H, U, n_spin, min_step, long_step, max_step, &
     IF ( err .NE. 0 ) CALL alloc_error( 'jd_diag', 'jd_ev', 'eigen_seed' )
 
 
-    jd_min = num_ev+4
-    jd_max = num_ev+10
+    ! The CG preparation path may request the complete block spectrum.  In
+    ! that case num_ev can equal n_ham; the JD subspace must never exceed the
+    ! matrix dimension.
+    jd_min = min(num_ev+4, n_ham)
+    jd_max = min(num_ev+10, n_ham)
+    if (jd_max < jd_min) jd_max = jd_min
     ls_tol = 0.1
     ls_max = 4
     ls_restart = 10
@@ -147,16 +151,12 @@ SUBROUTINE JD_EV(H, U, n_spin, min_step, long_step, max_step, &
 
     SELECT CASE (solver_flag_jd)
     CASE(0)
-      if(H%sparse_fmt.eq.'F') then
-         if (verbose.gt.0) THEN
-            write(*,*) ' '
-            write(*,*) 'MPI parallelized on ',num_procs,'processes'
-            write(*,*) 'OpenMP parallelized on',omp_get_max_threads(),'threads'
-         end if
-       !call set_clock()
-       call split_matrix_sp_mx_prec(H, H_real, H_imag)
-       !call write_clock
-      endif
+      if (verbose.gt.0) THEN
+        write(*,*) ' '
+        write(*,*) 'MPI parallelized on ',num_procs,'processes'
+        write(*,*) 'OpenMP parallelized on',omp_get_max_threads(),'threads'
+      end if
+      call split_matrix_sp_mx_prec(H, H_real, H_imag)
 #ifdef __CUDA
     CASE(2)
        write(*,*) 'GPU accelerated'

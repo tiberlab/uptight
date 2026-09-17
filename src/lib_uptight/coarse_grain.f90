@@ -1,10 +1,13 @@
 ! Coarse-grained tight-binding projection after Liu et al. (2022).
 module coarse_grain
-  use, intrinsic :: iso_c_binding, only : c_int, c_double
+   use, intrinsic :: iso_c_binding, only : c_int, c_double, c_char
   use precision, only : dp
   use upt_param, only : OUPT, CGBlock
   use sparse_matrix, only : CSR, create_matrix, destroy_matrix
-  use mpi_globals, only : num_procs
+      use mpi_globals, only : num_procs, id0, id, shift_init, shift_end, &
+         shift_init_Mi, shift_end_Mi
+   use jd_diag, only : JD_EV
+   use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
   implicit none
   private
 
@@ -14,6 +17,7 @@ module coarse_grain
   end type CGPair
 
   public :: cg_configure, cg_prepare, cg_clear, cg_active, cg_lift
+   public :: cg_log_progress
    public :: cg_get_active, cg_lift_active
   public :: cg_get_info
   public :: icg_configure, icg_prepare, icg_clear, icg_active, icg_lift
@@ -22,6 +26,12 @@ module coarse_grain
   public :: icgn_get_info
 
   interface
+       subroutine upt_cg_log_message(message, length) bind(C, name='upt_cg_log_message')
+          import :: c_char, c_int
+          character(kind=c_char), intent(in) :: message(*)
+          integer(c_int), value :: length
+       end subroutine upt_cg_log_message
+
      integer(c_int) function cg_metis_partition(nvtxs, xadj, adjncy, vwgt, &
           adjwgt, nparts, ufactor, seed, part) bind(C, name='upt_cg_metis_partition')
        import :: c_int
@@ -30,8 +40,6 @@ module coarse_grain
        integer(c_int), intent(out) :: part(*)
      end function cg_metis_partition
   end interface
-
-   external :: LANCZOS_EV, JD_EV
 
 contains
 
@@ -138,6 +146,7 @@ contains
     ierr = 0
     call cg_clear(upt)
     if (.not.upt%cg_enabled) return
+   call cg_log_progress(upt, 'mode=cg preparation started')
     if (num_procs /= 1) then
        ierr = 1; write(*,*) '(coarse grain) MPI runs are not supported'; return
     end if
@@ -222,6 +231,7 @@ contains
     do i = 1, na
        label(i) = int(part(i)) + 1
     end do
+    call cg_log_progress(upt, 'mode=cg graph partition complete')
 
     all_weight = 0.0_dp; cut_weight = 0.0_dp
     do r = 1, n
@@ -264,8 +274,10 @@ contains
        do j = 1, upt%cg_blocks(i)%nrow
           row_of(upt%cg_blocks(i)%rows(j)) = j
        end do
-       call diagonalize_block(upt, i, atom_of, row_of, ierr)
+      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'start')
+      call diagonalize_block(upt, i, atom_of, row_of, ierr)
        if (ierr /= 0) return
+      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'complete')
        row_of(upt%cg_blocks(i)%rows) = 0
     end do
     do i = 1, upt%cg_num_blocks
@@ -278,7 +290,7 @@ contains
        total_ret = total_ret + upt%cg_blocks(i)%nret
     end do
     if (total_ret == 0) then
-       ierr = 9; write(*,*) '(coarse grain) energy window retained no states'; return
+       ierr = 9; write(*,*) '(coarse grain) no block state retained, please expand the energy window'; return
     end if
     ! No check needed - we will compute ALL eigenvalues of reduced matrix
     upt%cg_original_dim = n; upt%cg_reduced_dim = total_ret
@@ -287,8 +299,8 @@ contains
     if (ierr /= 0) return
     call destroy_pairs(pairs)
     upt%cg_ready = .true.
-    if (upt%verbose > 0) write(*,'(a,i0,a,i0,a,f8.4)') '(coarse grain) dimension ',n,' -> ',total_ret, &
-         ', cut fraction ',upt%cg_cut_fraction
+       call cg_log_info(upt, 'cg', upt%cg_subsolver, upt%cg_subsolver_type, n, total_ret, &
+          upt%cg_num_blocks, upt%cg_cut_fraction, -1.0_dp, .false., .false.)
   end subroutine cg_prepare
 
   subroutine diagonalize_block(upt, ib, atom_of, local, ierr)
@@ -356,7 +368,11 @@ contains
     type(CSR) :: block_ham, block_u
     real(dp), pointer :: energies(:) => null()
     complex(dp), pointer :: eigenvectors(:,:) => null()
-    integer :: n, i, j, pos, max_steps
+   integer :: n, i, j, pos, max_steps
+   integer :: old_shift_init, old_shift_end
+   integer :: old_shift_init_mi, old_shift_end_mi
+   integer :: seed_size, seed_value
+   integer, allocatable :: saved_seed(:), block_seed(:)
 
     ierr = 0
     n = size(w)
@@ -364,7 +380,7 @@ contains
        call dense_eigh(a, w, ierr)
        return
     end if
-    if (subsolver /= 1 .and. subsolver /= 2) then
+   if (subsolver /= 1) then
        ierr = 12
        return
     end if
@@ -391,31 +407,118 @@ contains
        block_u%Mi(i+1) = i + 1
     end do
 
-    max_steps = max(upt%max_iter, 4*n)
-    if (subsolver == 2) then
-       call LANCZOS_EV(block_ham, block_u, 1, upt%min_iter, max(upt%long_iter,n), &
-            max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
-            upt%fast_tol, upt%long_tol, upt%ort_tol, 0, upt%dynamic, upt%bitoff, &
-            .false., upt%verbose)
-    else
-       call JD_EV(block_ham, block_u, 1, upt%min_iter, max(upt%long_iter,n), &
-            max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
-            upt%fast_tol, upt%long_tol, upt%ort_tol, 0, upt%dynamic, .false., &
-            upt%verbose, 1)
+   ! The block solver must compute the complete spectrum, but it should use
+   ! the configured iteration budget. Scaling the iteration count with n makes
+   ! a large block effectively run thousands of expensive solves per state.
+   max_steps = upt%max_iter
+    allocate(energies(n), eigenvectors(n,n), stat=i)
+    if (i /= 0) then
+       ierr = 14
+       call destroy_matrix(block_ham)
+       call destroy_matrix(block_u)
+       return
     end if
-    if (.not.associated(energies) .or. .not.associated(eigenvectors) .or. &
-        size(energies) /= n .or. size(eigenvectors,1) /= n .or. &
-        size(eigenvectors,2) /= n) then
+    energies = 0.0_dp
+    eigenvectors = (0.0_dp, 0.0_dp)
+   ! CG preparation is serial by contract.
+   if (upt%verbose > 0 .and. id0) then
+      write(*,*) '(coarse grain) block spectrum start: solver=', subsolver, &
+         ' backend=', backend, ' dimension=', n
+   end if
+   ! Iterative full-spectrum preparation is sensitive to the random start
+   ! vector. Make each block solve reproducible and restore the caller's RNG
+   ! state afterward so direct solver behavior is unaffected.
+   call random_seed(size=seed_size)
+   allocate(saved_seed(seed_size), block_seed(seed_size))
+   call random_seed(get=saved_seed)
+   seed_value = 104729 + 7919*n + 97*subsolver
+   block_seed = seed_value + [(i-1, i=1,seed_size)]
+   call random_seed(put=block_seed)
+   old_shift_init = shift_init
+   old_shift_end = shift_end
+   old_shift_init_mi = shift_init_Mi(id)
+   old_shift_end_mi = shift_end_Mi(id)
+   shift_init = 1
+   shift_end = n
+   shift_init_Mi(id) = 1
+   shift_end_Mi(id) = n
+      call JD_EV(block_ham, block_u, 1, upt%min_iter, upt%long_iter, &
+             max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
+             upt%fast_tol, upt%cg_sub_tolerance, upt%ort_tol, 0, upt%dynamic, .false., &
+             upt%verbose, 1)
+   if (upt%verbose > 0 .and. id0) then
+      write(*,*) '(coarse grain) block spectrum complete: solver=', subsolver, &
+         ' dimension=', n
+   end if
+             shift_init = old_shift_init
+             shift_end = old_shift_end
+             shift_init_Mi(id) = old_shift_init_mi
+             shift_end_Mi(id) = old_shift_end_mi
+            call random_seed(put=saved_seed)
+            deallocate(saved_seed, block_seed)
+    if (.not.associated(energies) .or. .not.associated(eigenvectors)) then
        ierr = 13
+    else if (.not. block_spectrum_valid(a, energies, eigenvectors, upt%cg_sub_tolerance)) then
+       call cg_log_progress(upt, 'iterative block subsolver failed validation; falling back to LAPACK for this block')
+       call dense_eigh(a, w, ierr)
     else
        w = energies
        a = eigenvectors
     end if
-    if (associated(energies)) deallocate(energies)
-    if (associated(eigenvectors)) deallocate(eigenvectors)
+   if (associated(energies)) deallocate(energies)
+   if (associated(eigenvectors)) deallocate(eigenvectors)
     call destroy_matrix(block_ham)
     call destroy_matrix(block_u)
   end subroutine coarse_eigh
+
+  logical function block_spectrum_valid(hamiltonian, energies, vectors, tolerance)
+    complex(dp), intent(in) :: hamiltonian(:,:), vectors(:,:)
+    real(dp), intent(in) :: energies(:), tolerance
+    integer :: n, i, j
+    real(dp) :: vector_norm, residual_norm, orthogonality, scale, limit
+    complex(dp), allocatable :: residual(:)
+
+    block_spectrum_valid = .false.
+    n = size(energies)
+    if (size(vectors,1) /= n .or. size(vectors,2) /= n) return
+    limit = max(1.0e-8_dp, 100.0_dp * max(tolerance, 1.0e-12_dp))
+    allocate(residual(n))
+
+    do i = 1, n
+       if (.not.ieee_is_finite(energies(i))) then
+          deallocate(residual)
+          return
+       end if
+       do j = 1, n
+          if (.not.ieee_is_finite(real(vectors(j,i))) .or. &
+              .not.ieee_is_finite(aimag(vectors(j,i)))) then
+             deallocate(residual)
+             return
+          end if
+       end do
+       vector_norm = sqrt(max(0.0_dp, real(dot_product(vectors(:,i), vectors(:,i)), dp)))
+       if (.not.ieee_is_finite(vector_norm) .or. vector_norm <= 1.0e-12_dp) then
+          deallocate(residual)
+          return
+       end if
+       residual = matmul(hamiltonian, vectors(:,i)) - energies(i) * vectors(:,i)
+       residual_norm = sqrt(max(0.0_dp, real(dot_product(residual, residual), dp)))
+       scale = max(1.0_dp, abs(energies(i)) * vector_norm)
+       if (.not.ieee_is_finite(residual_norm) .or. residual_norm / scale > limit) then
+          deallocate(residual)
+          return
+       end if
+       do j = 1, i - 1
+          orthogonality = abs(dot_product(vectors(:,j), vectors(:,i))) / vector_norm
+          if (.not.ieee_is_finite(orthogonality) .or. orthogonality > sqrt(limit)) then
+             deallocate(residual)
+             return
+          end if
+       end do
+    end do
+    deallocate(residual)
+    block_spectrum_valid = .true.
+  end function block_spectrum_valid
 
   logical function stored_entry(fmt, r, c)
     character(1), intent(in) :: fmt
@@ -669,18 +772,19 @@ contains
   ! IMPROVED COARSE-GRAINING (core + buffer + level-1 acquaintance)
   ! ===========================================================================
 
-  subroutine icg_configure(upt, enabled, nblocks, core_emin, core_emax, &
-                            e_buffer, epsilon, imbalance)
+   subroutine icg_configure(upt, enabled, nblocks, core_emin, core_emax, &
+                                          top_buffer, bottom_buffer, epsilon, imbalance)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled
     integer, intent(in) :: nblocks
-    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, imbalance
+   real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, imbalance
     call icg_clear(upt)
     upt%icg_enabled     = enabled
     upt%icg_num_blocks  = nblocks
     upt%icg_core_emin   = core_emin
     upt%icg_core_emax   = core_emax
-    upt%icg_e_buffer    = e_buffer
+   upt%icg_top_buffer = top_buffer
+   upt%icg_bottom_buffer = bottom_buffer
     upt%icg_epsilon     = epsilon
     upt%icg_imbalance   = imbalance
   end subroutine icg_configure
@@ -753,11 +857,11 @@ contains
     integer :: ia, ib, slot, nred, nnz
     integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:)
     complex(dp), allocatable :: g_full(:,:)
-    real(dp) :: threshold
 
     ierr = 0
     call icg_clear(upt)
     if (.not. upt%icg_enabled) return
+   call cg_log_progress(upt, 'mode=icg preparation started')
     if (num_procs /= 1) then
        ierr = 1; write(*,*) '(icg) MPI not supported'; return
     end if
@@ -767,7 +871,8 @@ contains
     if (na < 1 .or. upt%icg_num_blocks < 1 .or. upt%icg_num_blocks > na) then
        ierr = 2; write(*,*) '(icg) invalid number of blocks'; return
     end if
-    if (upt%icg_core_emin >= upt%icg_core_emax .or. upt%icg_e_buffer < 0.0_dp) then
+   if (upt%icg_core_emin >= upt%icg_core_emax .or. upt%icg_top_buffer < 0.0_dp .or. &
+      upt%icg_bottom_buffer < 0.0_dp) then
        ierr = 3; write(*,*) '(icg) invalid core window or buffer'; return
     end if
     if (.not. associated(upt%ham%M)) then
@@ -866,6 +971,7 @@ contains
           upt%icg_blocks(br)%rows(cursor(br)) = j
        end do
     end do
+    call cg_log_progress(upt, 'mode=icg graph partition complete')
 
     ! ---- Diagonalize each block fully (store S_full) -------------------------
     allocate(row_of(n)); row_of = 0
@@ -875,8 +981,10 @@ contains
        end do
        ! Reuse diagonalize_block but operating on icg_blocks:
        ! We replicate inline for icg_blocks (can't pass icg vs cg distinction).
-       call icg_diagonalize_block(upt, i, row_of, ierr)
+      call cg_log_block(upt, 'icg', i, upt%icg_blocks(i)%nrow, 'start')
+      call icg_diagonalize_block(upt, i, row_of, ierr)
        if (ierr /= 0) return
+      call cg_log_block(upt, 'icg', i, upt%icg_blocks(i)%nrow, 'complete')
        row_of(upt%icg_blocks(i)%rows) = 0
     end do
 
@@ -894,8 +1002,8 @@ contains
             if (e >= upt%icg_core_emin .and. e <= upt%icg_core_emax) then
                is_core(i,j)   = .true.
                keep_mask(i,j) = .true.
-            else if (e >= upt%icg_core_emin - upt%icg_e_buffer .and. &
-                     e <= upt%icg_core_emax + upt%icg_e_buffer) then
+            else if (e >= upt%icg_core_emin - upt%icg_bottom_buffer .and. &
+                     e <= upt%icg_core_emax + upt%icg_top_buffer) then
                keep_mask(i,j) = .true.
             end if
           end associate
@@ -905,8 +1013,6 @@ contains
     ! Step 3: level-1 acquaintance via inter-block coupling in eigenbasis
     ! We need the transformed couplings g_ab = S_a^T * V_ab * S_b.
     ! Build them on the fly from S_full and the physical Hamiltonian.
-    threshold = upt%icg_epsilon * upt%icg_e_buffer
-
     ! Rebuild row_of for all blocks simultaneously (needed for coupling loop)
     row_of = 0
     do i = 1, upt%icg_num_blocks
@@ -921,7 +1027,7 @@ contains
     ! To avoid allocating a full dense g for every pair, we use a scalar
     ! accumulation: for each physical CSR entry (r→c) crossing block boundary,
     ! add contribution conj(S_a(r_local,i)) * H(r,c) * S_b(c_local,j) to g(i,j).
-    ! We only need to check if |g(i,j)|^2 > threshold for core i.
+   ! Select an unretained state when |g(i,j)|^2 / |E_i-E_j| exceeds epsilon.
     ! Strategy: for each inter-block CSR entry (r,c), iterate over all core
     ! states i of block_a and all unselected states j of block_b and accumulate.
     ! This is O(n_core * n_unselected) per entry — potentially expensive for
@@ -952,8 +1058,7 @@ contains
        end do
     end do
 
-    ! Now scan each pair: for core states of block a, find unselected states of b
-    ! with |g|^2 > threshold, and mark them as acquaintances.
+   ! Now scan each pair using |g_ij|^2 / |E_i-E_j| > epsilon.
     do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
        ! core in a → unselected in b
@@ -961,7 +1066,9 @@ contains
           if (.not. is_core(ia, j)) cycle
           do k = 1, upt%icg_blocks(ib)%nrow
              if (keep_mask(ib, k)) cycle
-             if (abs(pairs(i)%v(j,k))**2 > threshold) keep_mask(ib, k) = .true.
+               if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icg_blocks(ia)%evals_full(j) - &
+                  upt%icg_blocks(ib)%evals_full(k)), tiny(1.0_dp)) > upt%icg_epsilon) &
+                  keep_mask(ib, k) = .true.
           end do
        end do
        ! core in b → unselected in a (g_ba = g_ab^†)
@@ -969,7 +1076,9 @@ contains
           if (.not. is_core(ib, k)) cycle
           do j = 1, upt%icg_blocks(ia)%nrow
              if (keep_mask(ia, j)) cycle
-             if (abs(pairs(i)%v(j,k))**2 > threshold) keep_mask(ia, j) = .true.
+               if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icg_blocks(ib)%evals_full(k) - &
+                  upt%icg_blocks(ia)%evals_full(j)), tiny(1.0_dp)) > upt%icg_epsilon) &
+                  keep_mask(ia, j) = .true.
           end do
        end do
     end do
@@ -1024,8 +1133,8 @@ contains
     end do
 
     upt%icg_ready = .true.
-    if (upt%verbose > 0) write(*,'(a,i0,a,i0,a,f8.4)') &
-         '(icg) dimension ', n, ' -> ', total_ret, ', cut fraction ', upt%icg_cut_fraction
+       call cg_log_info(upt, 'icg', upt%icg_subsolver, upt%icg_subsolver_type, n, total_ret, &
+          upt%icg_num_blocks, upt%icg_cut_fraction, -1.0_dp, .false., .false.)
 
   end subroutine icg_prepare
 
@@ -1201,17 +1310,18 @@ contains
   ! ==========================================================================
 
   subroutine icgn_configure(upt, enabled, nblocks, core_emin, core_emax, &
-       e_buffer, epsilon, selfenergy_order, E0, imbalance, &
+     top_buffer, bottom_buffer, epsilon, selfenergy_order, E0, imbalance, &
        check_convergence, pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled, check_convergence
     integer, intent(in) :: nblocks, selfenergy_order, pi_maxiter
-    real(dp), intent(in) :: core_emin, core_emax, e_buffer, epsilon, E0, imbalance, pi_tol
+   real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, E0, imbalance, pi_tol
     upt%icgn_enabled = enabled
     upt%icgn_num_blocks = nblocks
     upt%icgn_core_emin = core_emin
     upt%icgn_core_emax = core_emax
-    upt%icgn_e_buffer = e_buffer
+   upt%icgn_top_buffer = top_buffer
+   upt%icgn_bottom_buffer = bottom_buffer
     upt%icgn_epsilon = epsilon
     upt%icgn_selfenergy_order = selfenergy_order
     upt%icgn_E0 = E0
@@ -1290,7 +1400,6 @@ contains
     integer :: ia, ib, slot, nred, nnz
     integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:)
     complex(dp), allocatable :: g_full(:,:)
-    real(dp) :: threshold
 
     ! For Neumann self-energy
     integer :: nb, ord, ip, iq, gp_row, gp_col, q_idx, qb_idx
@@ -1316,6 +1425,7 @@ contains
     ierr = 0
     call icgn_clear(upt)
     if (.not. upt%icgn_enabled) return
+   call cg_log_progress(upt, 'mode=icgn preparation started')
     if (num_procs /= 1) then
        ierr = 1; write(*,*) '(icgn) MPI not supported'; return
     end if
@@ -1325,7 +1435,8 @@ contains
     if (na < 1 .or. upt%icgn_num_blocks < 1 .or. upt%icgn_num_blocks > na) then
        ierr = 2; write(*,*) '(icgn) invalid number of blocks'; return
     end if
-    if (upt%icgn_core_emin >= upt%icgn_core_emax .or. upt%icgn_e_buffer < 0.0_dp) then
+   if (upt%icgn_core_emin >= upt%icgn_core_emax .or. upt%icgn_top_buffer < 0.0_dp .or. &
+      upt%icgn_bottom_buffer < 0.0_dp) then
        ierr = 3; write(*,*) '(icgn) invalid core window or buffer'; return
     end if
     if (.not. associated(upt%ham%M)) then
@@ -1342,6 +1453,7 @@ contains
           atom_of(pos) = i; local_of(pos) = j; pos = pos + 1
        end do
     end do
+    call cg_log_progress(upt, 'mode=icgn graph partition complete')
     offsets(na+1) = pos
     if (pos-1 /= n) then
        ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'; return
@@ -1431,8 +1543,10 @@ contains
        do j = 1, upt%icgn_blocks(i)%nrow
           row_of(upt%icgn_blocks(i)%rows(j)) = j
        end do
-       call icgn_diagonalize_block(upt, i, row_of, ierr)
+      call cg_log_block(upt, 'icgn', i, upt%icgn_blocks(i)%nrow, 'start')
+      call icgn_diagonalize_block(upt, i, row_of, ierr)
        if (ierr /= 0) return
+      call cg_log_block(upt, 'icgn', i, upt%icgn_blocks(i)%nrow, 'complete')
        row_of(upt%icgn_blocks(i)%rows) = 0
     end do
 
@@ -1447,15 +1561,14 @@ contains
             if (e >= upt%icgn_core_emin .and. e <= upt%icgn_core_emax) then
                is_core(i,j)   = .true.
                keep_mask(i,j) = .true.
-            else if (e >= upt%icgn_core_emin - upt%icgn_e_buffer .and. &
-                     e <= upt%icgn_core_emax + upt%icgn_e_buffer) then
+            else if (e >= upt%icgn_core_emin - upt%icgn_bottom_buffer .and. &
+                     e <= upt%icgn_core_emax + upt%icgn_top_buffer) then
                keep_mask(i,j) = .true.
             end if
           end associate
        end do
     end do
 
-    threshold = upt%icgn_epsilon * upt%icgn_e_buffer
     row_of = 0
     do i = 1, nb
        do j = 1, upt%icgn_blocks(i)%nrow
@@ -1492,7 +1605,9 @@ contains
           if (is_core(ia, j)) then
              do k = 1, upt%icgn_blocks(ib)%nrow
                 if (.not. keep_mask(ib, k)) then
-                   if (abs(pairs(i)%v(j,k))**2 > threshold) keep_mask(ib, k) = .true.
+                      if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icgn_blocks(ia)%evals_full(j) - &
+                         upt%icgn_blocks(ib)%evals_full(k)), tiny(1.0_dp)) > upt%icgn_epsilon) &
+                         keep_mask(ib, k) = .true.
                 end if
              end do
           end if
@@ -1501,7 +1616,9 @@ contains
           if (is_core(ib, k)) then
              do j = 1, upt%icgn_blocks(ia)%nrow
                 if (.not. keep_mask(ia, j)) then
-                   if (abs(pairs(i)%v(j,k))**2 > threshold) keep_mask(ia, j) = .true.
+                      if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icgn_blocks(ib)%evals_full(k) - &
+                         upt%icgn_blocks(ia)%evals_full(j)), tiny(1.0_dp)) > upt%icgn_epsilon) &
+                         keep_mask(ia, j) = .true.
                 end if
              end do
           end if
@@ -1804,7 +1921,9 @@ contains
           amp_vec(q_idx) = amp_vec(q_idx) + pq_v(i) * resolvent_val
        end do
 
-       do ord = 0, upt%icgn_selfenergy_order
+      ! Neumann truncation includes the zeroth term and every term through
+      ! the requested order: Sigma = sum_{ord=0..N} H_PQ R (W R)^ord H_QP.
+      do ord = 0, upt%icgn_selfenergy_order
           if (ord > 0) then
              next_vec = cmplx(0.0_dp, 0.0_dp, kind=dp)
              do i = 1, nqq
@@ -1879,15 +1998,64 @@ contains
     upt%icgn_U%nnz = nred
 
     upt%icgn_ready = .true.
-    if (upt%verbose > 0) write(*,'(a,i0,a,i0,a,f8.4,a,i0)') &
-         '(icgn) dimension ', n, ' -> ', total_ret, &
-         ', cut fraction ', upt%icgn_cut_fraction, ', order ', upt%icgn_selfenergy_order
+       call cg_log_info(upt, 'icgn', upt%icgn_subsolver, upt%icgn_subsolver_type, n, total_ret, &
+          upt%icgn_num_blocks, upt%icgn_cut_fraction, upt%icgn_sigma_T2, &
+          upt%icgn_pi_converged, upt%icgn_check_convergence)
 
     ! Cleanup
     deallocate(atom_of, local_of, offsets, bsize, label, row_of)
     deallocate(counts, edge_weight, xadj, adjncy, adjwgt, vwgt, part, cursor)
 
   end subroutine icgn_prepare
+
+   subroutine cg_log_progress(upt, message)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: message
+      character(kind=c_char), allocatable :: c_message(:)
+      integer :: i, message_length
+
+      message_length = len_trim(message)
+      allocate(c_message(max(1, message_length)))
+      do i = 1, message_length
+          c_message(i) = message(i:i)
+      end do
+      call upt_cg_log_message(c_message, int(message_length, c_int))
+      deallocate(c_message)
+   end subroutine cg_log_progress
+
+   subroutine cg_log_block(upt, mode, block_number, block_dimension, phase)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: mode, phase
+      integer, intent(in) :: block_number, block_dimension
+      character(len=256) :: message
+      write(message,'(a,a,a,i0,a,i0)') 'mode=', trim(mode), ', block=', block_number, &
+             ', dimension=', block_dimension
+      message = trim(message)//', phase='//trim(phase)
+      call cg_log_progress(upt, message)
+   end subroutine cg_log_block
+
+   subroutine cg_log_info(upt, mode, subsolver, backend, original_dim, reduced_dim, &
+     nblocks, cut_fraction, sigma_t2, pi_converged, has_norm)
+    type(OUPT), intent(in) :: upt
+    character(*), intent(in) :: mode
+    integer, intent(in) :: subsolver, backend, original_dim, reduced_dim, nblocks
+    real(dp), intent(in) :: cut_fraction, sigma_t2
+    logical, intent(in) :: pi_converged, has_norm
+      character(len=512) :: line
+
+      write(line,'(a,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,f8.4)') 'mode=', trim(mode), &
+        ', subsolver=', subsolver, ', backend=', backend, ', dimension=', &
+        original_dim, ' -> ', reduced_dim, ', blocks=', nblocks, &
+        ', retained fraction=', real(reduced_dim,dp)/max(1.0_dp,real(original_dim,dp))
+      call cg_log_progress(upt, trim(line))
+      write(line,'(a,f8.4)') 'cut fraction=', cut_fraction
+      call cg_log_progress(upt, trim(line))
+   if (has_norm) then
+         write(line,'(a,f12.6,a,l1)') 'Neumann norm=', sigma_t2, &
+         ', power iteration converged=', pi_converged
+         call cg_log_progress(upt, trim(line))
+    end if
+  end subroutine cg_log_info
 
   ! Diagonalize block ib of icgn_blocks (same logic as icg_diagonalize_block).
   subroutine icgn_diagonalize_block(upt, ib, local, ierr)
