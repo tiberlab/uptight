@@ -14,6 +14,7 @@ module coarse_grain
   end type CGPair
 
   public :: cg_configure, cg_prepare, cg_clear, cg_active, cg_lift
+   public :: cg_get_active, cg_lift_active
   public :: cg_get_info
   public :: icg_configure, icg_prepare, icg_clear, icg_active, icg_lift
   public :: icg_get_info
@@ -29,6 +30,8 @@ module coarse_grain
        integer(c_int), intent(out) :: part(*)
      end function cg_metis_partition
   end interface
+
+   external :: LANCZOS_EV, JD_EV
 
 contains
 
@@ -46,9 +49,45 @@ contains
   end subroutine cg_configure
 
   logical function cg_active(upt)
-    type(OUPT), intent(in) :: upt
+   type(OUPT), intent(in), target :: upt
     cg_active = upt%cg_enabled .and. upt%cg_ready
   end function cg_active
+
+  subroutine cg_get_active(upt, active_ham, active_u, active)
+      type(OUPT), intent(in), target :: upt
+    type(CSR), pointer, intent(out) :: active_ham, active_u
+    logical, intent(out) :: active
+    active = .false.
+    nullify(active_ham, active_u)
+    if (cg_active(upt)) then
+       active_ham => upt%cg_ham
+       active_u => upt%cg_U
+       active = .true.
+    else if (icg_active(upt)) then
+       active_ham => upt%icg_ham
+       active_u => upt%icg_U
+       active = .true.
+    else if (icgn_active(upt)) then
+       active_ham => upt%icgn_ham
+       active_u => upt%icgn_U
+       active = .true.
+    end if
+  end subroutine cg_get_active
+
+  subroutine cg_lift_active(upt, reduced, physical)
+    type(OUPT), intent(in) :: upt
+    complex(dp), intent(in) :: reduced(:,:)
+    complex(dp), intent(out) :: physical(:,:)
+    if (cg_active(upt)) then
+       call cg_lift(upt, reduced, physical)
+    else if (icg_active(upt)) then
+       call icg_lift(upt, reduced, physical)
+    else if (icgn_active(upt)) then
+       call icgn_lift(upt, reduced, physical)
+    else
+       physical = reduced
+    end if
+  end subroutine cg_lift_active
 
   subroutine cg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
     type(OUPT), intent(in) :: upt
@@ -275,7 +314,7 @@ contains
           if (r /= c) h(local(c),local(r)) = conjg(upt%ham%M(k))
        end do
     end do
-    call dense_eigh(h, w, ierr)
+   call coarse_eigh(upt, h, w, ierr, upt%cg_subsolver, upt%cg_subsolver_type)
     if (ierr /= 0) return
     ! Store the FULL eigensystem — projection happens in build_reduced_hamiltonian
     ! using all nrow columns of S before the energy window truncation.
@@ -307,6 +346,76 @@ contains
     call zheevd('V','U',n,a,n,w,work,lwork,rwork,lrwork,iwork,liwork,info)
     deallocate(work,rwork,iwork); ierr=info
   end subroutine dense_eigh
+
+  subroutine coarse_eigh(upt, a, w, ierr, subsolver, backend)
+    type(OUPT), intent(in) :: upt
+    complex(dp), intent(inout) :: a(:,:)
+    real(dp), intent(out) :: w(:)
+    integer, intent(out) :: ierr
+    integer, intent(in) :: subsolver, backend
+    type(CSR) :: block_ham, block_u
+    real(dp), pointer :: energies(:) => null()
+    complex(dp), pointer :: eigenvectors(:,:) => null()
+    integer :: n, i, j, pos, max_steps
+
+    ierr = 0
+    n = size(w)
+    if (subsolver == 0) then
+       call dense_eigh(a, w, ierr)
+       return
+    end if
+    if (subsolver /= 1 .and. subsolver /= 2) then
+       ierr = 12
+       return
+    end if
+
+    call create_matrix(block_ham, n, n, n*n)
+    block_ham%sparse_fmt = 'F'
+    block_ham%Mi(1) = 1
+    pos = 1
+    do i = 1, n
+       do j = 1, n
+          block_ham%Mj(pos) = j
+          block_ham%M(pos) = a(i,j)
+          pos = pos + 1
+       end do
+       block_ham%Mi(i+1) = pos
+    end do
+
+    call create_matrix(block_u, n, n, n)
+    block_u%sparse_fmt = 'F'
+    block_u%Mi(1) = 1
+    do i = 1, n
+       block_u%Mj(i) = i
+       block_u%M(i) = (1.0_dp, 0.0_dp)
+       block_u%Mi(i+1) = i + 1
+    end do
+
+    max_steps = max(upt%max_iter, 4*n)
+    if (subsolver == 2) then
+       call LANCZOS_EV(block_ham, block_u, 1, upt%min_iter, max(upt%long_iter,n), &
+            max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
+            upt%fast_tol, upt%long_tol, upt%ort_tol, 0, upt%dynamic, upt%bitoff, &
+            .false., upt%verbose)
+    else
+       call JD_EV(block_ham, block_u, 1, upt%min_iter, max(upt%long_iter,n), &
+            max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
+            upt%fast_tol, upt%long_tol, upt%ort_tol, 0, upt%dynamic, .false., &
+            upt%verbose, 1)
+    end if
+    if (.not.associated(energies) .or. .not.associated(eigenvectors) .or. &
+        size(energies) /= n .or. size(eigenvectors,1) /= n .or. &
+        size(eigenvectors,2) /= n) then
+       ierr = 13
+    else
+       w = energies
+       a = eigenvectors
+    end if
+    if (associated(energies)) deallocate(energies)
+    if (associated(eigenvectors)) deallocate(eigenvectors)
+    call destroy_matrix(block_ham)
+    call destroy_matrix(block_u)
+  end subroutine coarse_eigh
 
   logical function stored_entry(fmt, r, c)
     character(1), intent(in) :: fmt
@@ -941,7 +1050,7 @@ contains
           if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
        end do
     end do
-    call dense_eigh(h, w, ierr)
+   call coarse_eigh(upt, h, w, ierr, upt%icg_subsolver, upt%icg_subsolver_type)
     if (ierr /= 0) return
     allocate(upt%icg_blocks(ib)%evals_full(n), upt%icg_blocks(ib)%S_full(n,n))
     upt%icg_blocks(ib)%evals_full = w
@@ -1801,7 +1910,7 @@ contains
           if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
        end do
     end do
-    call dense_eigh(h, w, ierr)
+   call coarse_eigh(upt, h, w, ierr, upt%icgn_subsolver, upt%icgn_subsolver_type)
     if (ierr /= 0) return
     allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
     upt%icgn_blocks(ib)%evals_full = w

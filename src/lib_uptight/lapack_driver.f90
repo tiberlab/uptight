@@ -17,10 +17,11 @@ MODULE lapack_driver
 
   USE precision
   USE upt_param
+   USE sparse_matrix, only : CSR
   USE input_output
   use errors
   USE exceptions
-  USE coarse_grain, only : cg_active, cg_lift, icg_active, icgn_active
+   USE coarse_grain, only : cg_active, icg_active, icgn_active, cg_get_active, cg_lift_active
 
   implicit none
   private
@@ -46,15 +47,10 @@ contains
       CHARACTER(200) :: file_name
 
       if (cg_active(upt)) then
-         call lapack_coarse(upt)
+         call lapack_active(upt)
          return
-      end if
-      if (icg_active(upt)) then
-         call lapack_icg(upt)
-         return
-      end if
-      if (icgn_active(upt)) then
-         call lapack_icgn(upt)
+      else if (icg_active(upt) .or. icgn_active(upt)) then
+         call lapack_active(upt)
          return
       end if
       n_ham = upt%ham%nrow
@@ -163,41 +159,59 @@ contains
  
     end subroutine lapack
 
-    subroutine lapack_coarse(upt)
-      type(OUPT) :: upt
-      integer :: nred,nfull,i,err
-      complex(dp), allocatable :: h(:,:)
-      real(dp), allocatable :: eval(:)
-      nred=upt%cg_ham%nrow; nfull=upt%ham%nrow
-      
-      ! With coarse-graining, solve for ALL eigenvalues of reduced matrix
-      allocate(h(nred,nred),eval(nred),stat=err)
-      if(err/=0) call alloc_error('lapack coarse','allocate','work')
-      
-      call assemble_dense_H(upt%cg_ham%M,upt%cg_ham%Mj,upt%cg_ham%Mi,upt%cg_ham%sparse_fmt,nred,h)
-      call diagonalize_ham(h,nred,eval)
+      subroutine lapack_active(upt)
+         type(OUPT), target :: upt
+         type(CSR), pointer :: active_ham, active_u
+         type(CSR) :: physical_ham, physical_u
+         logical :: active, cg_was_enabled, icg_was_enabled, icgn_was_enabled
+         integer :: nred, nfull, num_ev, err
+         complex(dp), allocatable :: reduced_vectors(:,:), lifted(:,:)
 
-      ! Lift ALL eigenvectors to the full basis into a temp array,
-      ! then classify VB/CB via lambda_vb (classify_vb_cb owns allocation).
-      if(associated(upt%eigen_values))  deallocate(upt%eigen_values)
-      if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
-      if(associated(upt%particles))     deallocate(upt%particles)
-      allocate(upt%eigen_vectors(nfull,nred),stat=err)
-      if(err/=0) call alloc_error('lapack_coarse','allocate','eigen_vectors')
-      call cg_lift(upt,h,upt%eigen_vectors)
-      ! Pass the lifted vectors; classify_vb_cb will reallocate eigen_vectors
-      ! to the selected subset, so we read it from the temp before calling.
-      block
-        complex(dp), allocatable :: lifted(:,:)
-        allocate(lifted(nfull,nred))
-        lifted = upt%eigen_vectors
-        deallocate(upt%eigen_vectors)
-        call classify_vb_cb(upt, eval, lifted, nred, nfull)
-        deallocate(lifted)
-      end block
-
-      deallocate(h,eval)
-    end subroutine lapack_coarse
+         call cg_get_active(upt, active_ham, active_u, active)
+         if (.not.active) return
+         nred = active_ham%nrow
+         nfull = upt%ham%nrow
+         physical_ham = upt%ham
+         physical_u = upt%U
+         cg_was_enabled = upt%cg_enabled
+         icg_was_enabled = upt%icg_enabled
+         icgn_was_enabled = upt%icgn_enabled
+         upt%ham = active_ham
+         upt%U = active_u
+         upt%n_spin = 1
+         upt%cg_enabled = .false.
+         upt%icg_enabled = .false.
+         upt%icgn_enabled = .false.
+         if (associated(upt%eigen_values)) deallocate(upt%eigen_values)
+         if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+         if (associated(upt%particles)) deallocate(upt%particles)
+         call lapack(upt)
+         if (.not.associated(upt%eigen_vectors)) then
+             upt%ham = physical_ham; upt%U = physical_u
+             upt%cg_enabled = cg_was_enabled
+             upt%icg_enabled = icg_was_enabled
+             upt%icgn_enabled = icgn_was_enabled
+             return
+         end if
+         num_ev = size(upt%eigen_vectors, 2)
+         allocate(reduced_vectors(nred,num_ev), stat=err)
+         if (err /= 0) call alloc_error('LAPACK coarse grain','allocate','vectors')
+         reduced_vectors = upt%eigen_vectors
+         upt%ham = physical_ham
+         upt%U = physical_u
+         upt%cg_enabled = cg_was_enabled
+         upt%icg_enabled = icg_was_enabled
+         upt%icgn_enabled = icgn_was_enabled
+         allocate(lifted(nfull,num_ev), stat=err)
+         if (err /= 0) call alloc_error('LAPACK coarse grain','allocate','lifted')
+         call cg_lift_active(upt, reduced_vectors, lifted)
+         deallocate(upt%eigen_vectors)
+         allocate(upt%eigen_vectors(nfull,num_ev), stat=err)
+         if (err /= 0) call alloc_error('LAPACK coarse grain','allocate','physical vectors')
+         upt%eigen_vectors = lifted
+         upt%particles = 0
+         deallocate(reduced_vectors, lifted)
+      end subroutine lapack_active
 
       
    subroutine Diagonalize_ham(HAM, N, eigval)
@@ -417,22 +431,8 @@ contains
   end subroutine lapack_icg_solve
 
   subroutine lapack_icg(upt)
-    use coarse_grain, only : icg_lift
-    type(OUPT), intent(inout) :: upt
-    complex(dp), allocatable :: h(:,:), phys(:,:)
-    real(dp), allocatable :: eval(:)
-    integer :: nred, nfull, err
-    call lapack_icg_solve(upt, h, eval)
-    nred  = size(eval)
-    nfull = upt%ham%nrow
-    ! Lift ALL eigenvectors to the physical basis first, then classify VB/CB
-    allocate(phys(nfull, nred), stat=err)
-    if (err /= 0) call alloc_error('lapack_icg','allocate','phys')
-    call icg_lift(upt, h, phys)
-    ! classify_vb_cb scans eval (sorted ascending) against lambda_vb,
-    ! allocates eigen_values/eigen_vectors/particles and fills them.
-    call classify_vb_cb(upt, eval, phys, nred, nfull)
-    deallocate(h, eval, phys)
+      type(OUPT), target :: upt
+      call lapack_active(upt)
   end subroutine lapack_icg
 
   subroutine lapack_icgn_solve(upt, h, eval)
@@ -450,22 +450,8 @@ contains
   end subroutine lapack_icgn_solve
 
   subroutine lapack_icgn(upt)
-    use coarse_grain, only : icgn_lift
-    type(OUPT), intent(inout) :: upt
-    complex(dp), allocatable :: h(:,:), phys(:,:)
-    real(dp), allocatable :: eval(:)
-    integer :: nred, nfull, err
-    call lapack_icgn_solve(upt, h, eval)
-    nred  = size(eval)
-    nfull = upt%ham%nrow
-    ! Lift ALL eigenvectors to the physical basis first, then classify VB/CB
-    allocate(phys(nfull, nred), stat=err)
-    if (err /= 0) call alloc_error('lapack_icgn','allocate','phys')
-    call icgn_lift(upt, h, phys)
-    ! classify_vb_cb scans eval (sorted ascending) against lambda_vb,
-    ! allocates eigen_values/eigen_vectors/particles and fills them.
-    call classify_vb_cb(upt, eval, phys, nred, nfull)
-    deallocate(h, eval, phys)
+      type(OUPT), target :: upt
+      call lapack_active(upt)
   end subroutine lapack_icgn
 
 END MODULE lapack_driver

@@ -605,6 +605,17 @@ subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_di
   ready = merge(1,0,is_ready)
 end subroutine upt_get_coarse_graining_info
 
+subroutine upt_get_coarse_graining_error(handler, error_code)
+  use uptightAPICommon
+  use uptight, only : upt_get_coarse_graining_error_f => upt_get_coarse_graining_error
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: error_code ! if:var:out
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_get_coarse_graining_error_f(pUPTs%pUPT, error_code)
+end subroutine upt_get_coarse_graining_error
+
 !!* Computes the system hamiltonian
 !!* @param handler Number for the UPTIGHT instance.
 subroutine upt_printhamiltonian(handler)

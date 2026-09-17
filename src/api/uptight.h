@@ -294,6 +294,16 @@ extern "C"
 }
 
 
+// Corresponding F77 arguments for upt_get_coarse_graining_error:
+// integer, intent(in) :: handler(DAC_handlerSize)
+// integer, intent(out) :: error_code
+extern "C"
+
+{
+  void upt_get_coarse_graining_error_ (int const* handler, int& error_code);
+}
+
+
 // Corresponding F77 arguments for upt_printhamiltonian:
 // integer, intent(in) :: handler(DAC_handlerSize)
 extern "C"

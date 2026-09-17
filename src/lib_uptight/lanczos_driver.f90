@@ -17,11 +17,12 @@ MODULE lanczos_driver
   USE mpi_globals
   USE precision
   USE upt_param
+   USE sparse_matrix, only : CSR
   USE input_output
   USE errors
   USE lanczos_diag
   USE savemofile, only : append_eigenstate
-  USE coarse_grain, only : cg_active, cg_lift, icg_active, icg_lift, icgn_active, icgn_lift
+   USE coarse_grain, only : cg_active, icg_active, icgn_active, cg_get_active, cg_lift_active
 
   IMPLICIT NONE
   PRIVATE
@@ -32,7 +33,7 @@ MODULE lanczos_driver
 
     subroutine lanczos(upt)
       
-      type(oupt) :: upt
+      type(oupt), target :: upt
    
       integer :: num_ev, n_ham, err, file_num, i, k, nv, nc, end_cb, end_vb
       integer :: num_cb, num_vb
@@ -89,6 +90,7 @@ MODULE lanczos_driver
       if ( .not.all(equiv(upt%k_point,0.d0,1.0d-13,.false.)) ) then
           spin_deg = .false.
       endif
+        if (upt%n_spin == 1) spin_deg = .false.
 
       ! -------------------------------------------------------------------
       !  ALLOCATIONS
@@ -196,73 +198,62 @@ MODULE lanczos_driver
     end subroutine lanczos
 
     subroutine lanczos_coarse(upt)
-      use upt_param, only : classify_vb_cb
-      type(OUPT) :: upt
-      integer :: nred,nfull,err,i,file_num,num_ev_out
-      real(dp), allocatable, target :: rval(:)
-      complex(dp), allocatable, target :: rvec(:,:)
-      complex(dp), allocatable :: lifted(:,:)
-      real(dp), pointer :: pval(:)
-      complex(dp), pointer :: pvec(:,:)
-      character(len=:), allocatable :: statesfile
-      
-      if (cg_active(upt)) then
-         nred=upt%cg_ham%nrow
-      else if (icg_active(upt)) then
-         nred=upt%icg_ham%nrow
-      else
-         nred=upt%icgn_ham%nrow
+      type(OUPT), target :: upt
+      type(CSR), pointer :: active_ham, active_u
+      logical :: active
+      integer :: nfull, nred, num_ev, num_cb, num_vb, end_cb, end_vb, err
+      real(dp), allocatable, target :: raw_values(:)
+      complex(dp), allocatable, target :: raw_vectors(:,:)
+      real(dp), pointer :: raw_values_slice(:)
+      complex(dp), pointer :: raw_vectors_slice(:,:)
+      complex(dp), allocatable :: reduced_vectors(:,:), lifted(:,:)
+
+      call cg_get_active(upt, active_ham, active_u, active)
+      if (.not.active) return
+      nred = active_ham%nrow
+      nfull = upt%ham%nrow
+      num_ev = upt%num_vb + upt%num_cb
+      num_cb = upt%num_cb - upt%start_cb + 1
+      num_vb = upt%num_vb - upt%start_vb + 1
+      allocate(raw_values(num_ev), raw_vectors(nred,num_ev), stat=err)
+      if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','vectors')
+      raw_values = 0.0_dp
+      raw_vectors = (0.0_dp, 0.0_dp)
+
+      if (num_cb > 0) then
+         raw_values_slice => raw_values(upt%num_vb+1:num_ev)
+         raw_vectors_slice => raw_vectors(:,upt%num_vb+1:num_ev)
+         end_cb = upt%start_cb + num_cb - 1
+         call LANCZOS_EV(active_ham, active_u, 1, upt%min_iter, upt%long_iter, &
+              upt%max_iter, raw_values_slice, raw_vectors_slice, upt%start_cb, &
+              end_cb, nred, upt%lambda_cb, upt%solver_flag, upt%fast_tol, &
+              upt%long_tol, upt%ort_tol, 1, upt%dynamic, upt%bitoff, .false., &
+              upt%verbose)
       end if
-      nfull=upt%ham%nrow
-      
-      ! Solve for ALL eigenvalues of reduced matrix
-      allocate(rval(nred),rvec(nred,nred),stat=err)
-      if(err/=0) stop '(Lanczos coarse grain) allocation failed'
-      rval=0.0_dp; rvec=(0.0_dp,0.0_dp)
-      
-      ! Point to the entire arrays
-      pval => rval
-      pvec => rvec
-      
-      ! Call Lanczos to get all eigenvalues
-      if (cg_active(upt)) then
-         call LANCZOS_EV(upt%cg_ham,upt%cg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
-            1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol,upt%ort_tol, &
-            0,upt%dynamic,upt%bitoff,.false.,upt%verbose)
-      else if (icg_active(upt)) then
-         call LANCZOS_EV(upt%icg_ham,upt%icg_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
-            1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol,upt%ort_tol, &
-            0,upt%dynamic,upt%bitoff,.false.,upt%verbose)
-      else
-         call LANCZOS_EV(upt%icgn_ham,upt%icgn_U,1,upt%min_iter,upt%long_iter,upt%max_iter,pval,pvec, &
-            1,nred,nred,0.0_dp,upt%solver_flag,upt%fast_tol,upt%long_tol,upt%ort_tol, &
-            0,upt%dynamic,upt%bitoff,.false.,upt%verbose)
+      if (num_vb > 0) then
+         raw_values_slice => raw_values(1:upt%num_vb)
+         raw_vectors_slice => raw_vectors(:,1:upt%num_vb)
+         end_vb = upt%start_vb + num_vb - 1
+         call LANCZOS_EV(active_ham, active_u, 1, upt%min_iter, upt%long_iter, &
+              upt%max_iter, raw_values_slice, raw_vectors_slice, upt%start_vb, &
+              end_vb, nred, upt%lambda_vb, upt%solver_flag, upt%fast_tol, &
+              upt%long_tol, upt%ort_tol, -1, upt%dynamic, upt%bitoff, .false., &
+              upt%verbose)
       end if
-      
-      if(associated(upt%eigen_values)) deallocate(upt%eigen_values)
-      if(associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
-      if(associated(upt%particles)) deallocate(upt%particles)
-      ! Lift ALL eigenvectors to the full basis, then classify VB/CB via lambda_vb
-      allocate(lifted(nfull,nred),stat=err)
-      if(err/=0) stop '(Lanczos coarse grain) lift allocation failed'
-      if (cg_active(upt)) then
-         call cg_lift(upt,rvec,lifted)
-      else if (icg_active(upt)) then
-         call icg_lift(upt,rvec,lifted)
-      else
-         call icgn_lift(upt,rvec,lifted)
-      end if
-      call classify_vb_cb(upt, rval, lifted, nred, nfull)
-      deallocate(lifted)
-      num_ev_out = size(upt%eigen_values)
-      if(id0) then
-         statesfile=trim(upt%state_file)
-         call open_file(statesfile,file_num,operation='write',replace_flag=.true.,output_flag=.false.); close(file_num)
-         do i=1,num_ev_out
-            call append_eigenstate(statesfile,upt%eigen_vectors(:,i),upt%eigen_values(i),upt%particles(i))
-         end do
-      end if
-      deallocate(rval,rvec)
+
+      if (associated(upt%eigen_values)) deallocate(upt%eigen_values)
+      if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+      if (associated(upt%particles)) deallocate(upt%particles)
+      allocate(upt%eigen_values(num_ev), upt%eigen_vectors(nfull,num_ev), &
+           upt%particles(num_ev), stat=err)
+      if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','states')
+      upt%eigen_values = raw_values
+      upt%particles = 0
+      allocate(lifted(nfull,num_ev), stat=err)
+      if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','lifted')
+      call cg_lift_active(upt, raw_vectors, lifted)
+      upt%eigen_vectors = lifted
+      deallocate(raw_values, raw_vectors, lifted)
     end subroutine lanczos_coarse
 
 

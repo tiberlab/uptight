@@ -54,6 +54,7 @@ module UPTIGHT
   public :: upt_write_eigenvectors, upt_get_mat_el, upt_nullify_all
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
+  public :: upt_get_coarse_graining_error
   public :: upt_configure_improved_cg, upt_get_improved_cg_info
   public :: upt_configure_icgn, upt_get_icgn_info
   public :: upt_configure_coarse_graining_mode
@@ -277,6 +278,8 @@ contains
 
     call destroy_matrix(upt%ham)
     call cg_clear(upt)
+    call icg_clear(upt)
+    call icgn_clear(upt)
 
     !write(*,*) '(debug) deallocate basis'
     call destroy_basis(upt%basis)
@@ -340,14 +343,16 @@ contains
     call destroy_matrix(upt%ham)
 
     if(upt%verbose.gt.0) write(*,*) '(uptight) compute new matrix'
+    upt%cg_error = 0
     call sparse_ham(upt)
     if (upt%cg_enabled) then
        if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain subsolver ', upt%cg_subsolver, &
             ' backend ', upt%cg_subsolver_type
        call cg_prepare(upt, ierr)
        if (ierr /= 0) then
+         upt%cg_error = ierr
           write(*,*) '(uptight) coarse-graining preparation failed'
-          stop 1
+         return
        end if
     end if
     if (upt%icg_enabled) then
@@ -355,8 +360,9 @@ contains
             ' backend ', upt%icg_subsolver_type
        call icg_prepare(upt, ierr)
        if (ierr /= 0) then
+         upt%cg_error = ierr
           write(*,*) '(uptight) improved coarse-graining preparation failed'
-          stop 1
+         return
        end if
     end if
     if (upt%icgn_enabled) then
@@ -364,8 +370,9 @@ contains
             ' backend ', upt%icgn_subsolver_type
        call icgn_prepare(upt, ierr)
        if (ierr /= 0) then
+         upt%cg_error = ierr
           write(*,*) '(uptight) ICGN preparation failed'
-          stop 1
+         return
        end if
        if (upt%icgn_check_convergence) then
           if (.not. upt%icgn_pi_converged) then
@@ -436,13 +443,34 @@ contains
   end subroutine UPT_configure_coarse_graining_mode
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
-    use coarse_grain, only : cg_get_info
+     use coarse_grain, only : cg_get_info, icg_get_info, icgn_get_info
     type(OUPT), intent(in) :: upt
     logical, intent(out) :: ready
+     logical :: pi_converged
     integer, intent(out) :: original_dim, reduced_dim, nblocks
+     real(dp) :: sigma_t2
     real(dp), intent(out) :: cut_fraction
-    call cg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+     if (upt%cg_enabled) then
+       call cg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+     else if (upt%icg_enabled) then
+       call icg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
+     else if (upt%icgn_enabled) then
+       call icgn_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction, &
+          sigma_t2, pi_converged)
+     else
+       ready = .false.
+       original_dim = 0
+       reduced_dim = 0
+       nblocks = 0
+       cut_fraction = 0.0_dp
+     end if
   end subroutine UPT_get_coarse_graining_info
+
+  subroutine UPT_get_coarse_graining_error(upt, error_code)
+    type(OUPT), intent(in) :: upt
+    integer, intent(out) :: error_code
+    error_code = upt%cg_error
+  end subroutine UPT_get_coarse_graining_error
 
   subroutine UPT_configure_improved_cg(upt, enabled, nblocks, core_emin, core_emax, &
                                         e_buffer, epsilon, imbalance)

@@ -48,19 +48,33 @@ AC_DEFUN([TC_MKL],
  [AC_ARG_WITH([mkl], AS_HELP_STRING([--with-mkl=DIR],
  	[specify the MKL installation path]),
 	[tc_cv_mkl_dir="$with_mkl"])
+  if test -z "$tc_cv_mkl_dir" && test -f /usr/include/mkl/mkl.h
+  then
+    tc_cv_mkl_dir=/usr
+  fi
   HAVE_MKL="${tc_cv_mkl_dir:-no}"
   if test "$HAVE_MKL" != no
   then
     HAVE_MKL="yes"
     MKL_DIR=$tc_cv_mkl_dir
-    MKL_INCLUDES="-I$tc_cv_mkl_dir/include"
+    if test -f "$tc_cv_mkl_dir/include/mkl.h"
+    then
+      MKL_INCLUDES="-I$tc_cv_mkl_dir/include"
+    else
+      MKL_INCLUDES="-I$tc_cv_mkl_dir/include/mkl"
+    fi
     case $host in
       x86_64-*-*)
-        if test "$THREAD_LIBRARY" == intel
+        if test -d "$tc_cv_mkl_dir/lib/intel64"
         then
-          MKL_LIBS="-L$tc_cv_mkl_dir/lib/intel64 -Wl,-rpath,$tc_cv_mkl_dir/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_intel_thread -lmkl_core -liomp5  -lm -lpthread"
+          if test "$THREAD_LIBRARY" == intel
+          then
+            MKL_LIBS="-L$tc_cv_mkl_dir/lib/intel64 -Wl,-rpath,$tc_cv_mkl_dir/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_intel_thread -lmkl_core -liomp5 -lm -lpthread"
+          else
+            MKL_LIBS="-L$tc_cv_mkl_dir/lib/intel64 -Wl,-rpath,$tc_cv_mkl_dir/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lm -lpthread"
+          fi
         else
-          MKL_LIBS="-L$tc_cv_mkl_dir/lib/intel64 -Wl,-rpath,$tc_cv_mkl_dir/lib/intel64 -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp  -lm -lpthread"
+          MKL_LIBS="-L$tc_cv_mkl_dir/lib/x86_64-linux-gnu -Wl,-rpath,$tc_cv_mkl_dir/lib/x86_64-linux-gnu -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lm -lpthread"
         fi ;;
       *)
        AC_MSG_NOTICE(["Cannot use MKL for this architecture"])
