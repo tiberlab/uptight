@@ -2353,15 +2353,20 @@ contains
   ! cg_graph_partition: connectivity-aware fallback partition when METIS is
   ! unavailable.
   !
-  ! Algorithm: weighted greedy graph growing (BFS-seeded, priority-queue-free).
+  ! Algorithm: weighted greedy graph growing (BFS-seeded, priority-queue-free),
+  ! with dynamic target rebalancing and best-fit neighbour selection.
   ! Guarantees:
   !   (1) Every atom in a block is reachable from the block seed via bonds —
-  !       so no block is a disjoint set of atoms.
+  !       so no block is a disjoint set of atoms (a block may still consist of
+  !       several BFS components if the seed's own component runs out before
+  !       reaching the target weight; each such component is itself internally
+  !       connected).
   !   (2) All orbitals of an atom go to the same block (works at the atom level,
   !       so the orbital → block mapping is done after by the caller).
-  !   (3) Approximate balance: blocks grow until their total orbital count
-  !       reaches the target weight (n_orbitals / nblocks).  Remaining atoms
-  !       are appended to the last unfilled block.
+  !   (3) Balance: after each block is closed, the target weight for remaining
+  !       blocks is recomputed from the remaining unassigned weight, so any
+  !       overshoot/undershoot in one block is spread over the rest instead of
+  !       accumulating into the last block.
   !
   ! Inputs:
   !   na         — number of atoms
@@ -2383,83 +2388,130 @@ contains
 
     ! --- local ---
     integer :: i, j, atom, nb_atom, blk, seed
-    integer :: target_wt, cur_wt, total_wt
+    integer :: target_wt, cur_wt, total_wt, remaining_wt, remaining_blocks
     integer :: qhead, qtail, qsize
     integer, allocatable :: queue(:)     ! BFS queue (atom indices, 1-based)
     logical, allocatable :: visited(:)  ! atom already assigned?
     integer :: best_deg, deg, adj_start, adj_end
-    integer :: max_adj_wt, wval
+    integer :: n_unvisited
+    integer :: best_fit_atom, best_fit_wt, best_fit_gap
+    logical :: found_fit
 
-    ! ----- compute target weight per block -----
+    ! ----- compute total weight -----
     total_wt = 0
     do i = 1, na
        total_wt = total_wt + int(vwgt(i))
     end do
-    target_wt = (total_wt + nblocks - 1) / nblocks   ! ceiling
 
     allocate(visited(na), queue(na))
     visited = .false.
     part    = int(nblocks - 1, c_int)   ! default: last block (catches unvisited atoms)
 
+    remaining_wt     = total_wt
+    remaining_blocks = nblocks
+    n_unvisited      = na
+
     do blk = 0, nblocks - 2    ! assign blocks 0 .. nblocks-2; last gets remainder
 
-       ! ---- pick seed: unvisited atom with highest degree ----
-       seed     = -1
-       best_deg = -1
-       do i = 1, na
-          if (visited(i)) cycle
-          deg = int(xadj(i+1) - xadj(i))   ! number of inter-atom bonds
-          if (deg > best_deg) then
-             best_deg = deg
-             seed     = i
+       if (n_unvisited == 0) exit
+
+       ! ---- recompute target dynamically from what's left, so overshoot/
+       ! undershoot in earlier blocks doesn't accumulate into later ones ----
+       target_wt = (remaining_wt + remaining_blocks - 1) / remaining_blocks   ! ceiling
+
+       cur_wt = 0
+       qhead  = 1
+       qtail  = 0
+       qsize  = 0
+
+       ! ---- grow the block, possibly across several connected components ----
+       do while (cur_wt < target_wt .and. n_unvisited > 0)
+
+          ! ---- need a new BFS seed (either first seed of this block, or a
+          ! new component because the previous one ran dry) ----
+          if (qhead > qtail) then
+             seed     = -1
+             best_deg = -1
+             do i = 1, na
+                if (visited(i)) cycle
+                deg = int(xadj(i+1) - xadj(i))   ! number of inter-atom bonds
+                if (deg > best_deg) then
+                   best_deg = deg
+                   seed     = i
+                end if
+             end do
+             if (seed == -1) exit    ! no unvisited atoms left (shouldn't happen, n_unvisited>0)
+
+             visited(seed) = .true.
+             part(seed)    = int(blk, c_int)
+             cur_wt        = cur_wt + int(vwgt(seed))
+             n_unvisited   = n_unvisited - 1
+             qtail         = qtail + 1
+             queue(qtail)  = seed
+             if (cur_wt >= target_wt) exit
           end if
-       end do
-       if (seed == -1) exit    ! all atoms assigned already
 
-       ! ---- BFS grow from seed until block weight reaches target ----
-       part(seed) = int(blk, c_int)
-       visited(seed) = .true.
-       queue(1) = seed
-       qhead = 1; qtail = 1; qsize = 1
-       cur_wt = int(vwgt(seed))
-
-       do while (qhead <= qtail .and. cur_wt < target_wt)
           atom = queue(qhead); qhead = qhead + 1
 
-          ! Add all unvisited neighbours of this atom to the block, in
-          ! decreasing edge-weight order (greedy: strongest bond first).
-          ! Cost: O(degree^2) per atom — degree is small for tight-binding.
           adj_start = int(xadj(atom)) + 1    ! convert 0-based xadj to 1-based
           adj_end   = int(xadj(atom+1))
 
+          ! Repeatedly pick the best-fit unvisited neighbour of this atom:
+          ! prefer the one whose weight fills up to target_wt without
+          ! exceeding it (minimises overshoot); if every remaining neighbour
+          ! would overshoot, take the smallest one (minimises the overshoot
+          ! amount rather than picking arbitrarily / by edge weight alone).
+          ! Cost: O(degree^2) per atom — degree is small for tight-binding.
           do while (cur_wt < target_wt)
-             ! pick the unvisited neighbour with maximum edge weight
-             max_adj_wt = -1
-             nb_atom    = -1
+             found_fit     = .false.
+             best_fit_atom = -1
+             best_fit_wt   = -1
+             best_fit_gap  = huge(0)   ! smallest (target - cur - w) >= 0 seen so far
              do j = adj_start, adj_end
                 i = int(adjncy(j)) + 1    ! 0-based → 1-based
                 if (.not. visited(i)) then
-                   wval = int(adjwgt(j))
-                   if (wval > max_adj_wt) then
-                      max_adj_wt = wval
-                      nb_atom    = i
-                   end if
+                   block
+                     integer :: wv, gap
+                     wv = int(vwgt(i))
+                     gap = target_wt - cur_wt - wv
+                     if (gap >= 0) then
+                        ! fits without overshoot: keep the tightest fit
+                        if (.not. found_fit .or. gap < best_fit_gap) then
+                           found_fit     = .true.
+                           best_fit_gap  = gap
+                           best_fit_atom = i
+                           best_fit_wt   = wv
+                        end if
+                     else if (.not. found_fit) then
+                        ! would overshoot: among these, keep the smallest atom
+                        ! (minimises how far over target_wt we go)
+                        if (best_fit_atom == -1 .or. wv < best_fit_wt) then
+                           best_fit_atom = i
+                           best_fit_wt   = wv
+                        end if
+                     end if
+                   end block
                 end if
              end do
-             if (nb_atom == -1) exit     ! no more unvisited neighbours of this atom
+             if (best_fit_atom == -1) exit     ! no more unvisited neighbours of this atom
 
+             nb_atom          = best_fit_atom
              visited(nb_atom) = .true.
              part(nb_atom)    = int(blk, c_int)
              cur_wt           = cur_wt + int(vwgt(nb_atom))
+             n_unvisited      = n_unvisited - 1
              qtail            = qtail + 1
              queue(qtail)     = nb_atom
           end do
-          if (cur_wt >= target_wt) exit
-       end do
+
+       end do  ! grow block (possibly multi-component)
+
+       remaining_wt     = remaining_wt - cur_wt
+       remaining_blocks = remaining_blocks - 1
 
     end do  ! blk loop
 
-    ! ---- any unvisited atom (disconnected components or remainder) → last block ----
+    ! ---- any unvisited atom (leftover / disconnected remainder) → last block ----
     ! (part already initialised to nblocks-1)
 
     deallocate(visited, queue)
