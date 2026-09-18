@@ -274,10 +274,9 @@ contains
        do j = 1, upt%cg_blocks(i)%nrow
           row_of(upt%cg_blocks(i)%rows(j)) = j
        end do
-      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'start')
+      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'processing')
       call diagonalize_block(upt, i, atom_of, row_of, ierr)
        if (ierr /= 0) return
-      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'complete')
        row_of(upt%cg_blocks(i)%rows) = 0
     end do
     do i = 1, upt%cg_num_blocks
@@ -983,10 +982,9 @@ contains
        end do
        ! Reuse diagonalize_block but operating on icg_blocks:
        ! We replicate inline for icg_blocks (can't pass icg vs cg distinction).
-      call cg_log_block(upt, 'icg', i, upt%icg_blocks(i)%nrow, 'start')
-      call icg_diagonalize_block(upt, i, row_of, ierr)
+      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'processing')
+      call diagonalize_block(upt, i, atom_of, row_of, ierr)
        if (ierr /= 0) return
-      call cg_log_block(upt, 'icg', i, upt%icg_blocks(i)%nrow, 'complete')
        row_of(upt%icg_blocks(i)%rows) = 0
     end do
 
@@ -1547,10 +1545,9 @@ contains
        do j = 1, upt%icgn_blocks(i)%nrow
           row_of(upt%icgn_blocks(i)%rows(j)) = j
        end do
-      call cg_log_block(upt, 'icgn', i, upt%icgn_blocks(i)%nrow, 'start')
-      call icgn_diagonalize_block(upt, i, row_of, ierr)
+      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'processing')
+      call diagonalize_block(upt, i, atom_of, row_of, ierr)
        if (ierr /= 0) return
-      call cg_log_block(upt, 'icgn', i, upt%icgn_blocks(i)%nrow, 'complete')
        row_of(upt%icgn_blocks(i)%rows) = 0
     end do
 
