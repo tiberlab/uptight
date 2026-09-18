@@ -17,8 +17,8 @@ module coarse_grain
   end type CGPair
 
   public :: cg_configure, cg_prepare, cg_clear, cg_active, cg_lift
-   public :: cg_log_progress
-   public :: cg_get_active, cg_lift_active
+  public :: cg_log_progress
+  public :: cg_get_active, cg_lift_active
   public :: cg_get_info
   public :: icg_configure, icg_prepare, icg_clear, icg_active, icg_lift
   public :: icg_get_info
@@ -32,7 +32,7 @@ module coarse_grain
           integer(c_int), value :: length
        end subroutine upt_cg_log_message
 
-     integer(c_int) function cg_metis_partition(nvtxs, xadj, adjncy, vwgt, &
+       integer(c_int) function cg_metis_partition(nvtxs, xadj, adjncy, vwgt, &
           adjwgt, nparts, ufactor, seed, part) bind(C, name='upt_cg_metis_partition')
        import :: c_int
        integer(c_int), value :: nvtxs, nparts, ufactor, seed
@@ -146,23 +146,23 @@ contains
     ierr = 0
     call cg_clear(upt)
     if (.not.upt%cg_enabled) return
-   call cg_log_progress(upt, 'mode=cg preparation started')
+    call cg_log_progress(upt, 'mode=cg preparation started')
     if (num_procs /= 1) then
-       ierr = 1; write(*,*) '(coarse grain) MPI runs are not supported'; return
+       ierr = 1; write(*,*) '(cg) MPI runs are not supported'; return
     end if
     na = upt%basis%n_basis
     n = upt%ham%nrow
     if (na < 1 .or. upt%cg_num_blocks < 1 .or. upt%cg_num_blocks > na) then
-       ierr = 2; write(*,*) '(coarse grain) invalid number of blocks'; return
+       ierr = 2; write(*,*) '(cg) invalid number of blocks'; return
     end if
     if (upt%cg_emin >= upt%cg_emax .or. upt%cg_imbalance < 0.0_dp) then
-       ierr = 3; write(*,*) '(coarse grain) invalid energy window or imbalance'; return
+       ierr = 3; write(*,*) '(cg) invalid energy window or imbalance'; return
     end if
     if (.not.associated(upt%ham%M)) then
-       ierr = 4; write(*,*) '(coarse grain) Hamiltonian is not initialized'; return
+       ierr = 4; write(*,*) '(cg) Hamiltonian is not initialized'; return
     end if
     if (upt%cg_num_blocks == 1 .and. upt%verbose > 0) then
-       write(*,*) '(coarse grain) one block selected; energy window controls rank'
+       write(*,*) '(cg) one block selected; energy window controls rank'
     end if
 
     allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
@@ -176,7 +176,7 @@ contains
     end do
     offsets(na+1) = pos
     if (pos-1 /= n) then
-       ierr = 5; write(*,*) '(coarse grain) atom/orbital mapping is inconsistent'; return
+       ierr = 5; write(*,*) '(cg) atom/orbital mapping is inconsistent'; return
     end if
 
     ! Parallel graph edges are intentional: their summed weights are the
@@ -200,7 +200,7 @@ contains
        end do
     end do
     if (nedge == 0 .or. max_weight == 0.0_dp) then
-       ierr = 7; write(*,*) '(coarse grain) atom graph has no couplings'; return
+       ierr = 7; write(*,*) '(cg) atom graph has no couplings'; return
     end if
     allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
     xadj(1) = 0_c_int
@@ -223,10 +223,10 @@ contains
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%cg_num_blocks,c_int), int(nint(1000.0_dp*upt%cg_imbalance),c_int), 42_c_int, part)
     if (status /= 0) then       ! METIS not available — fallback to connectivity-aware partition
-       if (upt%verbose > 0) then
-          write(*,*) '(coarse grain) METIS unavailable, using graph-BFS fallback partitioning'
-       end if
+       call cg_log_progress(upt, 'METIS unavailable, using built-in graph-BFS fallback partitioning')
        call cg_graph_partition(na, upt%cg_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
+    else
+       call cg_log_progress(upt, 'METIS partitioning done')
     end if
     do i = 1, na
        label(i) = int(part(i)) + 1
@@ -258,7 +258,7 @@ contains
     ! ZHEEVD needs the dense matrix plus work arrays.  This is deliberately
     ! only a prediction: the allocation itself remains inside diagonalize_block.
     workspace_mib = 16.0_dp * real(maxval(counts),dp)**2 / (1024.0_dp**2)
-    if (upt%verbose > 0) write(*,'(a,i0,a,f10.2,a)') '(coarse grain) largest dense block ', &
+    if (upt%verbose > 0) write(*,'(a,i0,a,f10.2,a)') '(cg) largest dense block ', &
          maxval(counts), ', matrix workspace at least ', workspace_mib, ' MiB'
     cursor = 0
     do i = 1, na
@@ -290,7 +290,7 @@ contains
        total_ret = total_ret + upt%cg_blocks(i)%nret
     end do
     if (total_ret == 0) then
-       ierr = 9; write(*,*) '(coarse grain) no block state retained, please expand the energy window'; return
+       ierr = 9; write(*,*) '(cg) no block state retained, please expand the energy window'; return
     end if
     ! No check needed - we will compute ALL eigenvalues of reduced matrix
     upt%cg_original_dim = n; upt%cg_reduced_dim = total_ret
@@ -422,7 +422,7 @@ contains
     eigenvectors = (0.0_dp, 0.0_dp)
    ! CG preparation is serial by contract.
    if (upt%verbose > 0 .and. id0) then
-      write(*,*) '(coarse grain) block spectrum start: solver=', subsolver, &
+      write(*,*) '(cg) block spectrum start: solver=', subsolver, &
          ' backend=', backend, ' dimension=', n
    end if
    ! Iterative full-spectrum preparation is sensitive to the random start
@@ -447,7 +447,7 @@ contains
              upt%fast_tol, upt%cg_sub_tolerance, upt%ort_tol, 0, upt%dynamic, .false., &
              upt%verbose, 1)
    if (upt%verbose > 0 .and. id0) then
-      write(*,*) '(coarse grain) block spectrum complete: solver=', subsolver, &
+      write(*,*) '(cg) block spectrum complete: solver=', subsolver, &
          ' dimension=', n
    end if
              shift_init = old_shift_init
@@ -935,8 +935,10 @@ contains
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%icg_num_blocks,c_int), int(nint(1000.0_dp*upt%icg_imbalance),c_int), 42_c_int, part)
     if (status /= 0) then
-       if (upt%verbose > 0) write(*,*) '(icg) METIS unavailable, using graph-BFS fallback partitioning'
+       call cg_log_progress(upt, 'METIS unavailable, using built-in graph-BFS fallback partitioning')
        call cg_graph_partition(na, upt%icg_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
+    else
+       call cg_log_progress(upt, 'METIS partitioning done')
     end if
     do i = 1, na; label(i) = int(part(i)) + 1; end do
 
@@ -1500,8 +1502,10 @@ contains
     status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%icgn_num_blocks,c_int), int(nint(1000.0_dp*upt%icgn_imbalance),c_int), 42_c_int, part)
     if (status /= 0) then
-       if (upt%verbose > 0) write(*,*) '(icgn) METIS unavailable, using graph-BFS fallback partitioning'
+       call cg_log_progress(upt, 'METIS unavailable, using built-in graph-BFS fallback partitioning')
        call cg_graph_partition(na, upt%icgn_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
+    else
+       call cg_log_progress(upt, 'METIS partitioning done')
     end if
     do i = 1, na; label(i) = int(part(i)) + 1; end do
 
