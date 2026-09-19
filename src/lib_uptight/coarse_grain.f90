@@ -546,6 +546,10 @@ contains
     integer, allocatable :: roff(:), rowcount(:), next(:)
     integer, allocatable :: win_a(:), win_b(:)   ! indices of retained states within S_full
     complex(dp), allocatable :: g_full(:,:), g_ret(:,:)
+    ! Logging variables for projection step
+    integer :: total_inter_entries
+    integer, allocatable :: pair_entry_counts(:)
+    character(len=128) :: log_msg
     ierr=0; nred=upt%cg_reduced_dim
 
     ! --- Step 1: Build q/eval for each block from S_full by applying window ---
@@ -577,15 +581,21 @@ contains
 
     ! --- Step 2: Project inter-block couplings using FULL S matrices ---
     ! pairs(slot)%v has shape (nrow_a, nrow_b) — full projection first
+    call cg_log_progress(upt, 'mode=cg projection: start inter-block coupling projection')
+    total_inter_entries = 0
+    allocate(pair_entry_counts(max(1, upt%cg_num_blocks*(upt%cg_num_blocks-1)/2)))
+    pair_entry_counts = 0
     do r=1,upt%ham%nrow
        do k=upt%ham%Mi(r),upt%ham%Mi(r+1)-1
           c=upt%ham%Mj(k); a=label(atom_of(r)); b=label(atom_of(c))
           if(a==b) cycle
           if(upt%cg_blocks(a)%nrow==0 .or. upt%cg_blocks(b)%nrow==0) cycle
           if(.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          total_inter_entries = total_inter_entries + 1
           ia=min(a,b); ib=max(a,b)
           slot=pair_slot_full(pairs,npair,ia,ib,upt)
           if(slot==0) then; ierr=11; return; end if
+          pair_entry_counts(slot) = pair_entry_counts(slot) + 1
           if(a < b) then
              ! S_a(local(r), :) is row local(r) of S_full_a
              call add_outer(pairs(slot)%v, upt%cg_blocks(a)%S_full(local(r),:), &
@@ -596,6 +606,20 @@ contains
           end if
        end do
     end do
+    write(log_msg,'(a,i0)') 'mode=cg projection: total inter-block entries = ', total_inter_entries
+    call cg_log_progress(upt, trim(log_msg))
+    write(log_msg,'(a,i0)') 'mode=cg projection: number of block pairs = ', npair
+    call cg_log_progress(upt, trim(log_msg))
+    do i = 1, npair
+       if (pair_entry_counts(i) > 0) then
+          write(log_msg,'(a,i0,a,i0,a,i0,a,i0,a,i0)') 'mode=cg projection: pair ', i, &
+               ' (block ', pairs(i)%a, '-', pairs(i)%b, &
+               ') entries = ', pair_entry_counts(i), &
+               ' dims = ', upt%cg_blocks(pairs(i)%a)%nrow, 'x', upt%cg_blocks(pairs(i)%b)%nrow
+          call cg_log_progress(upt, trim(log_msg))
+       end if
+    end do
+    deallocate(pair_entry_counts)
 
     ! --- Step 3: Cut window and store reduced pairs, then build CSR ---
     ! Convert pairs from full (nrow_a x nrow_b) to retained (nret_a x nret_b)
@@ -1196,21 +1220,31 @@ contains
     integer :: i, j, k, r, c, a, b, ia, ib, nnz, pos, slot, nred
     integer, allocatable :: roff(:), rowcount(:), next(:)
     complex(dp), allocatable :: g_full(:,:)
+    ! Logging variables for projection step
+    integer :: total_inter_entries
+    integer, allocatable :: pair_entry_counts(:)
+    character(len=128) :: log_msg
     ierr = 0; nred = upt%icg_reduced_dim
     allocate(roff(upt%icg_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icg_num_blocks; roff(i+1) = roff(i) + upt%icg_blocks(i)%nret; end do
     allocate(pairs(max(1, upt%ham%nnz))); npair = 0
 
     ! Project with full S
+    call cg_log_progress(upt, 'mode=icg projection: start inter-block coupling projection')
+    total_inter_entries = 0
+    allocate(pair_entry_counts(max(1, upt%icg_num_blocks*(upt%icg_num_blocks-1)/2)))
+    pair_entry_counts = 0
     do r = 1, upt%ham%nrow
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
           if (a == b) cycle
           if (upt%icg_blocks(a)%nrow == 0 .or. upt%icg_blocks(b)%nrow == 0) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          total_inter_entries = total_inter_entries + 1
           ia = min(a,b); ib = max(a,b)
           slot = pair_slot_icg(pairs, npair, ia, ib, upt)
           if (slot == 0) then; ierr = 11; return; end if
+          pair_entry_counts(slot) = pair_entry_counts(slot) + 1
           if (a < b) then
              call add_outer(pairs(slot)%v, &
                   upt%icg_blocks(a)%S_full(local(r),:), &
@@ -1222,6 +1256,20 @@ contains
           end if
        end do
     end do
+    write(log_msg,'(a,i0)') 'mode=icg projection: total inter-block entries = ', total_inter_entries
+    call cg_log_progress(upt, trim(log_msg))
+    write(log_msg,'(a,i0)') 'mode=icg projection: number of block pairs = ', npair
+    call cg_log_progress(upt, trim(log_msg))
+    do i = 1, npair
+       if (pair_entry_counts(i) > 0) then
+          write(log_msg,'(a,i0,a,i0,a,i0,a,i0,a,i0)') 'mode=icg projection: pair ', i, &
+               ' (block ', pairs(i)%a, '-', pairs(i)%b, &
+               ') entries = ', pair_entry_counts(i), &
+               ' dims = ', upt%icg_blocks(pairs(i)%a)%nrow, 'x', upt%icg_blocks(pairs(i)%b)%nrow
+          call cg_log_progress(upt, trim(log_msg))
+       end if
+    end do
+    deallocate(pair_entry_counts)
 
     ! Slice to retained states using retained_idx
     do i = 1, npair
@@ -2116,6 +2164,10 @@ contains
     integer :: i, j, k, r, c, a, b, ia, ib, nnz, pos, slot, nred
     integer, allocatable :: roff(:), rowcount(:), next(:)
     complex(dp), allocatable :: g_full(:,:)
+    ! Logging variables for projection step
+    integer :: total_inter_entries
+    integer, allocatable :: pair_entry_counts(:)
+    character(len=128) :: log_msg
     ierr = 0; nred = upt%icgn_reduced_dim
     allocate(roff(upt%icgn_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icgn_num_blocks; roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret; end do
@@ -2123,15 +2175,21 @@ contains
     allocate(pairs(max(1, upt%ham%nnz))); npair = 0
 
     ! Project with full S
+    call cg_log_progress(upt, 'mode=icgn projection: start inter-block coupling projection')
+    total_inter_entries = 0
+    allocate(pair_entry_counts(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2)))
+    pair_entry_counts = 0
     do r = 1, upt%ham%nrow
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
           if (a == b) cycle
           if (upt%icgn_blocks(a)%nrow == 0 .or. upt%icgn_blocks(b)%nrow == 0) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          total_inter_entries = total_inter_entries + 1
           ia = min(a,b); ib = max(a,b)
           slot = pair_slot_icgn(pairs, npair, ia, ib, upt)
           if (slot == 0) then; ierr = 11; return; end if
+          pair_entry_counts(slot) = pair_entry_counts(slot) + 1
           if (a < b) then
              call add_outer(pairs(slot)%v, &
                   upt%icgn_blocks(a)%S_full(local(r),:), &
@@ -2143,6 +2201,20 @@ contains
           end if
        end do
     end do
+    write(log_msg,'(a,i0)') 'mode=icgn projection: total inter-block entries = ', total_inter_entries
+    call cg_log_progress(upt, trim(log_msg))
+    write(log_msg,'(a,i0)') 'mode=icgn projection: number of block pairs = ', npair
+    call cg_log_progress(upt, trim(log_msg))
+    do i = 1, npair
+       if (pair_entry_counts(i) > 0) then
+          write(log_msg,'(a,i0,a,i0,a,i0,a,i0,a,i0)') 'mode=icgn projection: pair ', i, &
+               ' (block ', pairs(i)%a, '-', pairs(i)%b, &
+               ') entries = ', pair_entry_counts(i), &
+               ' dims = ', upt%icgn_blocks(pairs(i)%a)%nrow, 'x', upt%icgn_blocks(pairs(i)%b)%nrow
+          call cg_log_progress(upt, trim(log_msg))
+       end if
+    end do
+    deallocate(pair_entry_counts)
 
     ! Slice to retained states using retained_idx
     do i = 1, npair
