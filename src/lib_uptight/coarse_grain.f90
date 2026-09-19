@@ -549,7 +549,7 @@ contains
     ! Logging variables for projection step
     integer :: total_inter_entries
     integer, allocatable :: pair_entry_counts(:)
-    character(len=128) :: log_msg
+    character(len=512) :: log_msg
     ierr=0; nred=upt%cg_reduced_dim
 
     ! --- Step 1: Build q/eval for each block from S_full by applying window ---
@@ -1223,7 +1223,7 @@ contains
     ! Logging variables for projection step
     integer :: total_inter_entries
     integer, allocatable :: pair_entry_counts(:)
-    character(len=128) :: log_msg
+    character(len=512) :: log_msg
     ierr = 0; nred = upt%icg_reduced_dim
     allocate(roff(upt%icg_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icg_num_blocks; roff(i+1) = roff(i) + upt%icg_blocks(i)%nret; end do
@@ -2167,7 +2167,7 @@ contains
     ! Logging variables for projection step
     integer :: total_inter_entries
     integer, allocatable :: pair_entry_counts(:)
-    character(len=128) :: log_msg
+    character(len=512) :: log_msg
     ierr = 0; nred = upt%icgn_reduced_dim
     allocate(roff(upt%icgn_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icgn_num_blocks; roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret; end do
