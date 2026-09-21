@@ -542,10 +542,9 @@ contains
     integer, intent(inout) :: local(:)
     type(CGPair), allocatable, intent(out) :: pairs(:)
     integer, intent(out) :: npair, ierr
-    integer :: i,j,k,r,c,a,b,ia,ib,nnz,pos,slot,nred,na,nb
+    integer :: i,j,k,r,c,a,b,ia,ib,nnz,pos,slot,nred,na
     integer, allocatable :: roff(:), rowcount(:), next(:)
-    integer, allocatable :: win_a(:), win_b(:)   ! indices of retained states within S_full
-    complex(dp), allocatable :: g_full(:,:), g_ret(:,:)
+    integer, allocatable :: win_a(:)   ! indices of retained states within S_full
     ! Logging variables for projection step
     integer :: total_inter_entries
     integer, allocatable :: pair_entry_counts(:)
@@ -577,10 +576,15 @@ contains
 
     allocate(roff(upt%cg_num_blocks+1)); roff(1)=1
     do i=1,upt%cg_num_blocks; roff(i+1)=roff(i)+upt%cg_blocks(i)%nret; end do
-    allocate(pairs(max(1,upt%ham%nnz))); npair=0
+    ! At most one pair slot per distinct block pair (a<b), not per Hamiltonian entry.
+    allocate(pairs(max(1, upt%cg_num_blocks*(upt%cg_num_blocks-1)/2))); npair=0
 
-    ! --- Step 2: Project inter-block couplings using FULL S matrices ---
-    ! pairs(slot)%v has shape (nrow_a, nrow_b) — full projection first
+    ! --- Step 2: Project inter-block couplings directly onto the retained window ---
+    ! pairs(slot)%v has shape (nret_a, nret_b). Since projection is linear, slicing
+    ! eigenvector columns to the retained window before summing over Hamiltonian
+    ! entries (here) is identical to summing over the full window and slicing
+    ! afterward, but costs O(nret_a*nret_b) per entry instead of O(nrow_a*nrow_b) —
+    ! the entire point of coarse-graining is nret << nrow.
     call cg_log_progress(upt, 'mode=cg projection: start inter-block coupling projection')
     total_inter_entries = 0
     allocate(pair_entry_counts(max(1, upt%cg_num_blocks*(upt%cg_num_blocks-1)/2)))
@@ -589,20 +593,20 @@ contains
        do k=upt%ham%Mi(r),upt%ham%Mi(r+1)-1
           c=upt%ham%Mj(k); a=label(atom_of(r)); b=label(atom_of(c))
           if(a==b) cycle
-          if(upt%cg_blocks(a)%nrow==0 .or. upt%cg_blocks(b)%nrow==0) cycle
+          if(upt%cg_blocks(a)%nret==0 .or. upt%cg_blocks(b)%nret==0) cycle
           if(.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           total_inter_entries = total_inter_entries + 1
           ia=min(a,b); ib=max(a,b)
-          slot=pair_slot_full(pairs,npair,ia,ib,upt)
+          slot=pair_slot(pairs,npair,ia,ib,upt)
           if(slot==0) then; ierr=11; return; end if
           pair_entry_counts(slot) = pair_entry_counts(slot) + 1
           if(a < b) then
-             ! S_a(local(r), :) is row local(r) of S_full_a
-             call add_outer(pairs(slot)%v, upt%cg_blocks(a)%S_full(local(r),:), &
-                  upt%cg_blocks(b)%S_full(local(c),:), upt%ham%M(k))
+             ! q_a(local(r), :) is row local(r) of the retained eigenvectors of block a
+             call add_outer(pairs(slot)%v, upt%cg_blocks(a)%q(local(r),:), &
+                  upt%cg_blocks(b)%q(local(c),:), upt%ham%M(k))
           else
-             call add_outer(pairs(slot)%v, upt%cg_blocks(b)%S_full(local(c),:), &
-                  upt%cg_blocks(a)%S_full(local(r),:), conjg(upt%ham%M(k)))
+             call add_outer(pairs(slot)%v, upt%cg_blocks(b)%q(local(c),:), &
+                  upt%cg_blocks(a)%q(local(r),:), conjg(upt%ham%M(k)))
           end if
        end do
     end do
@@ -621,40 +625,7 @@ contains
     end do
     deallocate(pair_entry_counts)
 
-    ! --- Step 3: Cut window and store reduced pairs, then build CSR ---
-    ! Convert pairs from full (nrow_a x nrow_b) to retained (nret_a x nret_b)
-    do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       na = upt%cg_blocks(a)%nrow; nb = upt%cg_blocks(b)%nrow
-       ! Build index arrays of retained states in a and b
-       allocate(win_a(upt%cg_blocks(a)%nret), win_b(upt%cg_blocks(b)%nret))
-       k = 0
-       do j = 1, na
-          if (upt%cg_blocks(a)%evals_full(j) >= upt%cg_emin .and. &
-              upt%cg_blocks(a)%evals_full(j) <= upt%cg_emax) then
-             k=k+1; win_a(k)=j
-          end if
-       end do
-       k = 0
-       do j = 1, nb
-          if (upt%cg_blocks(b)%evals_full(j) >= upt%cg_emin .and. &
-              upt%cg_blocks(b)%evals_full(j) <= upt%cg_emax) then
-             k=k+1; win_b(k)=j
-          end if
-       end do
-       ! Slice: g_ret(i,j) = g_full(win_a(i), win_b(j))
-       g_full = pairs(i)%v   ! shape (nrow_a, nrow_b) — copy
-       deallocate(pairs(i)%v)
-       allocate(pairs(i)%v(upt%cg_blocks(a)%nret, upt%cg_blocks(b)%nret))
-       do j = 1, upt%cg_blocks(b)%nret
-          do k = 1, upt%cg_blocks(a)%nret
-             pairs(i)%v(k,j) = g_full(win_a(k), win_b(j))
-          end do
-       end do
-       deallocate(g_full, win_a, win_b)
-    end do
-
-    ! --- Step 4: Free S_full (no longer needed) ---
+    ! --- Step 3: Free S_full (no longer needed) ---
     do i = 1, upt%cg_num_blocks
        if (associated(upt%cg_blocks(i)%S_full)) then
           deallocate(upt%cg_blocks(i)%S_full)
@@ -666,7 +637,7 @@ contains
        end if
     end do
 
-    ! --- Step 5: Build CSR reduced Hamiltonian (same structure as before) ---
+    ! --- Step 4: Build CSR reduced Hamiltonian (same structure as before) ---
     allocate(rowcount(nred),next(nred)); rowcount=1
     do i=1,npair
        a=pairs(i)%a; b=pairs(i)%b
@@ -719,25 +690,6 @@ contains
     allocate(pairs(npair)%v(upt%cg_blocks(a)%nret,upt%cg_blocks(b)%nret)); pairs(npair)%v=(0.0_dp,0.0_dp)
     pair_slot=npair
   end function pair_slot
-
-  ! Variant that allocates v using the FULL block size (nrow x nrow),
-  ! used during projection before the energy window is applied.
-  integer function pair_slot_full(pairs,npair,a,b,upt)
-    type(CGPair), intent(inout) :: pairs(:)
-    integer, intent(inout) :: npair
-    integer,intent(in)::a,b
-    type(OUPT),intent(in)::upt
-    integer::i
-    do i=1,npair
-       if(pairs(i)%a==a .and. pairs(i)%b==b) then; pair_slot_full=i; return; end if
-    end do
-    npair=npair+1
-    if(npair>size(pairs)) then; pair_slot_full=0; return; end if
-    pairs(npair)%a=a; pairs(npair)%b=b
-    allocate(pairs(npair)%v(upt%cg_blocks(a)%nrow, upt%cg_blocks(b)%nrow))
-    pairs(npair)%v=(0.0_dp,0.0_dp)
-    pair_slot_full=npair
-  end function pair_slot_full
 
   subroutine add_outer(target, qr, qc, value)
     complex(dp), intent(inout) :: target(:,:)
