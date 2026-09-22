@@ -13,7 +13,12 @@ module coarse_grain
 
   type CGPair
      integer :: a = 0, b = 0
+     ! v = transformed coupling; h = physical-space coupling collected sparsely
      complex(dp), dimension(:,:), pointer :: v => null()
+     complex(dp), dimension(:,:), pointer :: h => null()
+     ! t = H_AB * Q_B accumulated directly from the global CSR Hamiltonian.
+     ! Used by the CG projection path to avoid materializing dense H_AB.
+     complex(dp), dimension(:,:), pointer :: t => null()
   end type CGPair
 
   public :: cg_configure, cg_prepare, cg_clear, cg_active, cg_lift
@@ -141,6 +146,9 @@ contains
     integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
     real(dp), allocatable :: edge_weight(:)
     real(dp) :: max_weight, all_weight, cut_weight, workspace_mib
+    integer(kind=8) :: timer_start, timer_end, timer_rate
+    real(dp) :: timer_seconds
+    character(len=256) :: line
     type(CGPair), allocatable :: pairs(:)
 
     ierr = 0
@@ -202,6 +210,9 @@ contains
     if (nedge == 0 .or. max_weight == 0.0_dp) then
        ierr = 7; write(*,*) '(cg) atom graph has no couplings'; return
     end if
+    write(line,'(a,i0,a,i0,a,i0)') 'mode=cg graph scan complete, orbitals=', n, &
+         ', stored_nnz=', upt%ham%nnz, ', interblock_entries=', nedge
+    call cg_log_progress(upt, trim(line))
     allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
     xadj(1) = 0_c_int
     do i = 1, na
@@ -270,15 +281,18 @@ contains
     end do
 
     allocate(row_of(n)); row_of = 0
+    call system_clock(timer_start, timer_rate)
     do i = 1, upt%cg_num_blocks
        do j = 1, upt%cg_blocks(i)%nrow
           row_of(upt%cg_blocks(i)%rows(j)) = j
        end do
-      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'processing')
-      call diagonalize_block(upt, i, atom_of, row_of, ierr)
+       call diagonalize_block(upt, i, atom_of, row_of, ierr)
        if (ierr /= 0) return
        row_of(upt%cg_blocks(i)%rows) = 0
     end do
+    call system_clock(timer_end)
+    timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
+    call cg_log_timing(upt, 'block diagonalization', timer_seconds)
     do i = 1, upt%cg_num_blocks
        do j = 1, upt%cg_blocks(i)%nrow
           row_of(upt%cg_blocks(i)%rows(j)) = j
@@ -293,9 +307,16 @@ contains
     end if
     ! No check needed - we will compute ALL eigenvalues of reduced matrix
     upt%cg_original_dim = n; upt%cg_reduced_dim = total_ret
+    write(line,'(a,i0,a,i0,a,i0,a,f8.4)') 'mode=cg block diagonalization phase complete, total_retained=', &
+         total_ret, ', reduced/original=', total_ret, '/', n, ', cut_fraction=', upt%cg_cut_fraction
+    call cg_log_progress(upt, trim(line))
+    call cg_log_progress(upt, 'mode=cg reduced Hamiltonian build started')
 
     call build_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, ierr)
     if (ierr /= 0) return
+    write(line,'(a,i0,a,i0)') 'mode=cg reduced Hamiltonian build complete, active_pairs=', npair, &
+         ', reduced_nnz=', upt%cg_ham%nnz
+    call cg_log_progress(upt, trim(line))
     call destroy_pairs(pairs)
     upt%cg_ready = .true.
        call cg_log_info(upt, 'cg', upt%cg_subsolver, upt%cg_subsolver_type, n, total_ret, &
@@ -419,11 +440,7 @@ contains
     end if
     energies = 0.0_dp
     eigenvectors = (0.0_dp, 0.0_dp)
-   ! CG preparation is serial by contract.
-   if (upt%verbose > 0 .and. id0) then
-      write(*,*) '(cg) block spectrum start: solver=', subsolver, &
-         ' backend=', backend, ' dimension=', n
-   end if
+   ! Per-block solver logging intentionally disabled; phase timing is reported by cg_prepare.
    ! Iterative full-spectrum preparation is sensitive to the random start
    ! vector. Make each block solve reproducible and restore the caller's RNG
    ! state afterward so direct solver behavior is unaffected.
@@ -445,10 +462,7 @@ contains
              max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
              upt%fast_tol, upt%cg_sub_tolerance, upt%ort_tol, 0, upt%dynamic, .false., &
              upt%verbose, 1)
-   if (upt%verbose > 0 .and. id0) then
-      write(*,*) '(cg) block spectrum complete: solver=', subsolver, &
-         ' dimension=', n
-   end if
+   ! Per-block solver logging intentionally disabled.
              shift_init = old_shift_init
              shift_end = old_shift_end
              shift_init_Mi(id) = old_shift_init_mi
@@ -543,7 +557,10 @@ contains
     type(CGPair), allocatable, intent(out) :: pairs(:)
     integer, intent(out) :: npair, ierr
     integer :: i,j,k,r,c,a,b,ia,ib,nnz,pos,slot,nred,na
-    integer, allocatable :: roff(:), rowcount(:), next(:)
+    integer(kind=8) :: timer_start, timer_end, timer_rate
+    real(dp) :: timer_seconds
+    character(len=256) :: line
+    integer, allocatable :: roff(:), rowcount(:), next(:), pair_map(:,:)
     integer, allocatable :: win_a(:)   ! indices of retained states within S_full
     ierr=0; nred=upt%cg_reduced_dim
 
@@ -574,13 +591,13 @@ contains
     do i=1,upt%cg_num_blocks; roff(i+1)=roff(i)+upt%cg_blocks(i)%nret; end do
     ! At most one pair slot per distinct block pair (a<b), not per Hamiltonian entry.
     allocate(pairs(max(1, upt%cg_num_blocks*(upt%cg_num_blocks-1)/2))); npair=0
+    allocate(pair_map(upt%cg_num_blocks, upt%cg_num_blocks)); pair_map = 0
 
-    ! --- Step 2: Project inter-block couplings directly onto the retained window ---
-    ! pairs(slot)%v has shape (nret_a, nret_b). Since projection is linear, slicing
-    ! eigenvector columns to the retained window before summing over Hamiltonian
-    ! entries (here) is identical to summing over the full window and slicing
-    ! afterward, but costs O(nret_a*nret_b) per entry instead of O(nrow_a*nrow_b) —
-    ! the entire point of coarse-graining is nret << nrow.
+    ! --- Step 2: Project inter-block couplings directly from global CSR ---
+    ! For each active pair (A,B), accumulate T = H_AB * Q_B while scanning
+    ! the existing sparse Hamiltonian.  This avoids allocating the dense
+    ! physical-space H_AB (nA*nB entries) and avoids a dense H_AB*Q_B GEMM.
+    call system_clock(timer_start, timer_rate)
     do r=1,upt%ham%nrow
        do k=upt%ham%Mi(r),upt%ham%Mi(r+1)-1
           c=upt%ham%Mj(k); a=label(atom_of(r)); b=label(atom_of(c))
@@ -588,20 +605,46 @@ contains
           if(upt%cg_blocks(a)%nret==0 .or. upt%cg_blocks(b)%nret==0) cycle
           if(.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           ia=min(a,b); ib=max(a,b)
-          slot=pair_slot(pairs,npair,ia,ib,upt)
+          slot=pair_slot_cg(pairs,npair,ia,ib,upt,pair_map)
           if(slot==0) then; ierr=11; return; end if
           if(a < b) then
-             ! q_a(local(r), :) is row local(r) of the retained eigenvectors of block a
-             call add_outer(pairs(slot)%v, upt%cg_blocks(a)%q(local(r),:), &
-                  upt%cg_blocks(b)%q(local(c),:), upt%ham%M(k))
+             pairs(slot)%t(local(r),:) = pairs(slot)%t(local(r),:) + &
+                  upt%ham%M(k) * upt%cg_blocks(b)%q(local(c),:)
           else
-             call add_outer(pairs(slot)%v, upt%cg_blocks(b)%q(local(c),:), &
-                  upt%cg_blocks(a)%q(local(r),:), conjg(upt%ham%M(k)))
+             pairs(slot)%t(local(c),:) = pairs(slot)%t(local(c),:) + &
+                  conjg(upt%ham%M(k)) * upt%cg_blocks(b)%q(local(r),:)
           end if
        end do
     end do
 
+    deallocate(pair_map)
+    call system_clock(timer_end)
+    timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
+    call cg_log_timing(upt, 'CG CSR projection assembly', timer_seconds)
+    write(line,'(a,i0,a,i0)') 'mode=cg interblock CSR projection assembly complete, active_pairs=', npair, &
+         ', ham_nnz=', upt%ham%nnz
+    call cg_log_progress(upt, trim(line))
+
+    ! Finish V_AB = Q_A^H T with one dense GEMM per active pair.
+    call cg_log_progress(upt, 'mode=cg interblock projection started')
+    call system_clock(timer_start, timer_rate)
+    do i = 1, npair
+       a = pairs(i)%a; b = pairs(i)%b
+       call project_accumulated_pair_cg(pairs(i), upt%cg_blocks(a)%q)
+       if (i <= 5 .or. mod(i,100) == 0 .or. i == npair) then
+          write(line,'(a,i0,a,i0,a,i0,a,i0)') 'mode=cg interblock projection progress, pair=', i, &
+               '/', npair, ', block_a=', a, ', block_b=', b
+          call cg_log_progress(upt, trim(line))
+       end if
+    end do
+    call system_clock(timer_end)
+    timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
+    call cg_log_timing(upt, 'CG dense left projection', timer_seconds)
+    call cg_log_progress(upt, 'mode=cg interblock projection complete')
+    call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: projection phase exited')
+
     ! --- Step 3: Free S_full (no longer needed) ---
+    call system_clock(timer_start, timer_rate)
     do i = 1, upt%cg_num_blocks
        if (associated(upt%cg_blocks(i)%S_full)) then
           deallocate(upt%cg_blocks(i)%S_full)
@@ -612,8 +655,13 @@ contains
           nullify(upt%cg_blocks(i)%evals_full)
        end if
     end do
+    call system_clock(timer_end)
+    timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
+    call cg_log_timing(upt, 'CG S_full/evals_full deallocation', timer_seconds)
+    call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: S_full/evals_full deallocated')
 
     ! --- Step 4: Build CSR reduced Hamiltonian (same structure as before) ---
+    call system_clock(timer_start, timer_rate)
     allocate(rowcount(nred),next(nred)); rowcount=1
     do i=1,npair
        a=pairs(i)%a; b=pairs(i)%b
@@ -627,7 +675,11 @@ contains
           rowcount(roff(a):roff(a+1)-1)=rowcount(roff(a):roff(a+1)-1)+upt%cg_blocks(b)%nret
        end select
     end do
-    nnz=sum(rowcount); call create_matrix(upt%cg_ham,nred,nred,nnz)
+    nnz=sum(rowcount)
+    write(line,'(a,i0,a,i0)') 'mode=cg reduced Hamiltonian: CSR sizing, nred=', nred, ', nnz=', nnz
+    call cg_log_progress(upt, trim(line))
+    call create_matrix(upt%cg_ham,nred,nred,nnz)
+    call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: CSR allocation complete')
     upt%cg_ham%sparse_fmt=upt%ham%sparse_fmt; upt%cg_ham%Mi(1)=1
     do i=1,nred; upt%cg_ham%Mi(i+1)=upt%cg_ham%Mi(i)+rowcount(i); end do
     next=upt%cg_ham%Mi(1:nred)
@@ -641,6 +693,7 @@ contains
        a=pairs(i)%a; b=pairs(i)%b
        call emit_pair(upt%cg_ham,pairs(i),roff(a),roff(b),upt%ham%sparse_fmt,next)
     end do
+    call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: pair emission complete')
     upt%cg_ham%nnz=nnz
     call create_matrix(upt%cg_U,nred,nred,nred)
     upt%cg_U%sparse_fmt='F'; upt%cg_U%Mi(1)=1
@@ -649,32 +702,83 @@ contains
     end do
     upt%cg_U%Mi(nred+1)=nred+1; upt%cg_U%nnz=nred
     deallocate(roff,rowcount,next)
+    call system_clock(timer_end)
+    timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
+    call cg_log_timing(upt, 'CG reduced CSR sizing/allocation/emission', timer_seconds)
   end subroutine build_reduced_hamiltonian
 
-  integer function pair_slot(pairs,npair,a,b,upt)
+  integer function pair_slot(pairs,npair,a,b,upt,pair_map)
     type(CGPair), intent(inout) :: pairs(:)
     integer, intent(inout) :: npair
     integer,intent(in)::a,b
     type(OUPT),intent(in)::upt
-    integer::i
-    do i=1,npair
-       if(pairs(i)%a==a .and. pairs(i)%b==b) then; pair_slot=i; return; end if
-    end do
+    integer, intent(inout) :: pair_map(:,:)
+
+    ! pair_map makes the repeated pair lookup O(1) instead of scanning
+    ! all previously created block pairs for every physical Hamiltonian entry.
+    if (pair_map(a,b) /= 0) then
+       pair_slot = pair_map(a,b)
+       return
+    end if
+
     npair=npair+1
     if(npair>size(pairs)) then; pair_slot=0; return; end if
     pairs(npair)%a=a; pairs(npair)%b=b
-    allocate(pairs(npair)%v(upt%cg_blocks(a)%nret,upt%cg_blocks(b)%nret)); pairs(npair)%v=(0.0_dp,0.0_dp)
+    allocate(pairs(npair)%h(upt%cg_blocks(a)%nrow,upt%cg_blocks(b)%nrow)); pairs(npair)%h=(0.0_dp,0.0_dp)
+    pair_map(a,b) = npair
     pair_slot=npair
   end function pair_slot
 
-  subroutine add_outer(target, qr, qc, value)
-    complex(dp), intent(inout) :: target(:,:)
-    complex(dp), intent(in) :: qr(:), qc(:), value
-    integer :: i,j
-    do j=1,size(qc); do i=1,size(qr)
-       target(i,j)=target(i,j)+conjg(qr(i))*value*qc(j)
-    end do; end do
-  end subroutine add_outer
+  ! CG-specific pair slot: allocate only T = H_AB * Q_B.  Unlike pair_slot,
+  ! this never materializes the dense physical-space H_AB matrix.
+  integer function pair_slot_cg(pairs,npair,a,b,upt,pair_map)
+    type(CGPair), intent(inout) :: pairs(:)
+    integer, intent(inout) :: npair
+    integer, intent(in) :: a,b
+    type(OUPT), intent(in) :: upt
+    integer, intent(inout) :: pair_map(:,:)
+
+    if (pair_map(a,b) /= 0) then
+       pair_slot_cg = pair_map(a,b)
+       return
+    end if
+
+    npair=npair+1
+    if(npair>size(pairs)) then; pair_slot_cg=0; return; end if
+    pairs(npair)%a=a; pairs(npair)%b=b
+    allocate(pairs(npair)%t(upt%cg_blocks(a)%nrow, upt%cg_blocks(b)%nret))
+    pairs(npair)%t=(0.0_dp,0.0_dp)
+    pair_map(a,b)=npair
+    pair_slot_cg=npair
+  end function pair_slot_cg
+
+  subroutine project_accumulated_pair_cg(p, qa)
+    type(CGPair), intent(inout) :: p
+    complex(dp), intent(in) :: qa(:,:)
+
+    ! The CSR scan has already computed T = H_AB * Q_B.  Only the dense
+    ! left projection remains: V_AB = Q_A^H * T.
+    allocate(p%v(size(qa,2), size(p%t,2)))
+    p%v = matmul(conjg(transpose(qa)), p%t)
+    deallocate(p%t)
+  end subroutine project_accumulated_pair_cg
+
+  subroutine project_pair(p, qa, qb, keep_h)
+    type(CGPair), intent(inout) :: p
+    complex(dp), intent(in) :: qa(:,:), qb(:,:)
+    logical, intent(in), optional :: keep_h
+    complex(dp), allocatable :: tmp(:,:)
+
+    ! First H_AB * Q_B, then Q_A^H * (H_AB * Q_B).
+    ! The expensive arithmetic is now done at block level instead of once per
+    ! physical Hamiltonian entry.
+    allocate(tmp(size(qa,1), size(qb,2)))
+    tmp = matmul(p%h, qb)
+    allocate(p%v(size(qa,2), size(qb,2)))
+    p%v = matmul(conjg(transpose(qa)), tmp)
+    deallocate(tmp)
+    if (.not. present(keep_h) .or. .not. keep_h) deallocate(p%h)
+  end subroutine project_pair
 
   subroutine emit_pair(h,p,oa,ob,fmt,next)
     type(CSR),intent(inout)::h
@@ -699,7 +803,11 @@ contains
     type(CGPair),allocatable,intent(inout)::pairs(:)
     integer::i
     if(.not.allocated(pairs)) return
-    do i=1,size(pairs); if(associated(pairs(i)%v)) deallocate(pairs(i)%v); end do
+    do i=1,size(pairs)
+       if(associated(pairs(i)%v)) deallocate(pairs(i)%v)
+       if(associated(pairs(i)%h)) deallocate(pairs(i)%h)
+       if(associated(pairs(i)%t)) deallocate(pairs(i)%t)
+    end do
     deallocate(pairs)
   end subroutine destroy_pairs
 
@@ -800,13 +908,14 @@ contains
     integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
     real(dp), allocatable :: edge_weight(:)
     real(dp) :: max_weight, all_weight, cut_weight, workspace_mib
+    character(len=256) :: line
     type(CGPair), allocatable :: pairs(:)
 
     ! keep_mask(b, i) : should state i of block b be retained?
     logical, allocatable :: is_core(:,:), keep_mask(:,:)
 
     integer :: ia, ib, slot, nred, nnz
-    integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:)
+    integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:), pair_map(:,:)
     complex(dp), allocatable :: g_full(:,:)
 
     ierr = 0
@@ -973,22 +1082,11 @@ contains
        end do
     end do
 
-    ! For each inter-block pair (a,b) compute g = S_a^† V_ab S_b in blocks,
-    ! then check coupling from core states of a to unselected states of b and vice versa.
-    ! We accumulate |g(i,j)|^2 per (block_a state i, block_b state j).
-    ! To avoid allocating a full dense g for every pair, we use a scalar
-    ! accumulation: for each physical CSR entry (r→c) crossing block boundary,
-    ! add contribution conj(S_a(r_local,i)) * H(r,c) * S_b(c_local,j) to g(i,j).
-   ! Select an unretained state when |g(i,j)|^2 / |E_i-E_j| exceeds epsilon.
-    ! Strategy: for each inter-block CSR entry (r,c), iterate over all core
-    ! states i of block_a and all unselected states j of block_b and accumulate.
-    ! This is O(n_core * n_unselected) per entry — potentially expensive for
-    ! large blocks; acceptable for the problem sizes targeted.
-    ! We use a dense (na_core × nb_all) temporary matrix per pair.
-
-    ! Simpler: collect full g_ab dense then check. Allocate per pair.
-    ! We track pairs already processed with a simple visited array.
+    ! Collect each physical block coupling once.  Only after all sparse
+    ! entries belonging to a pair have been collected do we perform the dense
+    ! block projection S_a^H H_ab S_b.
     allocate(pairs(max(1, upt%ham%nnz))); npair = 0
+    allocate(pair_map(upt%icg_num_blocks, upt%icg_num_blocks)); pair_map = 0
     do r = 1, upt%ham%nrow
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
@@ -996,18 +1094,19 @@ contains
           if (ia == ib) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           if (upt%icg_blocks(ia)%nrow == 0 .or. upt%icg_blocks(ib)%nrow == 0) cycle
-          slot = pair_slot_icg(pairs, npair, min(ia,ib), max(ia,ib), upt)
+          slot = pair_slot_icg(pairs, npair, min(ia,ib), max(ia,ib), upt, pair_map)
           if (slot == 0) then; ierr = 11; return; end if
           if (ia < ib) then
-             call add_outer(pairs(slot)%v, &
-                  upt%icg_blocks(ia)%S_full(row_of(r),:), &
-                  upt%icg_blocks(ib)%S_full(row_of(c),:), upt%ham%M(k))
+             pairs(slot)%h(row_of(r),row_of(c)) = pairs(slot)%h(row_of(r),row_of(c)) + upt%ham%M(k)
           else
-             call add_outer(pairs(slot)%v, &
-                  upt%icg_blocks(ib)%S_full(row_of(c),:), &
-                  upt%icg_blocks(ia)%S_full(row_of(r),:), conjg(upt%ham%M(k)))
+             pairs(slot)%h(row_of(c),row_of(r)) = pairs(slot)%h(row_of(c),row_of(r)) + conjg(upt%ham%M(k))
           end if
        end do
+    end do
+    deallocate(pair_map)
+    do i = 1, npair
+       ia = pairs(i)%a; ib = pairs(i)%b
+       call project_pair(pairs(i), upt%icg_blocks(ia)%S_full, upt%icg_blocks(ib)%S_full)
     end do
 
    ! Now scan each pair using |g_ij|^2 / |E_i-E_j| > epsilon.
@@ -1120,20 +1219,21 @@ contains
   end subroutine icg_diagonalize_block
 
   ! pair_slot variant for icg: allocates v(nrow_a, nrow_b).
-  integer function pair_slot_icg(pairs, npair, a, b, upt)
+  integer function pair_slot_icg(pairs, npair, a, b, upt, pair_map)
     type(CGPair), intent(inout) :: pairs(:)
     integer, intent(inout) :: npair
     integer, intent(in) :: a, b
     type(OUPT), intent(in) :: upt
-    integer :: i
-    do i = 1, npair
-       if (pairs(i)%a == a .and. pairs(i)%b == b) then; pair_slot_icg = i; return; end if
-    end do
+    integer, intent(inout) :: pair_map(:,:)
+    if (pair_map(a,b) /= 0) then
+       pair_slot_icg = pair_map(a,b); return
+    end if
     npair = npair + 1
     if (npair > size(pairs)) then; pair_slot_icg = 0; return; end if
     pairs(npair)%a = a; pairs(npair)%b = b
-    allocate(pairs(npair)%v(upt%icg_blocks(a)%nrow, upt%icg_blocks(b)%nrow))
-    pairs(npair)%v = (0.0_dp, 0.0_dp)
+    allocate(pairs(npair)%h(upt%icg_blocks(a)%nrow, upt%icg_blocks(b)%nrow))
+    pairs(npair)%h = (0.0_dp, 0.0_dp)
+    pair_map(a,b) = npair
     pair_slot_icg = npair
   end function pair_slot_icg
 
@@ -1146,14 +1246,15 @@ contains
     type(CGPair), allocatable, intent(out) :: pairs(:)
     integer, intent(out) :: npair, ierr
     integer :: i, j, k, r, c, a, b, ia, ib, nnz, pos, slot, nred
-    integer, allocatable :: roff(:), rowcount(:), next(:)
+    integer, allocatable :: roff(:), rowcount(:), next(:), pair_map(:,:)
     complex(dp), allocatable :: g_full(:,:)
     ierr = 0; nred = upt%icg_reduced_dim
     allocate(roff(upt%icg_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icg_num_blocks; roff(i+1) = roff(i) + upt%icg_blocks(i)%nret; end do
     allocate(pairs(max(1, upt%ham%nnz))); npair = 0
+    allocate(pair_map(upt%icg_num_blocks, upt%icg_num_blocks)); pair_map = 0
 
-    ! Project with full S
+    ! Collect physical H_ab first; transform each block pair only once.
     do r = 1, upt%ham%nrow
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
@@ -1161,18 +1262,20 @@ contains
           if (upt%icg_blocks(a)%nrow == 0 .or. upt%icg_blocks(b)%nrow == 0) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           ia = min(a,b); ib = max(a,b)
-          slot = pair_slot_icg(pairs, npair, ia, ib, upt)
+          slot = pair_slot_icg(pairs, npair, ia, ib, upt, pair_map)
           if (slot == 0) then; ierr = 11; return; end if
           if (a < b) then
-             call add_outer(pairs(slot)%v, &
-                  upt%icg_blocks(a)%S_full(local(r),:), &
-                  upt%icg_blocks(b)%S_full(local(c),:), upt%ham%M(k))
+             pairs(slot)%h(local(r),local(c)) = pairs(slot)%h(local(r),local(c)) + upt%ham%M(k)
           else
-             call add_outer(pairs(slot)%v, &
-                  upt%icg_blocks(b)%S_full(local(c),:), &
-                  upt%icg_blocks(a)%S_full(local(r),:), conjg(upt%ham%M(k)))
+             pairs(slot)%h(local(c),local(r)) = pairs(slot)%h(local(c),local(r)) + conjg(upt%ham%M(k))
           end if
        end do
+    end do
+    deallocate(pair_map)
+
+    do i = 1, npair
+       a = pairs(i)%a; b = pairs(i)%b
+       call project_pair(pairs(i), upt%icg_blocks(a)%S_full, upt%icg_blocks(b)%S_full)
     end do
 
     ! Slice to retained states using retained_idx
@@ -1350,7 +1453,7 @@ contains
     logical, allocatable :: is_core(:,:), keep_mask(:,:)
 
     integer :: ia, ib, slot, nred, nnz
-    integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:)
+    integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:), pair_map(:,:)
     complex(dp), allocatable :: g_full(:,:)
 
     ! For Neumann self-energy
@@ -1529,8 +1632,10 @@ contains
        end do
     end do
 
-    ! Level-1 acquaintance: same as icg_prepare
+    ! Level-1 acquaintance: collect physical block couplings, then project
+    ! each pair once at matrix level.
     allocate(pairs(max(1, upt%ham%nnz))); npair = 0
+    allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
     do r = 1, upt%ham%nrow
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
@@ -1538,18 +1643,19 @@ contains
           if (ia == ib) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
-          slot = pair_slot_icgn(pairs, npair, min(ia,ib), max(ia,ib), upt)
+          slot = pair_slot_icgn(pairs, npair, min(ia,ib), max(ia,ib), upt, pair_map)
           if (slot == 0) then; ierr = 11; return; end if
           if (ia < ib) then
-             call add_outer(pairs(slot)%v, &
-                  upt%icgn_blocks(ia)%S_full(row_of(r),:), &
-                  upt%icgn_blocks(ib)%S_full(row_of(c),:), upt%ham%M(k))
+             pairs(slot)%h(row_of(r),row_of(c)) = pairs(slot)%h(row_of(r),row_of(c)) + upt%ham%M(k)
           else
-             call add_outer(pairs(slot)%v, &
-                  upt%icgn_blocks(ib)%S_full(row_of(c),:), &
-                  upt%icgn_blocks(ia)%S_full(row_of(r),:), conjg(upt%ham%M(k)))
+             pairs(slot)%h(row_of(c),row_of(r)) = pairs(slot)%h(row_of(c),row_of(r)) + conjg(upt%ham%M(k))
           end if
        end do
+    end do
+    deallocate(pair_map)
+    do i = 1, npair
+       ia = pairs(i)%a; ib = pairs(i)%b
+       call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full)
     end do
 
     do i = 1, npair
@@ -1707,19 +1813,15 @@ contains
     do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
        allocate(g_full(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
-       g_full = cmplx(0.0_dp, 0.0_dp, kind=dp)
-       ! Accumulate S_a^H * V_ab * S_b from physical ham entries
-       do r = 1, upt%ham%nrow
-          if (label(atom_of(r)) /= ia) cycle
-          do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-             c = upt%ham%Mj(k)
-             if (label(atom_of(c)) /= ib) cycle
-             if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-             call add_outer(g_full, &
-                  upt%icgn_blocks(ia)%S_full(row_of(r),:), &
-                  upt%icgn_blocks(ib)%S_full(row_of(c),:), upt%ham%M(k))
-          end do
-       end do
+       ! The physical block coupling was already collected in pairs(i)%h.
+       ! Reuse it directly; do not rescan the full sparse Hamiltonian.
+       block
+          complex(dp), allocatable :: tmp_g(:,:)
+          allocate(tmp_g(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
+          tmp_g = matmul(pairs(i)%h, upt%icgn_blocks(ib)%S_full)
+          g_full = matmul(conjg(transpose(upt%icgn_blocks(ia)%S_full)), tmp_g)
+          deallocate(tmp_g)
+       end block
        ! Extract P(ia)-Q(ib) entries
        do j = 1, upt%icgn_blocks(ia)%nret
           do k = 1, upt%icgn_blocks(ib)%nrow
@@ -1770,18 +1872,14 @@ contains
        do i = 1, npair
           ia = pairs(i)%a; ib = pairs(i)%b
           allocate(g_full(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
-          g_full = cmplx(0.0_dp, 0.0_dp, kind=dp)
-          do r = 1, upt%ham%nrow
-             if (label(atom_of(r)) /= ia) cycle
-             do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-                c = upt%ham%Mj(k)
-                if (label(atom_of(c)) /= ib) cycle
-                if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-                call add_outer(g_full, &
-                     upt%icgn_blocks(ia)%S_full(row_of(r),:), &
-                     upt%icgn_blocks(ib)%S_full(row_of(c),:), upt%ham%M(k))
-             end do
-          end do
+          ! Reuse the already-collected physical coupling for this pair.
+          block
+             complex(dp), allocatable :: tmp_g(:,:)
+             allocate(tmp_g(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
+             tmp_g = matmul(pairs(i)%h, upt%icgn_blocks(ib)%S_full)
+             g_full = matmul(conjg(transpose(upt%icgn_blocks(ia)%S_full)), tmp_g)
+             deallocate(tmp_g)
+          end block
           ! Store BOTH directions (j->k and k->j with conj(v))
           do j = 1, upt%icgn_blocks(ia)%nrow
              if (local_ret_idx(ia, j) /= 0) cycle ! j in P, skip
@@ -1987,6 +2085,22 @@ contains
       call cg_log_progress(upt, message)
    end subroutine cg_log_block
 
+   subroutine cg_log_timing(upt, phase, seconds)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: phase
+      real(dp), intent(in) :: seconds
+      integer(kind=8) :: total_seconds, hours, minutes, secs
+      character(len=256) :: message
+
+      total_seconds = int(max(0.0_dp, seconds), kind=8)
+      hours = total_seconds / 3600_8
+      minutes = mod(total_seconds, 3600_8) / 60_8
+      secs = mod(total_seconds, 60_8)
+      write(message,'(a,a,a,i0,a,i2.2,a,i2.2,a)') 'mode=cg timing: ', trim(phase), &
+           ' = ', hours, 'h ', minutes, 'm ', secs, 's'
+      call cg_log_progress(upt, trim(message))
+   end subroutine cg_log_timing
+
    subroutine cg_log_info(upt, mode, subsolver, backend, original_dim, reduced_dim, &
      nblocks, cut_fraction, sigma_t2, pi_converged, has_norm)
     type(OUPT), intent(in) :: upt
@@ -2040,20 +2154,21 @@ contains
   end subroutine icgn_diagonalize_block
 
   ! pair_slot variant for icgn: allocates v(nrow_a, nrow_b) using icgn_blocks.
-  integer function pair_slot_icgn(pairs, npair, a, b, upt)
+  integer function pair_slot_icgn(pairs, npair, a, b, upt, pair_map)
     type(CGPair), intent(inout) :: pairs(:)
     integer, intent(inout) :: npair
     integer, intent(in) :: a, b
     type(OUPT), intent(in) :: upt
-    integer :: i
-    do i = 1, npair
-       if (pairs(i)%a == a .and. pairs(i)%b == b) then; pair_slot_icgn = i; return; end if
-    end do
+    integer, intent(inout) :: pair_map(:,:)
+    if (pair_map(a,b) /= 0) then
+       pair_slot_icgn = pair_map(a,b); return
+    end if
     npair = npair + 1
     if (npair > size(pairs)) then; pair_slot_icgn = 0; return; end if
     pairs(npair)%a = a; pairs(npair)%b = b
-    allocate(pairs(npair)%v(upt%icgn_blocks(a)%nrow, upt%icgn_blocks(b)%nrow))
-    pairs(npair)%v = (0.0_dp, 0.0_dp)
+    allocate(pairs(npair)%h(upt%icgn_blocks(a)%nrow, upt%icgn_blocks(b)%nrow))
+    pairs(npair)%h = (0.0_dp, 0.0_dp)
+    pair_map(a,b) = npair
     pair_slot_icgn = npair
   end function pair_slot_icgn
 
@@ -2066,15 +2181,16 @@ contains
     integer, intent(inout) :: npair
     integer, intent(out) :: ierr
     integer :: i, j, k, r, c, a, b, ia, ib, nnz, pos, slot, nred
-    integer, allocatable :: roff(:), rowcount(:), next(:)
+    integer, allocatable :: roff(:), rowcount(:), next(:), pair_map(:,:)
     complex(dp), allocatable :: g_full(:,:)
     ierr = 0; nred = upt%icgn_reduced_dim
     allocate(roff(upt%icgn_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icgn_num_blocks; roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret; end do
     if (allocated(pairs)) call destroy_pairs(pairs)
     allocate(pairs(max(1, upt%ham%nnz))); npair = 0
+    allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
 
-    ! Project with full S
+    ! Collect physical H_ab first; project each pair once at matrix level.
     do r = 1, upt%ham%nrow
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
@@ -2082,18 +2198,20 @@ contains
           if (upt%icgn_blocks(a)%nrow == 0 .or. upt%icgn_blocks(b)%nrow == 0) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           ia = min(a,b); ib = max(a,b)
-          slot = pair_slot_icgn(pairs, npair, ia, ib, upt)
+          slot = pair_slot_icgn(pairs, npair, ia, ib, upt, pair_map)
           if (slot == 0) then; ierr = 11; return; end if
           if (a < b) then
-             call add_outer(pairs(slot)%v, &
-                  upt%icgn_blocks(a)%S_full(local(r),:), &
-                  upt%icgn_blocks(b)%S_full(local(c),:), upt%ham%M(k))
+             pairs(slot)%h(local(r),local(c)) = pairs(slot)%h(local(r),local(c)) + upt%ham%M(k)
           else
-             call add_outer(pairs(slot)%v, &
-                  upt%icgn_blocks(b)%S_full(local(c),:), &
-                  upt%icgn_blocks(a)%S_full(local(r),:), conjg(upt%ham%M(k)))
+             pairs(slot)%h(local(c),local(r)) = pairs(slot)%h(local(c),local(r)) + conjg(upt%ham%M(k))
           end if
        end do
+    end do
+    deallocate(pair_map)
+
+    do i = 1, npair
+       a = pairs(i)%a; b = pairs(i)%b
+       call project_pair(pairs(i), upt%icgn_blocks(a)%S_full, upt%icgn_blocks(b)%S_full, .true.)
     end do
 
     ! Slice to retained states using retained_idx
