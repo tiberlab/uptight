@@ -46,16 +46,38 @@ MODULE JD_DIAG
   USE sort               !Collection of sorting routines
   USE clock
   USE omp_lib 
+  USE iso_c_binding, only: c_char, c_int
 !===========================================================================
 
   IMPLICIT NONE
   PRIVATE
+
+  interface
+    subroutine upt_cg_log_message(message, length) bind(C, name='upt_cg_log_message')
+      import :: c_char, c_int
+      character(kind=c_char), intent(in) :: message(*)
+      integer(c_int), value :: length
+    end subroutine upt_cg_log_message
+  end interface
 
 !===========================================================================
   
   PUBLIC JD_EV
 
 CONTAINS
+
+  subroutine jd_log_dispatch(message)
+    character(*), intent(in) :: message
+    character(kind=c_char), allocatable :: c_message(:)
+    integer :: i, n
+    n = len_trim(message)
+    allocate(c_message(max(1,n)))
+    do i = 1, n
+      c_message(i) = message(i:i)
+    end do
+    call upt_cg_log_message(c_message, int(n, c_int))
+    deallocate(c_message)
+  end subroutine jd_log_dispatch
 
 !===========================================================================
 !
@@ -197,6 +219,7 @@ SUBROUTINE JD_EV(H, U, n_spin, min_step, long_step, max_step, &
 
     SELECT CASE (solver_flag_jd)
     CASE(0)
+      if (id .eq. 0) call jd_log_dispatch('JD-DISPATCH solver_flag_jd=0 -> jd_cpu_no_pc_split_mxprec_pal')
     
 #ifdef UPT_MPI
 
@@ -213,6 +236,7 @@ SUBROUTINE JD_EV(H, U, n_spin, min_step, long_step, max_step, &
 
        
       CASE(1)
+      if (id .eq. 0) call jd_log_dispatch('JD-DISPATCH solver_flag_jd=1 -> jd_single_gpu_no_pc_split_mxprec_pal')
 
 #if ( defined __CUDA && defined UPT_MPI )
        
@@ -226,6 +250,7 @@ SUBROUTINE JD_EV(H, U, n_spin, min_step, long_step, max_step, &
 #ifdef __CUDA
 
       CASE(2)
+      if (id .eq. 0) call jd_log_dispatch('JD-DISPATCH solver_flag_jd=2 -> jd_single_gpu_no_pc_split_mxprec')
 
       CALL jd_single_gpu_no_pc_split_mxprec(n_ham, size(H%M), size(H_imag%M), H_real%M, H_real%Mi,&
                                             H_real%Mj, H_imag%M, H_imag%Mi, H_imag%Mj, H%sparse_fmt, &

@@ -277,7 +277,7 @@ program test_supercell
 
   ! Re-build with only CG enabled so prepare is included in the timed region
   call destroy_matrix(upt%ham)
-  call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance)
+  call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance, icg_epsilon)
   call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
      icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
   call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &

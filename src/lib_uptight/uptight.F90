@@ -408,12 +408,17 @@ contains
 
   end subroutine UPT_hamiltonian
 
-  subroutine UPT_configure_coarse_graining(upt, enabled, nblocks, emin, emax, imbalance)
+  subroutine UPT_configure_coarse_graining(upt, enabled, nblocks, emin, emax, imbalance, epsilon)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled
     integer, intent(in) :: nblocks
     real(dp), intent(in) :: emin, emax, imbalance
-    call cg_configure(upt, enabled, nblocks, emin, emax, imbalance)
+    real(dp), intent(in), optional :: epsilon
+    real(dp) :: cg_epsilon
+
+    cg_epsilon = upt%icg_epsilon
+    if (present(epsilon)) cg_epsilon = epsilon
+    call cg_configure(upt, enabled, nblocks, emin, emax, cg_epsilon, imbalance)
   end subroutine UPT_configure_coarse_graining
 
   subroutine UPT_configure_coarse_graining_mode(upt, mode, subsolver, subsolver_type, &
@@ -426,7 +431,7 @@ contains
     real(dp), intent(in) :: top_buffer, bottom_buffer, epsilon, expansion_energy, pi_tol, sub_tolerance
     logical, intent(in) :: check_neumann_convergence
 
-    call cg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, imbalance)
+    call cg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, epsilon, imbalance)
     upt%cg_check_neumann_convergence = check_neumann_convergence
     upt%cg_pi_maxiter = pi_maxiter
     upt%cg_pi_tol = pi_tol
@@ -435,7 +440,7 @@ contains
         imbalance, .false., pi_maxiter, pi_tol)
     select case (mode)
     case (1)
-       call cg_configure(upt, .true., nblocks, energy_min, energy_max, imbalance)
+       call cg_configure(upt, .true., nblocks, energy_min, energy_max, epsilon, imbalance)
         upt%cg_subsolver = subsolver; upt%cg_subsolver_type = subsolver_type
         upt%cg_sub_tolerance = sub_tolerance
     case (2)

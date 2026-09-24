@@ -102,6 +102,7 @@ extern "C" {
 void jd_single_gpu_no_pc_split_mxprec_pal_(int * N_ham, int * Size_Mat_real, int * Size_Mat_img, float * valptr_real, int * rowptr_real, int * colptr_real, float * valptr_img, int * rowptr_img, int * colptr_img, char * sparse_fmt, int * Band_type, double * JD_tol, double * Shift,  int * JD_Min_step, int * JD_Max_step, int * Num_ev, double * lambda_out, cuDoubleComplex * eigen_vec_out, double * LS_tol, int * LS_restart, int *LS_maxit, int *col_ind_low, int *col_ind_high, int *shift_init, int *shift_end, int * NUM_PROCS, int * ID,  int * UPT_COMM);
 
 void setdevicebeforeinit_();
+void upt_cg_log_message(const char* message, int length);
 
 } 
 
@@ -122,7 +123,10 @@ printf("gpu_env = %s, gpu = %d\n", gpu_env, gpu);
   return cudaSetDevice(gpu);
 }
 
-
+static void jd_file_log(const char *message)
+{
+  upt_cg_log_message(message, (int)strlen(message));
+}
 
 
 void jd_single_gpu_no_pc_split_mxprec_pal_(int * N_ham, int * Size_Mat_real, int * Size_Mat_img, float * valptr_real, int * rowptr_real, int * colptr_real, float * valptr_img, int * rowptr_img, int * colptr_img, char * sparse_fmt, int * Band_type, double * JD_tol, double * Shift,  int *JD_Min_step, int * JD_Max_step, int * Num_ev, double * lambda_out, cuDoubleComplex * eigen_vec_out, double * LS_tol, int * LS_restart, int *LS_maxit, int *col_ind_low, int *col_ind_high, int *shift_init, int *shift_end, int * NUM_PROCS, int * ID,  int * UPT_COMM)
@@ -148,6 +152,12 @@ double ls_tol = * LS_tol;
 int ls_restart = * LS_restart;
 int ls_maxit = * LS_maxit;
 int band_type = * Band_type;
+double jd_trace_t0 = MPI_Wtime();
+double jd_outer_t0 = 0.0;
+double jd_gmres_t0 = 0.0;
+double jd_spmv_t0 = 0.0;
+
+if(id == 0) { printf("[JD-GPU] entry N=%d real_nnz=%d imag_nnz=%d fmt=%c band=%d tol=% .3e shift=% .6e jd_min=%d jd_max=%d num_ev=%d ls_tol=% .3e ls_restart=%d ls_maxit=%d procs=%d\n", n_ham, size_mat_real, size_mat_img, *sparse_fmt, band_type, *JD_tol, shift, jd_min_step, jd_max_step, num_ev, ls_tol, ls_restart, ls_maxit, num_procs); fflush(stdout); char msg[512]; snprintf(msg, sizeof(msg), "GPU-JD entry N=%d real_nnz=%d imag_nnz=%d fmt=%c band=%d tol=% .3e shift=% .6e jd_min=%d jd_max=%d num_ev=%d ls_tol=% .3e ls_restart=%d ls_maxit=%d procs=%d", n_ham, size_mat_real, size_mat_img, *sparse_fmt, band_type, *JD_tol, shift, jd_min_step, jd_max_step, num_ev, ls_tol, ls_restart, ls_maxit, num_procs); jd_file_log(msg); }
 
 //printf("JD_tol %f\n", *JD_tol);
 
@@ -531,6 +541,8 @@ double teta = 0;
 
 while(k < num_ev)
 {
+    jd_outer_t0 = MPI_Wtime();
+    if(id == 0) { printf("[JD-GPU] outer begin k=%d count=%d\n", k, count); fflush(stdout); char msg[128]; snprintf(msg, sizeof(msg), "GPU-JD outer begin k=%d count=%d", k, count); jd_file_log(msg); }
 
     cudaStat1 = cudaMalloc((void**)&w_device,n_ham*sizeof(cuDoubleComplex));
                 cudaMemset(w_device, 0, n_ham*sizeof(cuDoubleComplex));
@@ -557,12 +569,14 @@ while(k < num_ev)
 
       // vct = A * t;
       //cusp_status= cusparseZcsrmv(cusp_handle,CUSPARSE_OPERATION_NON_TRANSPOSE, n_ham, n_ham, size_mat_real, &scalar_1, cusp_descra, valptr_device, rowptr_device, colptr_device, t_device, &scalar_2, vct_device);
+     jd_spmv_t0 = MPI_Wtime();
 
      spmv_csr_hybrid_kernel<<<numBlocksMul, BLOCK_SIZE_MUL, 0, stream3>>>((shift_end_Mi[id]-shift_init_Mi[id])+1, rowptr_device_real, colptr_device_real, valptr_device_real, t_device, vct_device, repeat, coop, shift_init_Mi[id]-1);
-
      spmv_csr_hybrid_kernel<<<numBlock, BLOCK_SIZE, 0, stream4>>>((shift_end_Mi[id]-shift_init_Mi[id])+1, rowptr_device_img, colptr_device_img, valptr_device_img, t_device, mxv_temp_device, shift_init_Mi[id]-1);
 
+
      cudaStat1=cudaDeviceSynchronize();
+     if(id == 0) { double wall = MPI_Wtime() - jd_spmv_t0; printf("[JD-GPU] initial SpMV wall=% .3f s\n", wall); fflush(stdout); char msg[128]; snprintf(msg, sizeof(msg), "GPU-JD initial SpMV wall=% .3f s", wall); jd_file_log(msg); }
 
      vct_pls_scl_mul_vct_kernel_jd<<<numBlock, threadPerBlock>>>(&vct_device[shift_init_Mi[id]-1], &mxv_temp_device[shift_init_Mi[id]-1], jcmpx, (shift_end_Mi[id]-shift_init_Mi[id])+1);
 
@@ -1438,7 +1452,10 @@ if(cubl_status != CUBLAS_STATUS_SUCCESS)
      cudaStat1=cudaDeviceSynchronize();
      MPI_Barrier(upt_comm); 
 
+     jd_gmres_t0 = MPI_Wtime();
      gmres(valptr_device_real, rowptr_device_real, colptr_device_real, valptr_device_img, rowptr_device_img, colptr_device_img, n_ham, size_mat_real, r_device, ls_tol, ls_restart, ls_maxit, Q_bar_device, t_device, numBlock, threadPerBlock, coop, repeat, numBlocksMul, k, cusp_handle, cusp_descra, cubl_handle, ls_counter, shift_init_Mi, shift_end_Mi, overlap_high, overlap_low, num_procs, id,  upt_comm);
+     cudaStat1 = cudaDeviceSynchronize();
+     if(id == 0) { double wall = MPI_Wtime() - jd_gmres_t0; printf("[JD-GPU] GMRES done k=%d wall=% .3f s ls_total=%d\n", k, wall, *ls_counter); fflush(stdout); char msg[160]; snprintf(msg, sizeof(msg), "GPU-JD GMRES done k=%d wall=% .3f s ls_total=%d", k, wall, *ls_counter); jd_file_log(msg); }
 
      cudaStat1=cudaDeviceSynchronize();
      MPI_Barrier(upt_comm); 
@@ -1518,6 +1535,7 @@ if(cubl_status != CUBLAS_STATUS_SUCCESS)
      }
 
 count = count+1;
+if(id == 0) { double wall = MPI_Wtime() - jd_outer_t0; printf("[JD-GPU] outer end k=%d count=%d outer_wall=% .3f s norm_r=% .6e\n", k, count, wall, *norm_r); fflush(stdout); char msg[160]; snprintf(msg, sizeof(msg), "GPU-JD outer end k=%d count=%d outer_wall=% .3f s norm_r=% .6e", k, count, wall, *norm_r); jd_file_log(msg); }
 //printf("count = %d\n", count);
 //if(count == 30)
 //exit(0);
@@ -1527,6 +1545,7 @@ count = count+1;
 
 printf("Total JD count = %d\n", count);
 printf("Total MxV iterations = %d\n", *ls_counter+count+(*ls_counter/ls_restart)); 
+if(id == 0) { double wall = MPI_Wtime() - jd_trace_t0; printf("[JD-GPU] total wall=% .3f s\n", wall); fflush(stdout); char msg[128]; snprintf(msg, sizeof(msg), "GPU-JD total wall=% .3f s", wall); jd_file_log(msg); }
 
 
 }// end of JD

@@ -48,16 +48,17 @@ module coarse_grain
 
 contains
 
-  subroutine cg_configure(upt, enabled, nblocks, emin, emax, imbalance)
+  subroutine cg_configure(upt, enabled, nblocks, emin, emax, epsilon, imbalance)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled
     integer, intent(in) :: nblocks
-    real(dp), intent(in) :: emin, emax, imbalance
+    real(dp), intent(in) :: emin, emax, epsilon, imbalance
     call cg_clear(upt)
     upt%cg_enabled = enabled
     upt%cg_num_blocks = nblocks
     upt%cg_emin = emin
     upt%cg_emax = emax
+    upt%icg_epsilon = epsilon
     upt%cg_imbalance = imbalance
   end subroutine cg_configure
 
@@ -210,8 +211,9 @@ contains
     if (nedge == 0 .or. max_weight == 0.0_dp) then
        ierr = 7; write(*,*) '(cg) atom graph has no couplings'; return
     end if
-    write(line,'(a,i0,a,i0,a,i0)') 'mode=cg graph scan complete, orbitals=', n, &
-         ', stored_nnz=', upt%ham%nnz, ', interblock_entries=', nedge
+    write(line,'(a,i0,a,a1,a,i0,a,i0)') 'mode=cg graph scan complete, orbitals=', n, &
+         ', sparse_format=', upt%ham%sparse_fmt, ', stored_nnz=', upt%ham%nnz, &
+         ', interblock_entries=', nedge
     call cg_log_progress(upt, trim(line))
     allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
     xadj(1) = 0_c_int
@@ -314,8 +316,8 @@ contains
 
     call build_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, ierr)
     if (ierr /= 0) return
-    write(line,'(a,i0,a,i0)') 'mode=cg reduced Hamiltonian build complete, active_pairs=', npair, &
-         ', reduced_nnz=', upt%cg_ham%nnz
+    write(line,'(a,i0,a,a1,a,i0)') 'mode=cg reduced Hamiltonian build complete, active_pairs=', npair, &
+         ', sparse_format=', upt%cg_ham%sparse_fmt, ', reduced_nnz=', upt%cg_ham%nnz
     call cg_log_progress(upt, trim(line))
     call destroy_pairs(pairs)
     upt%cg_ready = .true.
@@ -557,9 +559,10 @@ contains
     type(CGPair), allocatable, intent(out) :: pairs(:)
     integer, intent(out) :: npair, ierr
     integer :: i,j,k,r,c,a,b,ia,ib,nnz,pos,slot,nred,na
-    integer(kind=8) :: timer_start, timer_end, timer_rate
+    integer(kind=8) :: nnz64, timer_start, timer_end, timer_rate
     real(dp) :: timer_seconds
     character(len=256) :: line
+    character(1) :: output_fmt
     integer, allocatable :: roff(:), rowcount(:), next(:), pair_map(:,:)
     integer, allocatable :: win_a(:)   ! indices of retained states within S_full
     ierr=0; nred=upt%cg_reduced_dim
@@ -621,8 +624,8 @@ contains
     call system_clock(timer_end)
     timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
     call cg_log_timing(upt, 'CG CSR projection assembly', timer_seconds)
-    write(line,'(a,i0,a,i0)') 'mode=cg interblock CSR projection assembly complete, active_pairs=', npair, &
-         ', ham_nnz=', upt%ham%nnz
+    write(line,'(a,i0,a,a1,a,i0)') 'mode=cg interblock CSR projection assembly complete, active_pairs=', npair, &
+         ', sparse_format=', upt%ham%sparse_fmt, ', ham_nnz=', upt%ham%nnz
     call cg_log_progress(upt, trim(line))
 
     ! Finish V_AB = Q_A^H T with one dense GEMM per active pair.
@@ -631,6 +634,22 @@ contains
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
        call project_accumulated_pair_cg(pairs(i), upt%cg_blocks(a)%q)
+
+       ! CG keeps all retained states, but sparsifies the projected couplings
+       ! using the same criterion as ICG/ICGN:
+       !   |V_ij|^2 / |E_i-E_j| >= epsilon
+       ! Couplings below the threshold are explicitly zeroed; the states
+       ! themselves remain in the reduced Hamiltonian.
+       do j = 1, size(pairs(i)%v,1)
+          do k = 1, size(pairs(i)%v,2)
+             if (abs(pairs(i)%v(j,k))**2 / &
+                 max(abs(upt%cg_blocks(a)%eval(j) - upt%cg_blocks(b)%eval(k)), tiny(1.0_dp)) < &
+                 upt%icg_epsilon) then
+                pairs(i)%v(j,k) = (0.0_dp,0.0_dp)
+             end if
+          end do
+       end do
+
        if (i <= 5 .or. mod(i,100) == 0 .or. i == npair) then
           write(line,'(a,i0,a,i0,a,i0,a,i0)') 'mode=cg interblock projection progress, pair=', i, &
                '/', npair, ', block_a=', a, ', block_b=', b
@@ -639,8 +658,10 @@ contains
     end do
     call system_clock(timer_end)
     timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
-    call cg_log_timing(upt, 'CG dense left projection', timer_seconds)
-    call cg_log_progress(upt, 'mode=cg interblock projection complete')
+    call cg_log_timing(upt, 'CG dense left projection + epsilon filtering', timer_seconds)
+    write(line,'(a,es12.4)') 'mode=cg coupling filter epsilon=', upt%icg_epsilon
+    call cg_log_progress(upt, trim(line))
+    call cg_log_progress(upt, 'mode=cg interblock projection + epsilon filtering complete')
     call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: projection phase exited')
 
     ! --- Step 3: Free S_full (no longer needed) ---
@@ -660,27 +681,56 @@ contains
     call cg_log_timing(upt, 'CG S_full/evals_full deallocation', timer_seconds)
     call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: S_full/evals_full deallocated')
 
-    ! --- Step 4: Build CSR reduced Hamiltonian (same structure as before) ---
+    ! --- Step 4: Build CSR reduced Hamiltonian ---
+    ! Keep the reduced Hamiltonian in the same sparse format as the input.
+    ! In particular, CUDA JD consumes the CSR entries directly; it does not
+    ! reconstruct the missing Hermitian triangle for sparse_fmt='U'.
+    ! After the CG coupling filter, the full representation fits safely in
+    ! the current 32-bit CSR index space for the present test case.
+    output_fmt = upt%ham%sparse_fmt
+
     call system_clock(timer_start, timer_rate)
     allocate(rowcount(nred),next(nred)); rowcount=1
     do i=1,npair
        a=pairs(i)%a; b=pairs(i)%b
-       select case(upt%ham%sparse_fmt)
-       case('F')
-          rowcount(roff(a):roff(a+1)-1)=rowcount(roff(a):roff(a+1)-1)+upt%cg_blocks(b)%nret
-          rowcount(roff(b):roff(b+1)-1)=rowcount(roff(b):roff(b+1)-1)+upt%cg_blocks(a)%nret
-       case('L')
-          rowcount(roff(b):roff(b+1)-1)=rowcount(roff(b):roff(b+1)-1)+upt%cg_blocks(a)%nret
+       select case(output_fmt)
+       case('L', 'l')
+          do j = 1, upt%cg_blocks(b)%nret
+             rowcount(roff(b)+j-1) = rowcount(roff(b)+j-1) + &
+                  count(abs(pairs(i)%v(:,j)) > 0.0_dp)
+          end do
+       case('U', 'u')
+          do j = 1, upt%cg_blocks(a)%nret
+             rowcount(roff(a)+j-1) = rowcount(roff(a)+j-1) + &
+                  count(abs(pairs(i)%v(j,:)) > 0.0_dp)
+          end do
        case default
-          rowcount(roff(a):roff(a+1)-1)=rowcount(roff(a):roff(a+1)-1)+upt%cg_blocks(b)%nret
+          ! F: emit both Hermitian triangles.
+          do j = 1, upt%cg_blocks(a)%nret
+             rowcount(roff(a)+j-1) = rowcount(roff(a)+j-1) + &
+                  count(abs(pairs(i)%v(j,:)) > 0.0_dp)
+          end do
+          do j = 1, upt%cg_blocks(b)%nret
+             rowcount(roff(b)+j-1) = rowcount(roff(b)+j-1) + &
+                  count(abs(pairs(i)%v(:,j)) > 0.0_dp)
+          end do
        end select
     end do
-    nnz=sum(rowcount)
-    write(line,'(a,i0,a,i0)') 'mode=cg reduced Hamiltonian: CSR sizing, nred=', nred, ', nnz=', nnz
+
+    nnz64 = sum(int(rowcount,kind=8))
+    if (nnz64 > int(huge(0),kind=8)) then
+       ierr = 15
+       write(*,'(a,a1,a,i0)') '(cg) reduced CSR still exceeds default INTEGER capacity, format=', output_fmt, &
+            ', nnz=', nnz64
+       return
+    end if
+    nnz = int(nnz64)
+    write(line,'(a,i0,a,i0,a,a1)') 'mode=cg reduced Hamiltonian: CSR sizing, nred=', nred, &
+         ', nnz=', nnz64, ', format=', output_fmt
     call cg_log_progress(upt, trim(line))
     call create_matrix(upt%cg_ham,nred,nred,nnz)
     call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: CSR allocation complete')
-    upt%cg_ham%sparse_fmt=upt%ham%sparse_fmt; upt%cg_ham%Mi(1)=1
+    upt%cg_ham%sparse_fmt=output_fmt; upt%cg_ham%Mi(1)=1
     do i=1,nred; upt%cg_ham%Mi(i+1)=upt%cg_ham%Mi(i)+rowcount(i); end do
     next=upt%cg_ham%Mi(1:nred)
     do a=1,upt%cg_num_blocks
@@ -691,7 +741,7 @@ contains
     end do
     do i=1,npair
        a=pairs(i)%a; b=pairs(i)%b
-       call emit_pair(upt%cg_ham,pairs(i),roff(a),roff(b),upt%ham%sparse_fmt,next)
+       call emit_pair(upt%cg_ham,pairs(i),roff(a),roff(b),output_fmt,next)
     end do
     call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: pair emission complete')
     upt%cg_ham%nnz=nnz
@@ -789,11 +839,13 @@ contains
     integer::i,j,k
     if(fmt/='L') then
        do i=1,size(p%v,1); do j=1,size(p%v,2)
+          if (abs(p%v(i,j)) == 0.0_dp) cycle
           k=next(oa+i-1); h%Mj(k)=ob+j-1; h%M(k)=p%v(i,j); next(oa+i-1)=k+1
        end do; end do
     end if
     if(fmt=='F' .or. fmt=='L') then
        do j=1,size(p%v,2); do i=1,size(p%v,1)
+          if (abs(p%v(i,j)) == 0.0_dp) cycle
           k=next(ob+j-1); h%Mj(k)=oa+i-1; h%M(k)=conjg(p%v(i,j)); next(ob+j-1)=k+1
        end do; end do
     end if
