@@ -3,7 +3,7 @@ module coarse_grain
    use, intrinsic :: iso_c_binding, only : c_int, c_double, c_char
   use precision, only : dp
   use upt_param, only : OUPT, CGBlock
-  use sparse_matrix, only : CSR, create_matrix, destroy_matrix
+  use sparse_matrix, only : CSR, create_matrix, destroy_matrix, write_csr
       use mpi_globals, only : num_procs, id0, id, shift_init, shift_end, &
          shift_init_Mi, shift_end_Mi
    use jd_diag, only : JD_EV
@@ -745,6 +745,25 @@ contains
     end do
     call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: pair emission complete')
     upt%cg_ham%nnz=nnz
+
+    ! Dump the exact reduced CSR passed to the eigenvalue solver for
+    ! independent validation outside TIBERCAD.  The binary layout is:
+    !   int32 nrow, int32 nnz, complex(dp) M, int32 Mj, int32 Mi.
+    ! A small text sidecar records the sparse format used by the CSR.
+    open(unit=91, file='cg_reduced_hamiltonian.dat', access='stream', &
+         form='unformatted', status='replace')
+    write(91) nred, nnz
+    write(91) upt%cg_ham%M
+    write(91) upt%cg_ham%Mj
+    write(91) upt%cg_ham%Mi
+    close(91)
+    open(unit=91, file='cg_reduced_hamiltonian.meta', form='formatted', status='replace')
+    write(91,'(a,i0)') 'n=', nred
+    write(91,'(a,i0)') 'nnz=', nnz
+    write(91,'(a,a1)') 'format=', output_fmt
+    close(91)
+    call cg_log_progress(upt, 'mode=cg reduced Hamiltonian dump: cg_reduced_hamiltonian.dat')
+
     call create_matrix(upt%cg_U,nred,nred,nred)
     upt%cg_U%sparse_fmt='F'; upt%cg_U%Mi(1)=1
     do i=1,nred
