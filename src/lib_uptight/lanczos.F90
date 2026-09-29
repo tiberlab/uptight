@@ -231,6 +231,24 @@ SUBROUTINE LANCZOS_EV(H, U, n_spin, min_step, long_step, max_step, &
 #endif
          end if
       endif
+    CASE(3)
+      if (id0 .and. verbose.gt.0) THEN
+         write(*,*) ' '
+         write(*,*) 'Shifted Lanczos solver (serial CPU, thick restart)'
+      end if
+      if (num_procs.gt.1) then
+         write(*,*) 'ERROR: shifted Lanczos (solver_flag 3) does not support MPI'
+         call throw_solve_exception(ERR_LANCZ_DIAG)
+      end if
+    CASE(4)
+      if (id0 .and. verbose.gt.0) THEN
+         write(*,*) ' '
+         write(*,*) 'Shift-and-invert Lanczos solver (serial CPU)'
+      end if
+      if (num_procs.gt.1) then
+         write(*,*) 'ERROR: shift-invert Lanczos (solver_flag 4) does not support MPI'
+         call throw_solve_exception(ERR_LANCZ_DIAG)
+      end if
 #ifdef __CUDA
     CASE(1)
        write(*,*) 'GPU accelerated'
@@ -336,6 +354,16 @@ SUBROUTINE LANCZOS_EV(H, U, n_spin, min_step, long_step, max_step, &
                  n_ham, fast_tol, long_tol, ort_tol, counter, & 
                  res_flag, eigen_vectors, nr_eigv, energy, deltaE, verbose)
 #endif
+
+         CASE(3)
+            CALL thick_restart_lanczos_ev( H%M, H%Mi, H%Mj, H%sparse_fmt, &
+                 max_step, eigen_seed, n_ham, long_tol, counter, &
+                 eigen_vectors, nr_eigv, sign, energy, deltaE, verbose )
+
+         CASE(4)
+            CALL shift_invert_lanczos_ev( H%M, H%Mi, H%Mj, H%sparse_fmt, &
+                 max_step, eigen_seed, n_ham, long_tol, counter, &
+                 eigen_vectors, nr_eigv, sign, energy, deltaE, verbose )
 
 #ifdef __CUDA
          CASE(1)
@@ -1548,6 +1576,795 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
     !=========================================================================
 
   END SUBROUTINE fast_lanczos_ev_old
+
+! ==========================================================================
+!
+! Thick-restart Lanczos (Wu-Simon, i.e. Hermitian Krylov-Schur), serial CPU.
+!
+! Finds ONE eigenpair of the Hermitian matrix B = H - shift (the shift was
+! already applied to M by LANCZOS_EV), namely the eigenvalue closest to zero
+! on the side selected by sgn (+1: conduction, -1: valence).
+!
+! Differences with fast_lanczos_ev_old:
+!   - works directly on B (NOT on B^2): one H*v per step instead of 4
+!   - stores the Krylov basis (ncv+1 vectors) and uses full
+!     re-orthogonalization
+!   - restarts keeping the nkeep Ritz vectors closest to zero (thick restart)
+!   - convergence test on the residual norm ||B x - theta x|| < long_tol
+!
+! Tunable at run time (no recompilation), environment variables:
+!   UPT_TRL_NCV   : Krylov subspace size        (default 40)
+!   UPT_TRL_NKEEP : Ritz vectors kept on restart (default NCV/2)
+!
+! On exit: counter = total number of H*v products,
+!          energy  = <x|B|x> (relative to the shift),
+!          deltaE  = ||B x - energy x||.
+!
+! ==========================================================================
+  SUBROUTINE thick_restart_lanczos_ev( M, Mi, Mj, sparse_fmt, max_step, &
+        eigen_seed, n_ham, long_tol, counter, eigen_v, nr_eigv, sgn, &
+        energy, deltaE, verbose )
+
+    COMPLEX ( dp ), DIMENSION(:), POINTER :: M
+    INTEGER,        DIMENSION(:), POINTER :: Mi  !ROWPNT
+    INTEGER,        DIMENSION(:), POINTER :: Mj  !COLIND
+    CHARACTER(1)                  :: sparse_fmt
+
+    INTEGER, INTENT( IN ) :: max_step   ! budget of H*v products
+    INTEGER, INTENT( IN ) :: n_ham, nr_eigv, sgn, verbose
+    REAL ( dp ), INTENT( IN ) :: long_tol
+    COMPLEX( dp ), DIMENSION( : ), INTENT( INOUT ) :: eigen_seed
+    INTEGER, INTENT( INOUT ) :: counter
+    COMPLEX( dp ), DIMENSION( :, : ), INTENT( IN ) :: eigen_v
+    REAL ( dp ), INTENT( OUT ) :: energy
+    REAL ( dp ), INTENT( OUT ) :: deltaE
+
+    COMPLEX( dp ), PARAMETER :: cone  = ( 1.0D0, 0.0D0 )
+    COMPLEX( dp ), PARAMETER :: czero = ( 0.0D0, 0.0D0 )
+
+    COMPLEX( dp ), ALLOCATABLE :: V(:,:), Hm(:,:), S(:,:), Ssel(:,:)
+    COMPLEX( dp ), ALLOCATABLE :: Vsec(:,:), tmp(:,:)
+    COMPLEX( dp ), ALLOCATABLE :: hv(:), h2(:), xv(:), wv(:), sv(:), work(:)
+    REAL( dp ),    ALLOCATABLE :: theta(:), rwork(:), temp_v(:)
+    INTEGER,       ALLOCATABLE :: idx(:)
+
+    REAL( dp ) :: beta, betam, resbest, aval, t_mv, t_tot
+    INTEGER    :: ncv, nkeep, nk, mm, k, j, i, l, it, best, cyc
+    INTEGER    :: err, info, blk, i0, nb
+    LOGICAL    :: converged, hit_max
+    INTEGER(8) :: tc0, tc1, tc_start, trate
+
+    !=========================================================================
+    ! Parameters
+    !=========================================================================
+    ncv = 40
+    CALL trl_env_int( 'UPT_TRL_NCV', ncv, 8 )
+    ncv = MIN( ncv, n_ham )
+    nkeep = ncv / 2
+    CALL trl_env_int( 'UPT_TRL_NKEEP', nkeep, 1 )
+    nkeep = MAX( 1, MIN( nkeep, ncv - 2 ) )
+    blk = MIN( 8192, n_ham )
+
+    ALLOCATE( V( n_ham, ncv + 1 ), Hm( ncv, ncv ), S( ncv, ncv ), &
+              Ssel( ncv, ncv ), Vsec( blk, ncv ), tmp( blk, ncv ), &
+              hv( ncv ), h2( ncv ), xv( n_ham ), wv( n_ham ), sv( ncv ), &
+              work( 2 * ncv ), theta( ncv ), rwork( 3 * ncv ), &
+              temp_v( n_ham ), idx( ncv ), STAT = err )
+    IF ( err .NE. 0 ) CALL alloc_error( 'lanczos_diag', 'thick_restart', 'work arrays' )
+
+    CALL SYSTEM_CLOCK( tc_start, trate )
+    t_mv = 0.0D0
+
+    IF ( verbose .GT. 0 ) THEN
+       WRITE(*,*)
+       WRITE(*,'(a,i0,a,i0,a,i0,a,es9.2)') &
+            ' (thick-restart Lanczos) n=', n_ham, '  ncv=', ncv, &
+            '  nkeep=', nkeep, '  tol=', long_tol
+       WRITE(*,'(a,2x,a,4x,a,10x,a,12x,a)') 'type', 'cycle', 'matvec', &
+            'ritz value', 'residual'
+       WRITE(*,'(73("-"))')
+    END IF
+
+    !=========================================================================
+    ! Random start vector, orthogonal to the previously found states
+    !=========================================================================
+    CALL RANDOM_NUMBER( temp_v )
+    xv = CMPLX( temp_v - 0.5D0, 0.0D0, dp )
+    CALL RANDOM_NUMBER( temp_v )
+    xv = xv + CMPLX( 0.0D0, temp_v - 0.5D0, dp )
+    IF ( nr_eigv .NE. 1 ) CALL project_out( xv, eigen_v, nr_eigv - 1 )
+    beta = SQRT( REAL( DOT_PRODUCT( xv, xv ), dp ) )
+    V( :, 1 ) = xv / beta
+
+    Hm = czero
+    k = 0
+    cyc = 0
+    betam = 0.0D0
+    best = 1
+    resbest = 0.0D0
+    hit_max = .FALSE.
+    converged = .FALSE.
+
+    DO WHILE ( .NOT. converged )
+
+       cyc = cyc + 1
+
+       !======================================================================
+       ! Expand the Krylov basis from k+1 to ncv vectors
+       !======================================================================
+       mm = ncv
+       betam = 0.0D0
+
+       DO j = k + 1, ncv
+
+          xv = V( :, j )
+
+          CALL SYSTEM_CLOCK( tc0 )
+          CALL sprs_ax( M, Mj, Mi, sparse_fmt, xv, wv )
+          CALL SYSTEM_CLOCK( tc1 )
+          t_mv = t_mv + REAL( tc1 - tc0, dp ) / REAL( trate, dp )
+          counter = counter + 1
+
+          IF ( nr_eigv .NE. 1 ) CALL project_out( wv, eigen_v, nr_eigv - 1 )
+
+          ! full re-orthogonalization (classical Gram-Schmidt, twice)
+          CALL ZGEMV( 'C', n_ham, j, cone, V, n_ham, wv, 1, czero, hv, 1 )
+          CALL ZGEMV( 'N', n_ham, j, -cone, V, n_ham, hv, 1, cone, wv, 1 )
+          CALL ZGEMV( 'C', n_ham, j, cone, V, n_ham, wv, 1, czero, h2, 1 )
+          CALL ZGEMV( 'N', n_ham, j, -cone, V, n_ham, h2, 1, cone, wv, 1 )
+          hv( 1:j ) = hv( 1:j ) + h2( 1:j )
+
+          Hm( 1:j, j ) = hv( 1:j )
+          Hm( j, 1:j ) = CONJG( hv( 1:j ) )
+          Hm( j, j )   = CMPLX( REAL( hv( j ), dp ), 0.0D0, dp )
+
+          beta = SQRT( REAL( DOT_PRODUCT( wv, wv ), dp ) )
+
+          ! invariant subspace found: Ritz pairs are exact
+          IF ( beta .LE. 1.0D-13 * MAX( 1.0D0, ABS( REAL( hv( j ), dp ) ) ) ) THEN
+             mm = j
+             betam = 0.0D0
+             V( :, j + 1 ) = czero
+             EXIT
+          END IF
+
+          V( :, j + 1 ) = wv / beta
+
+          IF ( j .LT. ncv ) THEN
+             Hm( j + 1, j ) = CMPLX( beta, 0.0D0, dp )
+             Hm( j, j + 1 ) = CMPLX( beta, 0.0D0, dp )
+          ELSE
+             betam = beta
+          END IF
+
+       END DO
+
+       !======================================================================
+       ! Diagonalize the projected matrix (Hermitian, size mm x mm)
+       !======================================================================
+       S( 1:mm, 1:mm ) = Hm( 1:mm, 1:mm )
+       CALL ZHEEV( 'V', 'U', mm, S, ncv, theta, work, 2 * ncv, rwork, info )
+       IF ( info .NE. 0 ) call throw_solve_exception(ERR_LANCZ_DIAG)
+
+       !======================================================================
+       ! Wanted Ritz value: closest to zero on the requested side
+       ! (fallback: closest to zero on any side, handled as "folded" by caller)
+       !======================================================================
+       best = 0
+       DO i = 1, mm
+          IF ( theta( i ) * REAL( sgn, dp ) .GE. 0.0D0 ) THEN
+             IF ( best .EQ. 0 ) THEN
+                best = i
+             ELSE IF ( ABS( theta( i ) ) .LT. ABS( theta( best ) ) ) THEN
+                best = i
+             END IF
+          END IF
+       END DO
+       IF ( best .EQ. 0 ) THEN
+          best = 1
+          DO i = 2, mm
+             IF ( ABS( theta( i ) ) .LT. ABS( theta( best ) ) ) best = i
+          END DO
+       END IF
+
+       ! residual norm of the Ritz pair
+       resbest = betam * ABS( S( mm, best ) )
+
+       IF ( verbose .GT. 0 ) THEN
+          WRITE(*,'("trl ",i7,i9,2es22.12)') cyc, counter, theta( best ), resbest
+       END IF
+
+       IF ( resbest .LT. long_tol ) converged = .TRUE.
+
+       IF ( .NOT. converged .AND. counter .GE. max_step ) THEN
+          hit_max = .TRUE.
+          converged = .TRUE.
+       END IF
+
+       IF ( converged ) EXIT
+
+       !======================================================================
+       ! Thick restart: keep the nk Ritz vectors closest to zero
+       !======================================================================
+       DO i = 1, mm
+          idx( i ) = i
+       END DO
+       DO i = 2, mm
+          it = idx( i )
+          aval = ABS( theta( it ) )
+          l = i - 1
+          DO WHILE ( l .GE. 1 )
+             IF ( ABS( theta( idx( l ) ) ) .LE. aval ) EXIT
+             idx( l + 1 ) = idx( l )
+             l = l - 1
+          END DO
+          idx( l + 1 ) = it
+       END DO
+
+       nk = MIN( nkeep, mm - 1 )
+       IF ( .NOT. ANY( idx( 1:nk ) .EQ. best ) ) idx( nk ) = best
+
+       DO i = 1, nk
+          Ssel( 1:mm, i ) = S( 1:mm, idx( i ) )
+       END DO
+
+       ! V(:,1:nk) = V(:,1:mm) * Ssel, processed by blocks of rows
+       DO i0 = 1, n_ham, blk
+          nb = MIN( blk, n_ham - i0 + 1 )
+          Vsec( 1:nb, 1:mm ) = V( i0:i0 + nb - 1, 1:mm )
+          CALL ZGEMM( 'N', 'N', nb, nk, mm, cone, Vsec, blk, Ssel, ncv, &
+                      czero, tmp, blk )
+          V( i0:i0 + nb - 1, 1:nk ) = tmp( 1:nb, 1:nk )
+       END DO
+
+       ! residual vector becomes vector nk+1
+       V( :, nk + 1 ) = V( :, mm + 1 )
+
+       ! projected matrix after the restart: Ritz values + coupling row/column
+       Hm = czero
+       DO i = 1, nk
+          Hm( i, i ) = CMPLX( theta( idx( i ) ), 0.0D0, dp )
+          Hm( nk + 1, i ) = betam * S( mm, idx( i ) )
+          Hm( i, nk + 1 ) = CONJG( Hm( nk + 1, i ) )
+       END DO
+
+       k = nk
+
+    END DO
+
+    !=========================================================================
+    ! Build the Ritz vector, normalize, evaluate energy and true residual
+    !=========================================================================
+    sv( 1:mm ) = S( 1:mm, best )
+    CALL ZGEMV( 'N', n_ham, mm, cone, V, n_ham, sv, 1, czero, xv, 1 )
+    IF ( nr_eigv .NE. 1 ) CALL project_out( xv, eigen_v, nr_eigv - 1 )
+    beta = SQRT( REAL( DOT_PRODUCT( xv, xv ), dp ) )
+    xv = xv / beta
+
+    CALL sprs_ax( M, Mj, Mi, sparse_fmt, xv, wv )
+    counter = counter + 1
+    energy = REAL( DOT_PRODUCT( xv, wv ), dp )
+    wv = wv - energy * xv
+    deltaE = SQRT( REAL( DOT_PRODUCT( wv, wv ), dp ) )
+    eigen_seed = xv
+
+    CALL SYSTEM_CLOCK( tc1 )
+    t_tot = REAL( tc1 - tc_start, dp ) / REAL( trate, dp )
+
+    IF ( hit_max ) THEN
+       WRITE(*,*) 'WARNING: thick-restart Lanczos stopped at max_iter (H*v products) =', &
+                  max_step
+       WRITE(*,*) '         residual =', deltaE, ' (tolerance', long_tol, ')'
+    END IF
+
+    IF ( verbose .GT. 0 ) THEN
+       WRITE(*,'(73("-"))')
+       WRITE(*,'(a,i0,a,i0,a)') ' (thick-restart Lanczos) ', cyc, ' cycles, ', &
+            counter, ' H*v products'
+       WRITE(*,'(a,f10.3,a,f10.3,a)') ' (thick-restart Lanczos) time: total ', &
+            t_tot, ' s, of which H*v ', t_mv, ' s'
+    END IF
+
+  END SUBROUTINE thick_restart_lanczos_ev
+
+! ==========================================================================
+!
+! Shift-and-invert thick-restart Lanczos (serial CPU).
+!
+! B = H - shift is already stored in M (LANCZOS_EV applied the shift).
+! Factorize dense B with LAPACK ZGETRF once, then run thick-restart Lanczos
+! on the inverse operator B^{-1} (each step = one ZGETRS triangular solve).
+! Largest |mu| of B^{-1} maps to the eigenvalue of B closest to zero.
+! Physical residual is evaluated on B: ||B x - theta x||.
+!
+! Same env knobs as the shifted path: UPT_TRL_NCV, UPT_TRL_NKEEP.
+!
+! ==========================================================================
+  SUBROUTINE shift_invert_lanczos_ev( M, Mi, Mj, sparse_fmt, max_step, &
+        eigen_seed, n_ham, long_tol, counter, eigen_v, nr_eigv, sgn, &
+        energy, deltaE, verbose )
+
+    COMPLEX ( dp ), DIMENSION(:), POINTER :: M
+    INTEGER,        DIMENSION(:), POINTER :: Mi
+    INTEGER,        DIMENSION(:), POINTER :: Mj
+    CHARACTER(1)                  :: sparse_fmt
+
+    INTEGER, INTENT( IN ) :: max_step
+    INTEGER, INTENT( IN ) :: n_ham, nr_eigv, sgn, verbose
+    REAL ( dp ), INTENT( IN ) :: long_tol
+    COMPLEX( dp ), DIMENSION( : ), INTENT( INOUT ) :: eigen_seed
+    INTEGER, INTENT( INOUT ) :: counter
+    COMPLEX( dp ), DIMENSION( :, : ), INTENT( IN ) :: eigen_v
+    REAL ( dp ), INTENT( OUT ) :: energy
+    REAL ( dp ), INTENT( OUT ) :: deltaE
+
+    COMPLEX( dp ), PARAMETER :: cone  = ( 1.0D0, 0.0D0 )
+    COMPLEX( dp ), PARAMETER :: czero = ( 0.0D0, 0.0D0 )
+
+    COMPLEX( dp ), ALLOCATABLE :: Bfac(:,:), V(:,:), Hm(:,:), S(:,:), Ssel(:,:)
+    COMPLEX( dp ), ALLOCATABLE :: Vsec(:,:), tmp(:,:)
+    COMPLEX( dp ), ALLOCATABLE :: hv(:), h2(:), xv(:), wv(:), sv(:), work(:)
+    COMPLEX( dp ), ALLOCATABLE :: a_csr(:)
+    REAL( dp ),    ALLOCATABLE :: theta(:), rwork(:), temp_v(:)
+    INTEGER,       ALLOCATABLE :: idx(:), ipiv(:), ia_csr(:), ja_csr(:), idum(:)
+
+    REAL( dp ) :: beta, betam, resbest, aval, t_fac, t_sol, t_tot, mu, th
+    INTEGER    :: ncv, nkeep, nk, mm, k, j, i, l, it, best, cyc
+    INTEGER    :: err, info, blk, i0, nb, p0, p1, col, nnz, nnzu
+    LOGICAL    :: converged, hit_max, use_pardiso, force_dense
+    INTEGER(8) :: tc0, tc1, tc_start, trate
+    CHARACTER(1) :: fmt
+    CHARACTER(LEN=32) :: envstr
+
+#ifdef UPT_PARDISO
+    ! MKL PARDISO state (complex unsymmetric CSR, mtype=13)
+    INTEGER(8) :: pt(64)
+    INTEGER    :: iparm(64), maxfct, mnum, mtype, phase, nrhs, msglvl, perror
+    INTEGER    :: iost
+#endif
+
+    ncv = 40
+    CALL trl_env_int( 'UPT_TRL_NCV', ncv, 8 )
+    ncv = MIN( ncv, n_ham )
+    nkeep = ncv / 2
+    CALL trl_env_int( 'UPT_TRL_NKEEP', nkeep, 1 )
+    nkeep = MAX( 1, MIN( nkeep, ncv - 2 ) )
+    blk = MIN( 8192, n_ham )
+
+    force_dense = .FALSE.
+    CALL GET_ENVIRONMENT_VARIABLE( 'UPT_SI_DENSE', envstr, STATUS = err )
+    IF ( err .EQ. 0 ) THEN
+       IF ( TRIM(envstr) .EQ. '1' .OR. TRIM(envstr) .EQ. 'yes' ) force_dense = .TRUE.
+    END IF
+
+    use_pardiso = .FALSE.
+#ifdef UPT_PARDISO
+    IF ( .NOT. force_dense ) use_pardiso = .TRUE.
+#endif
+
+    ALLOCATE( V( n_ham, ncv + 1 ), Hm( ncv, ncv ), S( ncv, ncv ), &
+              Ssel( ncv, ncv ), Vsec( blk, ncv ), tmp( blk, ncv ), &
+              hv( ncv ), h2( ncv ), xv( n_ham ), wv( n_ham ), sv( ncv ), &
+              work( 2 * ncv ), theta( ncv ), rwork( 3 * ncv ), &
+              temp_v( n_ham ), idx( ncv ), STAT = err )
+    IF ( err .NE. 0 ) CALL alloc_error( 'lanczos_diag', 'shift_invert', 'work arrays' )
+
+    CALL SYSTEM_CLOCK( tc_start, trate )
+    t_fac = 0.0D0
+    t_sol = 0.0D0
+    fmt = sparse_fmt
+
+    !----------------------------------------------------------------------
+    ! Factor B = H - shift (already in M): sparse PARDISO or dense ZGETRF
+    !----------------------------------------------------------------------
+#ifdef UPT_PARDISO
+    IF ( use_pardiso ) THEN
+       ! Build full CSR for PARDISO (mtype=13). Expand U/L Hermitian half-storage.
+       nnz = Mi( n_ham + 1 ) - 1
+       ALLOCATE( idum( n_ham ), STAT = err )
+       IF ( err .NE. 0 ) THEN
+          use_pardiso = .FALSE.
+       ELSE IF ( fmt .EQ. 'U' .OR. fmt .EQ. 'L' .OR. fmt .EQ. 'u' .OR. fmt .EQ. 'l' ) THEN
+          ! Count nnz of full matrix (diag once, off-diag mirrored)
+          ALLOCATE( ia_csr( n_ham + 1 ), STAT = err )
+          IF ( err .NE. 0 ) THEN
+             use_pardiso = .FALSE.
+             DEALLOCATE( idum )
+          ELSE
+             ia_csr = 0
+             DO i = 1, n_ham
+                DO j = Mi( i ), Mi( i + 1 ) - 1
+                   col = Mj( j )
+                   ia_csr( i ) = ia_csr( i ) + 1
+                   IF ( col .NE. i ) ia_csr( col ) = ia_csr( col ) + 1
+                END DO
+             END DO
+             nnzu = 1
+             DO i = 1, n_ham
+                p0 = ia_csr( i )
+                ia_csr( i ) = nnzu
+                nnzu = nnzu + p0
+             END DO
+             ia_csr( n_ham + 1 ) = nnzu
+             nnz = nnzu - 1
+             ALLOCATE( a_csr( nnz ), ja_csr( nnz ), STAT = err )
+             IF ( err .NE. 0 ) THEN
+                use_pardiso = .FALSE.
+                DEALLOCATE( ia_csr, idum )
+             ELSE
+                ! Fill: for each stored (i,col)=val also (col,i)=conj(val)
+                idum = 0
+                DO i = 1, n_ham
+                   DO j = Mi( i ), Mi( i + 1 ) - 1
+                      col = Mj( j )
+                      p0 = ia_csr( i ) + idum( i )
+                      a_csr( p0 ) = M( j )
+                      ja_csr( p0 ) = col
+                      idum( i ) = idum( i ) + 1
+                      IF ( col .NE. i ) THEN
+                         p1 = ia_csr( col ) + idum( col )
+                         a_csr( p1 ) = CONJG( M( j ) )
+                         ja_csr( p1 ) = i
+                         idum( col ) = idum( col ) + 1
+                      END IF
+                   END DO
+                END DO
+             END IF
+          END IF
+       ELSE
+          ! Full CSR already
+          ALLOCATE( a_csr( nnz ), ia_csr( n_ham + 1 ), ja_csr( nnz ), STAT = err )
+          IF ( err .NE. 0 ) THEN
+             use_pardiso = .FALSE.
+             DEALLOCATE( idum )
+          ELSE
+             ia_csr = Mi( 1:n_ham + 1 )
+             ja_csr = Mj( 1:nnz )
+             a_csr  = M( 1:nnz )
+          END IF
+       END IF
+    END IF
+
+    IF ( use_pardiso ) THEN
+       pt = 0
+       iparm = 0
+       iparm(1) = 1
+       iparm(2) = 2
+       iparm(3) = 1
+       iparm(8) = 0
+       iparm(10) = 13
+       iparm(11) = 1
+       iparm(13) = 1
+       iparm(18) = -1
+       iparm(19) = -1
+       iparm(21) = 1
+       maxfct = 1
+       mnum = 1
+       mtype = 13   ! complex unsymmetric (accepts full CSR)
+       nrhs = 1
+       msglvl = 0
+       perror = 0
+
+       CALL SYSTEM_CLOCK( tc0 )
+       phase = 11
+       CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
+                     idum, nrhs, iparm, msglvl, xv, wv, perror )
+       IF ( perror .NE. 0 ) THEN
+          WRITE(*,*) ' (shift-invert) PARDISO symbolic failed, error=', perror, &
+                     ' -> dense fallback'
+          use_pardiso = .FALSE.
+          phase = -1
+          CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
+                        idum, nrhs, iparm, msglvl, xv, wv, perror )
+          DEALLOCATE( a_csr, ia_csr, ja_csr, idum )
+       ELSE
+          phase = 22
+          CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
+                        idum, nrhs, iparm, msglvl, xv, wv, perror )
+          CALL SYSTEM_CLOCK( tc1 )
+          t_fac = REAL( tc1 - tc0, dp ) / REAL( trate, dp )
+          IF ( perror .NE. 0 ) THEN
+             WRITE(*,*) ' (shift-invert) PARDISO factor failed, error=', perror, &
+                        ' -> dense fallback'
+             use_pardiso = .FALSE.
+             phase = -1
+             CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
+                           idum, nrhs, iparm, msglvl, xv, wv, perror )
+             DEALLOCATE( a_csr, ia_csr, ja_csr, idum )
+          END IF
+       END IF
+    END IF
+#endif
+
+    IF ( .NOT. use_pardiso ) THEN
+       ALLOCATE( Bfac( n_ham, n_ham ), ipiv( n_ham ), STAT = err )
+       IF ( err .NE. 0 ) CALL alloc_error( 'lanczos_diag', 'shift_invert', 'dense LU' )
+       Bfac = czero
+       DO i = 1, n_ham
+          p0 = Mi( i )
+          p1 = Mi( i + 1 ) - 1
+          DO j = p0, p1
+             col = Mj( j )
+             Bfac( i, col ) = M( j )
+          END DO
+       END DO
+       IF ( fmt .EQ. 'U' .OR. fmt .EQ. 'L' .OR. fmt .EQ. 'u' .OR. fmt .EQ. 'l' ) THEN
+          DO i = 1, n_ham
+             DO j = 1, i - 1
+                IF ( Bfac( i, j ) .NE. czero .AND. Bfac( j, i ) .EQ. czero ) THEN
+                   Bfac( j, i ) = CONJG( Bfac( i, j ) )
+                ELSE IF ( Bfac( j, i ) .NE. czero .AND. Bfac( i, j ) .EQ. czero ) THEN
+                   Bfac( i, j ) = CONJG( Bfac( j, i ) )
+                END IF
+             END DO
+          END DO
+       END IF
+       CALL SYSTEM_CLOCK( tc0 )
+       CALL ZGETRF( n_ham, n_ham, Bfac, n_ham, ipiv, info )
+       CALL SYSTEM_CLOCK( tc1 )
+       t_fac = REAL( tc1 - tc0, dp ) / REAL( trate, dp )
+       IF ( info .NE. 0 ) THEN
+          WRITE(*,*) 'ERROR: ZGETRF failed in shift-invert Lanczos, info =', info
+          CALL throw_solve_exception(ERR_LANCZ_DIAG)
+       END IF
+    END IF
+
+    IF ( verbose .GT. 0 ) THEN
+       WRITE(*,*)
+       IF ( use_pardiso ) THEN
+          WRITE(*,'(a,i0,a,i0,a,i0,a,es9.2)') &
+               ' (shift-invert Lanczos/PARDISO) n=', n_ham, '  ncv=', ncv, &
+               '  nkeep=', nkeep, '  tol=', long_tol
+          WRITE(*,'(a,f10.3,a)') ' (shift-invert) sparse LU factor time ', t_fac, ' s'
+       ELSE
+          WRITE(*,'(a,i0,a,i0,a,i0,a,es9.2)') &
+               ' (shift-invert Lanczos/dense) n=', n_ham, '  ncv=', ncv, &
+               '  nkeep=', nkeep, '  tol=', long_tol
+          WRITE(*,'(a,f10.3,a)') ' (shift-invert) dense LU factor time ', t_fac, ' s'
+       END IF
+       WRITE(*,'(a,2x,a,4x,a,10x,a,12x,a)') 'type', 'cycle', 'solves', &
+            'theta(B)', 'residual'
+       WRITE(*,'(73("-"))')
+    END IF
+
+    CALL RANDOM_NUMBER( temp_v )
+    xv = CMPLX( temp_v - 0.5D0, 0.0D0, dp )
+    CALL RANDOM_NUMBER( temp_v )
+    xv = xv + CMPLX( 0.0D0, temp_v - 0.5D0, dp )
+    IF ( nr_eigv .NE. 1 ) CALL project_out( xv, eigen_v, nr_eigv - 1 )
+    beta = SQRT( REAL( DOT_PRODUCT( xv, xv ), dp ) )
+    V( :, 1 ) = xv / beta
+
+    Hm = czero
+    k = 0
+    cyc = 0
+    betam = 0.0D0
+    best = 1
+    resbest = 0.0D0
+    hit_max = .FALSE.
+    converged = .FALSE.
+
+    DO WHILE ( .NOT. converged )
+
+       cyc = cyc + 1
+       mm = ncv
+       betam = 0.0D0
+
+       DO j = k + 1, ncv
+
+          xv = V( :, j )
+
+          ! wv = B^{-1} xv
+          wv = xv
+          CALL SYSTEM_CLOCK( tc0 )
+#ifdef UPT_PARDISO
+          IF ( use_pardiso ) THEN
+             phase = 33
+             CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
+                           idum, nrhs, iparm, msglvl, xv, wv, perror )
+             IF ( perror .NE. 0 ) THEN
+                WRITE(*,*) 'ERROR: PARDISO solve failed, error=', perror
+                CALL throw_solve_exception(ERR_LANCZ_DIAG)
+             END IF
+          ELSE
+#endif
+             CALL ZGETRS( 'N', n_ham, 1, Bfac, n_ham, ipiv, wv, n_ham, info )
+             IF ( info .NE. 0 ) THEN
+                WRITE(*,*) 'ERROR: ZGETRS failed in shift-invert Lanczos, info =', info
+                CALL throw_solve_exception(ERR_LANCZ_DIAG)
+             END IF
+#ifdef UPT_PARDISO
+          END IF
+#endif
+          CALL SYSTEM_CLOCK( tc1 )
+          t_sol = t_sol + REAL( tc1 - tc0, dp ) / REAL( trate, dp )
+          counter = counter + 1
+
+          IF ( nr_eigv .NE. 1 ) CALL project_out( wv, eigen_v, nr_eigv - 1 )
+
+          CALL ZGEMV( 'C', n_ham, j, cone, V, n_ham, wv, 1, czero, hv, 1 )
+          CALL ZGEMV( 'N', n_ham, j, -cone, V, n_ham, hv, 1, cone, wv, 1 )
+          CALL ZGEMV( 'C', n_ham, j, cone, V, n_ham, wv, 1, czero, h2, 1 )
+          CALL ZGEMV( 'N', n_ham, j, -cone, V, n_ham, h2, 1, cone, wv, 1 )
+          hv( 1:j ) = hv( 1:j ) + h2( 1:j )
+
+          Hm( 1:j, j ) = hv( 1:j )
+          Hm( j, 1:j ) = CONJG( hv( 1:j ) )
+          Hm( j, j )   = CMPLX( REAL( hv( j ), dp ), 0.0D0, dp )
+
+          beta = SQRT( REAL( DOT_PRODUCT( wv, wv ), dp ) )
+
+          IF ( beta .LE. 1.0D-13 * MAX( 1.0D0, ABS( REAL( hv( j ), dp ) ) ) ) THEN
+             mm = j
+             betam = 0.0D0
+             V( :, j + 1 ) = czero
+             EXIT
+          END IF
+
+          V( :, j + 1 ) = wv / beta
+
+          IF ( j .LT. ncv ) THEN
+             Hm( j + 1, j ) = CMPLX( beta, 0.0D0, dp )
+             Hm( j, j + 1 ) = CMPLX( beta, 0.0D0, dp )
+          ELSE
+             betam = beta
+          END IF
+
+       END DO
+
+       S( 1:mm, 1:mm ) = Hm( 1:mm, 1:mm )
+       CALL ZHEEV( 'V', 'U', mm, S, ncv, theta, work, 2 * ncv, rwork, info )
+       IF ( info .NE. 0 ) CALL throw_solve_exception(ERR_LANCZ_DIAG)
+
+       best = 0
+       DO i = 1, mm
+          IF ( ABS( theta( i ) ) .LT. 1.0D-30 ) CYCLE
+          th = 1.0D0 / theta( i )
+          IF ( th * REAL( sgn, dp ) .GE. 0.0D0 ) THEN
+             IF ( best .EQ. 0 ) THEN
+                best = i
+             ELSE IF ( ABS( theta( i ) ) .GT. ABS( theta( best ) ) ) THEN
+                best = i
+             END IF
+          END IF
+       END DO
+       IF ( best .EQ. 0 ) THEN
+          best = 1
+          DO i = 2, mm
+             IF ( ABS( theta( i ) ) .GT. ABS( theta( best ) ) ) best = i
+          END DO
+       END IF
+
+       mu = theta( best )
+       IF ( ABS( mu ) .LT. 1.0D-30 ) THEN
+          th = 0.0D0
+       ELSE
+          th = 1.0D0 / mu
+       END IF
+
+       sv( 1:mm ) = S( 1:mm, best )
+       CALL ZGEMV( 'N', n_ham, mm, cone, V, n_ham, sv, 1, czero, xv, 1 )
+       beta = SQRT( REAL( DOT_PRODUCT( xv, xv ), dp ) )
+       xv = xv / beta
+       CALL sprs_ax( M, Mj, Mi, sparse_fmt, xv, wv )
+       counter = counter + 1
+       energy = REAL( DOT_PRODUCT( xv, wv ), dp )
+       wv = wv - energy * xv
+       resbest = SQRT( REAL( DOT_PRODUCT( wv, wv ), dp ) )
+
+       IF ( verbose .GT. 0 ) THEN
+          WRITE(*,'("si  ",i7,i9,2es22.12)') cyc, counter, energy, resbest
+       END IF
+
+       IF ( resbest .LT. long_tol ) converged = .TRUE.
+
+       IF ( .NOT. converged .AND. counter .GE. max_step ) THEN
+          hit_max = .TRUE.
+          converged = .TRUE.
+       END IF
+
+       IF ( converged ) EXIT
+
+       DO i = 1, mm
+          idx( i ) = i
+       END DO
+       DO i = 2, mm
+          it = idx( i )
+          aval = ABS( theta( it ) )
+          l = i - 1
+          DO WHILE ( l .GE. 1 )
+             IF ( ABS( theta( idx( l ) ) ) .GE. aval ) EXIT
+             idx( l + 1 ) = idx( l )
+             l = l - 1
+          END DO
+          idx( l + 1 ) = it
+       END DO
+
+       nk = MIN( nkeep, mm - 1 )
+       IF ( .NOT. ANY( idx( 1:nk ) .EQ. best ) ) idx( nk ) = best
+
+       DO i = 1, nk
+          Ssel( 1:mm, i ) = S( 1:mm, idx( i ) )
+       END DO
+
+       DO i0 = 1, n_ham, blk
+          nb = MIN( blk, n_ham - i0 + 1 )
+          Vsec( 1:nb, 1:mm ) = V( i0:i0 + nb - 1, 1:mm )
+          CALL ZGEMM( 'N', 'N', nb, nk, mm, cone, Vsec, blk, Ssel, ncv, &
+                      czero, tmp, blk )
+          V( i0:i0 + nb - 1, 1:nk ) = tmp( 1:nb, 1:nk )
+       END DO
+
+       V( :, nk + 1 ) = V( :, mm + 1 )
+
+       Hm = czero
+       DO i = 1, nk
+          Hm( i, i ) = CMPLX( theta( idx( i ) ), 0.0D0, dp )
+          Hm( nk + 1, i ) = betam * S( mm, idx( i ) )
+          Hm( i, nk + 1 ) = CONJG( Hm( nk + 1, i ) )
+       END DO
+
+       k = nk
+
+    END DO
+
+    IF ( nr_eigv .NE. 1 ) CALL project_out( xv, eigen_v, nr_eigv - 1 )
+    beta = SQRT( REAL( DOT_PRODUCT( xv, xv ), dp ) )
+    xv = xv / beta
+    CALL sprs_ax( M, Mj, Mi, sparse_fmt, xv, wv )
+    counter = counter + 1
+    energy = REAL( DOT_PRODUCT( xv, wv ), dp )
+    wv = wv - energy * xv
+    deltaE = SQRT( REAL( DOT_PRODUCT( wv, wv ), dp ) )
+    eigen_seed = xv
+
+    CALL SYSTEM_CLOCK( tc1 )
+    t_tot = REAL( tc1 - tc_start, dp ) / REAL( trate, dp )
+
+#ifdef UPT_PARDISO
+    IF ( use_pardiso ) THEN
+       phase = -1
+       CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
+                     idum, nrhs, iparm, msglvl, xv, wv, perror )
+       DEALLOCATE( a_csr, ia_csr, ja_csr, idum )
+    END IF
+#endif
+    IF ( ALLOCATED( Bfac ) ) DEALLOCATE( Bfac, ipiv )
+
+    IF ( hit_max ) THEN
+       WRITE(*,*) 'WARNING: shift-invert Lanczos stopped at max_iter =', max_step
+       WRITE(*,*) '         residual =', deltaE, ' (tolerance', long_tol, ')'
+    END IF
+
+    IF ( verbose .GT. 0 ) THEN
+       WRITE(*,'(73("-"))')
+       WRITE(*,'(a,i0,a,i0,a)') ' (shift-invert Lanczos) ', cyc, ' cycles, ', &
+            counter, ' solves/matvecs'
+       WRITE(*,'(a,f10.3,a,f10.3,a,f10.3,a)') &
+            ' (shift-invert Lanczos) time: total ', t_tot, &
+            ' s, LU ', t_fac, ' s, solves ', t_sol, ' s'
+    END IF
+
+    DEALLOCATE( V, Hm, S, Ssel, Vsec, tmp, hv, h2, xv, wv, sv, &
+                work, theta, rwork, temp_v, idx )
+
+  END SUBROUTINE shift_invert_lanczos_ev
+
+! ==========================================================================
+
+  SUBROUTINE trl_env_int( name, val, minval )
+    CHARACTER(*), INTENT( IN )    :: name
+    INTEGER,      INTENT( INOUT ) :: val
+    INTEGER,      INTENT( IN )    :: minval
+    CHARACTER(LEN=32) :: envstr
+    INTEGER :: ios, ival
+
+    CALL GET_ENVIRONMENT_VARIABLE( name, envstr, STATUS = ios )
+    IF ( ios .EQ. 0 ) THEN
+       READ( envstr, *, IOSTAT = ios ) ival
+       IF ( ios .EQ. 0 .AND. ival .GE. minval ) val = ival
+    END IF
+  END SUBROUTINE trl_env_int
 
 ! ==========================================================================
   

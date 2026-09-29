@@ -49,6 +49,12 @@ FNAME_SUFFIX="_"
 LIBMKLIB = @LAPACK_LIBS@
 MKLINC = @MKL_INCLUDES@
 
+# Enable sparse MKL PARDISO in Lanczos shift_invert when configure linked MKL.
+# make.common is generated from this file — do not edit make.common by hand.
+ifneq ($(findstring mkl,$(LIBMKLIB)),)
+  FPPFLAGS += -DUPT_PARDISO
+endif
+
 ifdef OMP
   ifneq ($(FCFLAVOUR),) 
      OPENMP = -qopenmp

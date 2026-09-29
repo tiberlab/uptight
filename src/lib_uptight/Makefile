@@ -22,6 +22,23 @@ LIBMKLIB += -llapack -lblas
 LIBMKLIB += $(METISLIB)
 INCLUDE += $(METISINC)
 
+# Sparse LU for Lanczos shift_invert via MKL PARDISO (complex).
+# Auto-detect MKL runtime so plain `make` in modules/etb enables PARDISO.
+MKL_RT := $(firstword $(wildcard /usr/lib/x86_64-linux-gnu/libmkl_rt.so) \
+                      $(wildcard /opt/intel/mkl/lib/intel64/libmkl_rt.so) \
+                      $(wildcard /opt/intel/oneapi/mkl/latest/lib/libmkl_rt.so))
+ifneq ($(MKL_RT),)
+  FPPFLAGS += -DUPT_PARDISO
+  LIBMKLIB += -Wl,--no-as-needed -L$(dir $(MKL_RT)) -Wl,-rpath,$(dir $(MKL_RT)) -lmkl_rt -lpthread -lm -ldl
+else ifeq ($(have_mkl),yes)
+  FPPFLAGS += -DUPT_PARDISO
+  LIBMKLIB += -Wl,--no-as-needed -lmkl_rt -lpthread -lm -ldl
+endif
+ifdef UPT_FORCE_PARDISO
+  FPPFLAGS += -DUPT_PARDISO
+  LIBMKLIB += -Wl,--no-as-needed -lmkl_rt -lpthread -lm -ldl
+endif
+
 #LIBS =	$(LIBMKL) $(LIBMPI) $(LIBCUDA) 
 
 ifdef UPT_MPI
