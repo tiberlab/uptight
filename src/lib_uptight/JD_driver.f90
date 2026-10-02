@@ -22,7 +22,6 @@ MODULE jd_driver
   USE errors
   USE jd_diag
   USE savemofile, only : append_eigenstate
-   USE coarse_grain, only : cg_active, icg_active, icgn_active, cg_get_active, cg_lift_active
 
   IMPLICIT NONE
   PRIVATE
@@ -51,10 +50,6 @@ MODULE jd_driver
       INTEGER :: len, verbose
 
 
-      if (cg_active(upt) .or. icg_active(upt) .or. icgn_active(upt)) then
-         call jd_coarse(upt)
-         return
-      end if
       num_ev = upt%num_vb + upt%num_cb
       num_cb = upt%num_cb - upt%start_cb + 1
       num_vb = upt%num_vb - upt%start_vb + 1
@@ -194,75 +189,5 @@ MODULE jd_driver
 
 
     end subroutine jd
-
-      subroutine jd_coarse(upt)
-         type(OUPT), target :: upt
-         type(CSR), pointer :: active_ham, active_u
-         type(CSR) :: physical_ham, physical_u
-         logical :: active, cg_was_enabled, icg_was_enabled, icgn_was_enabled
-         integer :: nfull, nred, num_ev, err
-         integer :: old_shift_init, old_shift_end
-         integer :: old_shift_init_mi, old_shift_end_mi
-         complex(dp), allocatable :: reduced_vectors(:,:), lifted(:,:)
-
-      call cg_get_active(upt, active_ham, active_u, active)
-      if (.not.active) return
-      nred = active_ham%nrow
-      nfull = upt%ham%nrow
-      physical_ham = upt%ham
-      physical_u = upt%U
-      cg_was_enabled = upt%cg_enabled
-      icg_was_enabled = upt%icg_enabled
-      icgn_was_enabled = upt%icgn_enabled
-      upt%ham = active_ham
-      upt%U = active_u
-      upt%n_spin = 1
-      upt%cg_enabled = .false.
-      upt%icg_enabled = .false.
-      upt%icgn_enabled = .false.
-      if (associated(upt%eigen_values)) deallocate(upt%eigen_values)
-      if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
-      if (associated(upt%particles)) deallocate(upt%particles)
-      old_shift_init = shift_init
-      old_shift_end = shift_end
-         old_shift_init_mi = shift_init_Mi(id)
-         old_shift_end_mi = shift_end_Mi(id)
-      shift_init = 1
-      shift_end = nred
-         shift_init_Mi(id) = 1
-         shift_end_Mi(id) = nred
-      call jd(upt)
-      shift_init = old_shift_init
-      shift_end = old_shift_end
-         shift_init_Mi(id) = old_shift_init_mi
-         shift_end_Mi(id) = old_shift_end_mi
-      if (.not.associated(upt%eigen_vectors)) then
-         upt%ham = physical_ham; upt%U = physical_u
-         upt%cg_enabled = cg_was_enabled
-         upt%icg_enabled = icg_was_enabled
-         upt%icgn_enabled = icgn_was_enabled
-         return
-      end if
-      num_ev = size(upt%eigen_vectors, 2)
-      allocate(reduced_vectors(nred,num_ev), stat=err)
-      if (err /= 0) call alloc_error('JD coarse grain','allocate','vectors')
-      reduced_vectors = upt%eigen_vectors
-      upt%ham = physical_ham
-      upt%U = physical_u
-      upt%cg_enabled = cg_was_enabled
-      upt%icg_enabled = icg_was_enabled
-      upt%icg_enabled = icg_was_enabled
-      upt%icgn_enabled = icgn_was_enabled
-      allocate(lifted(nfull,num_ev), stat=err)
-      if (err /= 0) call alloc_error('JD coarse grain','allocate','lifted')
-      call cg_lift_active(upt, reduced_vectors, lifted)
-      deallocate(upt%eigen_vectors)
-      allocate(upt%eigen_vectors(nfull,num_ev), stat=err)
-      if (err /= 0) call alloc_error('JD coarse grain','allocate','physical vectors')
-      upt%eigen_vectors = lifted
-      upt%particles = 0
-      deallocate(reduced_vectors, lifted)
-    end subroutine jd_coarse
-
 
 END MODULE jd_driver

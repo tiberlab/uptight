@@ -1904,24 +1904,15 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
     COMPLEX( dp ), ALLOCATABLE :: Bfac(:,:), V(:,:), Hm(:,:), S(:,:), Ssel(:,:)
     COMPLEX( dp ), ALLOCATABLE :: Vsec(:,:), tmp(:,:)
     COMPLEX( dp ), ALLOCATABLE :: hv(:), h2(:), xv(:), wv(:), sv(:), work(:)
-    COMPLEX( dp ), ALLOCATABLE :: a_csr(:)
     REAL( dp ),    ALLOCATABLE :: theta(:), rwork(:), temp_v(:)
-    INTEGER,       ALLOCATABLE :: idx(:), ipiv(:), ia_csr(:), ja_csr(:), idum(:)
+    INTEGER,       ALLOCATABLE :: idx(:), ipiv(:)
 
     REAL( dp ) :: beta, betam, resbest, aval, t_fac, t_sol, t_tot, mu, th
     INTEGER    :: ncv, nkeep, nk, mm, k, j, i, l, it, best, cyc
-    INTEGER    :: err, info, blk, i0, nb, p0, p1, col, nnz, nnzu
-    LOGICAL    :: converged, hit_max, use_pardiso, force_dense
+    INTEGER    :: err, info, blk, i0, nb, p0, p1, col
+    LOGICAL    :: converged, hit_max
     INTEGER(8) :: tc0, tc1, tc_start, trate
     CHARACTER(1) :: fmt
-    CHARACTER(LEN=32) :: envstr
-
-#ifdef UPT_PARDISO
-    ! MKL PARDISO state (complex unsymmetric CSR, mtype=13)
-    INTEGER(8) :: pt(64)
-    INTEGER    :: iparm(64), maxfct, mnum, mtype, phase, nrhs, msglvl, perror
-    INTEGER    :: iost
-#endif
 
     ncv = 40
     CALL trl_env_int( 'UPT_TRL_NCV', ncv, 8 )
@@ -1930,17 +1921,6 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
     CALL trl_env_int( 'UPT_TRL_NKEEP', nkeep, 1 )
     nkeep = MAX( 1, MIN( nkeep, ncv - 2 ) )
     blk = MIN( 8192, n_ham )
-
-    force_dense = .FALSE.
-    CALL GET_ENVIRONMENT_VARIABLE( 'UPT_SI_DENSE', envstr, STATUS = err )
-    IF ( err .EQ. 0 ) THEN
-       IF ( TRIM(envstr) .EQ. '1' .OR. TRIM(envstr) .EQ. 'yes' ) force_dense = .TRUE.
-    END IF
-
-    use_pardiso = .FALSE.
-#ifdef UPT_PARDISO
-    IF ( .NOT. force_dense ) use_pardiso = .TRUE.
-#endif
 
     ALLOCATE( V( n_ham, ncv + 1 ), Hm( ncv, ncv ), S( ncv, ncv ), &
               Ssel( ncv, ncv ), Vsec( blk, ncv ), tmp( blk, ncv ), &
@@ -1954,174 +1934,46 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
     t_sol = 0.0D0
     fmt = sparse_fmt
 
+!----------------------------------------------------------------------
+    ! Factor B = H - shift (already in M): dense ZGETRF
     !----------------------------------------------------------------------
-    ! Factor B = H - shift (already in M): sparse PARDISO or dense ZGETRF
-    !----------------------------------------------------------------------
-#ifdef UPT_PARDISO
-    IF ( use_pardiso ) THEN
-       ! Build full CSR for PARDISO (mtype=13). Expand U/L Hermitian half-storage.
-       nnz = Mi( n_ham + 1 ) - 1
-       ALLOCATE( idum( n_ham ), STAT = err )
-       IF ( err .NE. 0 ) THEN
-          use_pardiso = .FALSE.
-       ELSE IF ( fmt .EQ. 'U' .OR. fmt .EQ. 'L' .OR. fmt .EQ. 'u' .OR. fmt .EQ. 'l' ) THEN
-          ! Count nnz of full matrix (diag once, off-diag mirrored)
-          ALLOCATE( ia_csr( n_ham + 1 ), STAT = err )
-          IF ( err .NE. 0 ) THEN
-             use_pardiso = .FALSE.
-             DEALLOCATE( idum )
-          ELSE
-             ia_csr = 0
-             DO i = 1, n_ham
-                DO j = Mi( i ), Mi( i + 1 ) - 1
-                   col = Mj( j )
-                   ia_csr( i ) = ia_csr( i ) + 1
-                   IF ( col .NE. i ) ia_csr( col ) = ia_csr( col ) + 1
-                END DO
-             END DO
-             nnzu = 1
-             DO i = 1, n_ham
-                p0 = ia_csr( i )
-                ia_csr( i ) = nnzu
-                nnzu = nnzu + p0
-             END DO
-             ia_csr( n_ham + 1 ) = nnzu
-             nnz = nnzu - 1
-             ALLOCATE( a_csr( nnz ), ja_csr( nnz ), STAT = err )
-             IF ( err .NE. 0 ) THEN
-                use_pardiso = .FALSE.
-                DEALLOCATE( ia_csr, idum )
-             ELSE
-                ! Fill: for each stored (i,col)=val also (col,i)=conj(val)
-                idum = 0
-                DO i = 1, n_ham
-                   DO j = Mi( i ), Mi( i + 1 ) - 1
-                      col = Mj( j )
-                      p0 = ia_csr( i ) + idum( i )
-                      a_csr( p0 ) = M( j )
-                      ja_csr( p0 ) = col
-                      idum( i ) = idum( i ) + 1
-                      IF ( col .NE. i ) THEN
-                         p1 = ia_csr( col ) + idum( col )
-                         a_csr( p1 ) = CONJG( M( j ) )
-                         ja_csr( p1 ) = i
-                         idum( col ) = idum( col ) + 1
-                      END IF
-                   END DO
-                END DO
-             END IF
-          END IF
-       ELSE
-          ! Full CSR already
-          ALLOCATE( a_csr( nnz ), ia_csr( n_ham + 1 ), ja_csr( nnz ), STAT = err )
-          IF ( err .NE. 0 ) THEN
-             use_pardiso = .FALSE.
-             DEALLOCATE( idum )
-          ELSE
-             ia_csr = Mi( 1:n_ham + 1 )
-             ja_csr = Mj( 1:nnz )
-             a_csr  = M( 1:nnz )
-          END IF
-       END IF
-    END IF
-
-    IF ( use_pardiso ) THEN
-       pt = 0
-       iparm = 0
-       iparm(1) = 1
-       iparm(2) = 2
-       iparm(3) = 1
-       iparm(8) = 0
-       iparm(10) = 13
-       iparm(11) = 1
-       iparm(13) = 1
-       iparm(18) = -1
-       iparm(19) = -1
-       iparm(21) = 1
-       maxfct = 1
-       mnum = 1
-       mtype = 13   ! complex unsymmetric (accepts full CSR)
-       nrhs = 1
-       msglvl = 0
-       perror = 0
-
-       CALL SYSTEM_CLOCK( tc0 )
-       phase = 11
-       CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
-                     idum, nrhs, iparm, msglvl, xv, wv, perror )
-       IF ( perror .NE. 0 ) THEN
-          WRITE(*,*) ' (shift-invert) PARDISO symbolic failed, error=', perror, &
-                     ' -> dense fallback'
-          use_pardiso = .FALSE.
-          phase = -1
-          CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
-                        idum, nrhs, iparm, msglvl, xv, wv, perror )
-          DEALLOCATE( a_csr, ia_csr, ja_csr, idum )
-       ELSE
-          phase = 22
-          CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
-                        idum, nrhs, iparm, msglvl, xv, wv, perror )
-          CALL SYSTEM_CLOCK( tc1 )
-          t_fac = REAL( tc1 - tc0, dp ) / REAL( trate, dp )
-          IF ( perror .NE. 0 ) THEN
-             WRITE(*,*) ' (shift-invert) PARDISO factor failed, error=', perror, &
-                        ' -> dense fallback'
-             use_pardiso = .FALSE.
-             phase = -1
-             CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
-                           idum, nrhs, iparm, msglvl, xv, wv, perror )
-             DEALLOCATE( a_csr, ia_csr, ja_csr, idum )
-          END IF
-       END IF
-    END IF
-#endif
-
-    IF ( .NOT. use_pardiso ) THEN
-       ALLOCATE( Bfac( n_ham, n_ham ), ipiv( n_ham ), STAT = err )
-       IF ( err .NE. 0 ) CALL alloc_error( 'lanczos_diag', 'shift_invert', 'dense LU' )
-       Bfac = czero
+    ALLOCATE( Bfac( n_ham, n_ham ), ipiv( n_ham ), STAT = err )
+    IF ( err .NE. 0 ) CALL alloc_error( 'lanczos_diag', 'shift_invert', 'dense LU' )
+    Bfac = czero
+    DO i = 1, n_ham
+       p0 = Mi( i )
+       p1 = Mi( i + 1 ) - 1
+       DO j = p0, p1
+          col = Mj( j )
+          Bfac( i, col ) = M( j )
+       END DO
+    END DO
+    IF ( fmt .EQ. 'U' .OR. fmt .EQ. 'L' .OR. fmt .EQ. 'u' .OR. fmt .EQ. 'l' ) THEN
        DO i = 1, n_ham
-          p0 = Mi( i )
-          p1 = Mi( i + 1 ) - 1
-          DO j = p0, p1
-             col = Mj( j )
-             Bfac( i, col ) = M( j )
+          DO j = 1, i - 1
+             IF ( Bfac( i, j ) .NE. czero .AND. Bfac( j, i ) .EQ. czero ) THEN
+                Bfac( j, i ) = CONJG( Bfac( i, j ) )
+             ELSE IF ( Bfac( j, i ) .NE. czero .AND. Bfac( i, j ) .EQ. czero ) THEN
+                Bfac( i, j ) = CONJG( Bfac( j, i ) )
+             END IF
           END DO
        END DO
-       IF ( fmt .EQ. 'U' .OR. fmt .EQ. 'L' .OR. fmt .EQ. 'u' .OR. fmt .EQ. 'l' ) THEN
-          DO i = 1, n_ham
-             DO j = 1, i - 1
-                IF ( Bfac( i, j ) .NE. czero .AND. Bfac( j, i ) .EQ. czero ) THEN
-                   Bfac( j, i ) = CONJG( Bfac( i, j ) )
-                ELSE IF ( Bfac( j, i ) .NE. czero .AND. Bfac( i, j ) .EQ. czero ) THEN
-                   Bfac( i, j ) = CONJG( Bfac( j, i ) )
-                END IF
-             END DO
-          END DO
-       END IF
-       CALL SYSTEM_CLOCK( tc0 )
-       CALL ZGETRF( n_ham, n_ham, Bfac, n_ham, ipiv, info )
-       CALL SYSTEM_CLOCK( tc1 )
-       t_fac = REAL( tc1 - tc0, dp ) / REAL( trate, dp )
-       IF ( info .NE. 0 ) THEN
-          WRITE(*,*) 'ERROR: ZGETRF failed in shift-invert Lanczos, info =', info
-          CALL throw_solve_exception(ERR_LANCZ_DIAG)
-       END IF
+    END IF
+    CALL SYSTEM_CLOCK( tc0 )
+    CALL ZGETRF( n_ham, n_ham, Bfac, n_ham, ipiv, info )
+    CALL SYSTEM_CLOCK( tc1 )
+    t_fac = REAL( tc1 - tc0, dp ) / REAL( trate, dp )
+    IF ( info .NE. 0 ) THEN
+       WRITE(*,*) 'ERROR: ZGETRF failed in shift-invert Lanczos, info =', info
+       CALL throw_solve_exception(ERR_LANCZ_DIAG)
     END IF
 
     IF ( verbose .GT. 0 ) THEN
-       WRITE(*,*)
-       IF ( use_pardiso ) THEN
-          WRITE(*,'(a,i0,a,i0,a,i0,a,es9.2)') &
-               ' (shift-invert Lanczos/PARDISO) n=', n_ham, '  ncv=', ncv, &
-               '  nkeep=', nkeep, '  tol=', long_tol
-          WRITE(*,'(a,f10.3,a)') ' (shift-invert) sparse LU factor time ', t_fac, ' s'
-       ELSE
-          WRITE(*,'(a,i0,a,i0,a,i0,a,es9.2)') &
-               ' (shift-invert Lanczos/dense) n=', n_ham, '  ncv=', ncv, &
-               '  nkeep=', nkeep, '  tol=', long_tol
-          WRITE(*,'(a,f10.3,a)') ' (shift-invert) dense LU factor time ', t_fac, ' s'
-       END IF
+        WRITE(*,*)
+        WRITE(*,'(a,i0,a,i0,a,i0,a,es9.2)') &
+             ' (shift-invert Lanczos/dense) n=', n_ham, '  ncv=', ncv, &
+             '  nkeep=', nkeep, '  tol=', long_tol
+        WRITE(*,'(a,f10.3,a)') ' (shift-invert) dense LU factor time ', t_fac, ' s'
        WRITE(*,'(a,2x,a,4x,a,10x,a,12x,a)') 'type', 'cycle', 'solves', &
             'theta(B)', 'residual'
        WRITE(*,'(73("-"))')
@@ -2156,26 +2008,12 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
 
           ! wv = B^{-1} xv
           wv = xv
-          CALL SYSTEM_CLOCK( tc0 )
-#ifdef UPT_PARDISO
-          IF ( use_pardiso ) THEN
-             phase = 33
-             CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
-                           idum, nrhs, iparm, msglvl, xv, wv, perror )
-             IF ( perror .NE. 0 ) THEN
-                WRITE(*,*) 'ERROR: PARDISO solve failed, error=', perror
-                CALL throw_solve_exception(ERR_LANCZ_DIAG)
-             END IF
-          ELSE
-#endif
-             CALL ZGETRS( 'N', n_ham, 1, Bfac, n_ham, ipiv, wv, n_ham, info )
-             IF ( info .NE. 0 ) THEN
-                WRITE(*,*) 'ERROR: ZGETRS failed in shift-invert Lanczos, info =', info
-                CALL throw_solve_exception(ERR_LANCZ_DIAG)
-             END IF
-#ifdef UPT_PARDISO
-          END IF
-#endif
+CALL SYSTEM_CLOCK( tc0 )
+        CALL ZGETRS( 'N', n_ham, 1, Bfac, n_ham, ipiv, wv, n_ham, info )
+        IF ( info .NE. 0 ) THEN
+           WRITE(*,*) 'ERROR: ZGETRS failed in shift-invert Lanczos, info =', info
+           CALL throw_solve_exception(ERR_LANCZ_DIAG)
+        END IF
           CALL SYSTEM_CLOCK( tc1 )
           t_sol = t_sol + REAL( tc1 - tc0, dp ) / REAL( trate, dp )
           counter = counter + 1
@@ -2319,17 +2157,9 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
     eigen_seed = xv
 
     CALL SYSTEM_CLOCK( tc1 )
-    t_tot = REAL( tc1 - tc_start, dp ) / REAL( trate, dp )
+t_tot = REAL( tc1 - tc_start, dp ) / REAL( trate, dp )
 
-#ifdef UPT_PARDISO
-    IF ( use_pardiso ) THEN
-       phase = -1
-       CALL pardiso( pt, maxfct, mnum, mtype, phase, n_ham, a_csr, ia_csr, ja_csr, &
-                     idum, nrhs, iparm, msglvl, xv, wv, perror )
-       DEALLOCATE( a_csr, ia_csr, ja_csr, idum )
-    END IF
-#endif
-    IF ( ALLOCATED( Bfac ) ) DEALLOCATE( Bfac, ipiv )
+     IF ( ALLOCATED( Bfac ) ) DEALLOCATE( Bfac, ipiv )
 
     IF ( hit_max ) THEN
        WRITE(*,*) 'WARNING: shift-invert Lanczos stopped at max_iter =', max_step

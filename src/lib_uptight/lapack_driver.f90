@@ -21,7 +21,6 @@ MODULE lapack_driver
   USE input_output
   use errors
   USE exceptions
-   USE coarse_grain, only : cg_active, icg_active, icgn_active, cg_get_active, cg_lift_active
 
   implicit none
   private
@@ -46,13 +45,6 @@ contains
       integer :: num_conv, file_num
       CHARACTER(200) :: file_name
 
-      if (cg_active(upt)) then
-         call lapack_active(upt)
-         return
-      else if (icg_active(upt) .or. icgn_active(upt)) then
-         call lapack_active(upt)
-         return
-      end if
       n_ham = upt%ham%nrow
       num_ev = upt%num_vb + upt%num_cb
 
@@ -159,59 +151,8 @@ contains
  
     end subroutine lapack
 
-      subroutine lapack_active(upt)
-         type(OUPT), target :: upt
-         type(CSR), pointer :: active_ham, active_u
-         type(CSR) :: physical_ham, physical_u
-         logical :: active, cg_was_enabled, icg_was_enabled, icgn_was_enabled
-         integer :: nred, nfull, num_ev, err
-         complex(dp), allocatable :: reduced_vectors(:,:), lifted(:,:)
 
-         call cg_get_active(upt, active_ham, active_u, active)
-         if (.not.active) return
-         nred = active_ham%nrow
-         nfull = upt%ham%nrow
-         physical_ham = upt%ham
-         physical_u = upt%U
-         cg_was_enabled = upt%cg_enabled
-         icg_was_enabled = upt%icg_enabled
-         icgn_was_enabled = upt%icgn_enabled
-         upt%ham = active_ham
-         upt%U = active_u
-         upt%n_spin = 1
-         upt%cg_enabled = .false.
-         upt%icg_enabled = .false.
-         upt%icgn_enabled = .false.
-         if (associated(upt%eigen_values)) deallocate(upt%eigen_values)
-         if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
-         if (associated(upt%particles)) deallocate(upt%particles)
-         call lapack(upt)
-         if (.not.associated(upt%eigen_vectors)) then
-             upt%ham = physical_ham; upt%U = physical_u
-             upt%cg_enabled = cg_was_enabled
-             upt%icg_enabled = icg_was_enabled
-             upt%icgn_enabled = icgn_was_enabled
-             return
-         end if
-         num_ev = size(upt%eigen_vectors, 2)
-         allocate(reduced_vectors(nred,num_ev), stat=err)
-         if (err /= 0) call alloc_error('LAPACK coarse grain','allocate','vectors')
-         reduced_vectors = upt%eigen_vectors
-         upt%ham = physical_ham
-         upt%U = physical_u
-         upt%cg_enabled = cg_was_enabled
-         upt%icg_enabled = icg_was_enabled
-         upt%icgn_enabled = icgn_was_enabled
-         allocate(lifted(nfull,num_ev), stat=err)
-         if (err /= 0) call alloc_error('LAPACK coarse grain','allocate','lifted')
-         call cg_lift_active(upt, reduced_vectors, lifted)
-         deallocate(upt%eigen_vectors)
-         allocate(upt%eigen_vectors(nfull,num_ev), stat=err)
-         if (err /= 0) call alloc_error('LAPACK coarse grain','allocate','physical vectors')
-         upt%eigen_vectors = lifted
-         upt%particles = 0
-         deallocate(reduced_vectors, lifted)
-      end subroutine lapack_active
+
 
       
    subroutine Diagonalize_ham(HAM, N, eigval)

@@ -308,6 +308,16 @@ extern "C"
 }
 
 
+// Corresponding F77 arguments for upt_coarse_graining_swap_out:
+// integer, intent(in) :: handler(DAC_handlerSize)
+// integer, intent(in) :: lift
+extern "C"
+
+{
+  void upt_coarse_graining_swap_out_ (int const* handler, int const& lift);
+}
+
+
 // Corresponding F77 arguments for upt_printhamiltonian:
 // integer, intent(in) :: handler(DAC_handlerSize)
 extern "C"

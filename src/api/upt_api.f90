@@ -618,6 +618,23 @@ subroutine upt_get_coarse_graining_error(handler, error_code)
   call upt_get_coarse_graining_error_f(pUPTs%pUPT, error_code)
 end subroutine upt_get_coarse_graining_error
 
+!!* Leaves the coarse-graining layer and restores the original operator. When
+!!* lift is nonzero the eigenvectors currently held by uptight are mapped from
+!!* the reduced basis back to the orbital basis first. Intended for solvers
+!!* outside uptight, which just solve whatever upt%ham is.
+!!* @param handler Number for the UPTIGHT instance.
+!!* @param lift Nonzero to lift the stored eigenvectors.
+subroutine upt_coarse_graining_swap_out(handler, lift)
+  use uptightAPICommon
+  use uptight, only : upt_coarse_graining_swap_out_f => upt_coarse_graining_swap_out
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: lift ! if:var:in
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_coarse_graining_swap_out_f(pUPTs%pUPT, lift)
+end subroutine upt_coarse_graining_swap_out
+
 !!* Computes the system hamiltonian
 !!* @param handler Number for the UPTIGHT instance.
 subroutine upt_printhamiltonian(handler)

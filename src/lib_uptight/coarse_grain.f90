@@ -24,6 +24,8 @@ module coarse_grain
   public :: cg_configure, cg_prepare, cg_clear, cg_active, cg_lift
   public :: cg_log_progress
   public :: cg_get_active, cg_lift_active
+  public :: cg_swap_in, cg_swap_out, cg_set_original, cg_forget, cg_destroy_operator, &
+           cg_finalize_eigenvectors
   public :: cg_get_info
   public :: icg_configure, icg_prepare, icg_clear, icg_active, icg_lift
   public :: icg_get_info
@@ -46,7 +48,31 @@ module coarse_grain
      end function cg_metis_partition
   end interface
 
+  ! Saved state of the reduced operator while it is swapped into upt%ham, see
+  ! cg_swap_in()/cg_finalize_eigenvectors() below. The original operator is
+  ! remembered separately by cg_set_original() at the moment it is built, so the
+  ! restore can never pick up the reduced matrix by mistake.
+  type(CSR), target  :: cg_original_ham          ! value snapshot, NOT an alias
+  type(CSR), target  :: cg_original_u
+  logical            :: cg_original_valid = .false.
+  type(CSR), pointer :: cg_saved_ham => null()
+  type(CSR), pointer :: cg_saved_u   => null()
+  integer :: cg_saved_shift_init = 0
+  integer :: cg_saved_shift_end = 0
+  integer :: cg_saved_shift_init_mi = 0
+  integer :: cg_saved_shift_end_mi = 0
+  integer :: cg_saved_n_spin = 0
+
 contains
+
+  ! Called by the orchestrator right after the orbital operator has been built
+  ! and before the reduced one is prepared.
+  subroutine cg_set_original(upt)
+    type(OUPT), intent(inout) :: upt
+    cg_original_ham = upt%ham    ! value copy of struct header (pointer addresses, not heap data)
+    cg_original_u   = upt%U
+    cg_original_valid = .true.
+  end subroutine cg_set_original
 
   subroutine cg_configure(upt, enabled, nblocks, emin, emax, epsilon, imbalance)
     type(OUPT), intent(inout) :: upt
@@ -103,6 +129,168 @@ contains
     end if
   end subroutine cg_lift_active
 
+  !----------------------------------------------------------------------------!
+  ! Single entry point for using a reduced operator from outside uptight.
+  !
+  ! Solvers do not know whether they are working on the original or on a
+  ! reduced operator: the swap is done here, once, so that upt%ham (and the
+  ! dimension dependent shift bookkeeping every driver relies on) already
+  ! describes whatever operator has to be solved. cg_finalize_eigenvectors()
+  ! brings the eigenvectors back to the orbital basis and restores the original
+  ! operator; cg_swap_out() only restores.
+  !----------------------------------------------------------------------------!
+
+  subroutine cg_swap_in(upt, active)
+    type(OUPT), intent(inout), target :: upt
+    logical, intent(out) :: active
+    type(CSR), pointer :: reduced_ham, reduced_u
+    logical :: got
+    integer :: nred
+
+    active = .false.
+    if (associated(cg_saved_ham)) then
+      active = .true.
+      return
+    end if
+
+    ! Never guess which matrix the original one was. cg_set_original() is the only
+    ! thing allowed to record it, and it runs right after the orbital operator has
+    ! been built. Without that record, coarse-graining simply does not activate.
+    if (.not. cg_original_valid) return
+
+    call cg_get_active(upt, reduced_ham, reduced_u, got)
+    if (.not. got) return
+
+    nred = reduced_ham%nrow
+
+    cg_saved_ham => cg_original_ham
+    cg_saved_u   => cg_original_u
+    cg_saved_shift_init = shift_init
+    cg_saved_shift_end = shift_end
+    cg_saved_shift_init_mi = shift_init_Mi(id)
+    cg_saved_shift_end_mi = shift_end_Mi(id)
+    cg_saved_n_spin = upt%n_spin
+
+    upt%ham = reduced_ham
+    upt%U   = reduced_u
+    ! The reduced operator already carries the spin degeneracy of the states it
+    ! retained, so a solver must not generate degenerate partners again.
+    upt%n_spin = 1
+
+    ! The result arrays of the previous solve belong to the previous operator and
+    ! are kept across k-points so that band tracking can pick them up. Their row
+    ! count belongs to a different basis now, so they must not be handed to the
+    ! solver: upt_set_state and the drivers both refuse a mismatch. States found
+    ! in the orbital basis cannot seed a search in the reduced one anyway.
+    if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
+    if (associated(upt%eigen_values))  deallocate(upt%eigen_values)
+    if (associated(upt%particles))     deallocate(upt%particles)
+
+    shift_init = 1
+    shift_end = nred
+    shift_init_Mi(id) = 1
+    shift_end_Mi(id) = nred
+
+    active = .true.
+  end subroutine cg_swap_in
+
+  subroutine cg_swap_out(upt)
+    type(OUPT), intent(inout), target :: upt
+
+    ! No-op unless a reduced operator is currently in place. Without this guard
+    ! a call made after the Hamiltonian has been destroyed would put the dangling
+    ! cg_original_ham pointer back into upt%ham.
+    if (.not. associated(cg_saved_ham)) return
+
+    if (cg_original_valid) then
+      upt%ham = cg_original_ham
+      upt%U   = cg_original_u
+    end if
+
+    shift_init = cg_saved_shift_init
+    shift_end = cg_saved_shift_end
+    shift_init_Mi(id) = cg_saved_shift_init_mi
+    shift_end_Mi(id) = cg_saved_shift_end_mi
+    upt%n_spin = cg_saved_n_spin
+    nullify(cg_saved_ham, cg_saved_u)
+  end subroutine cg_swap_out
+
+  ! Brings the eigenvectors back to the orbital basis and restores the original
+  ! operator. This is the only thing a caller has to do after a solve that ran on
+  ! a reduced operator: the solvers themselves are unaware of it.
+  subroutine cg_finalize_eigenvectors(upt)
+    type(OUPT), intent(inout), target :: upt
+    complex(dp), allocatable :: reduced(:,:), lifted(:,:)
+    integer :: nfull, nred, num_ev
+
+    if (.not. associated(cg_saved_ham)) return
+    if (.not. associated(upt%eigen_vectors)) then
+      call cg_swap_out(upt)
+      return
+    end if
+
+    nred  = size(upt%eigen_vectors, 1)
+    num_ev = size(upt%eigen_vectors, 2)
+
+    ! Take the orbital dimension from what the coarse-graining layer recorded
+    ! when it built the reduced operator. cg_saved_ham only says which matrix was
+    ! in place when the swap happened, and it is not a reliable source for the
+    ! original size once the Hamiltonian has been rebuilt.
+    nfull = cg_orbital_dim(upt)
+    if (nfull <= nred) then
+      ! No larger basis to lift into: restore the operator and leave the
+      ! vectors alone rather than lift into something of the wrong size.
+      write(*,'(a,i0,a,i0)') &
+           '(cg) finalize: no orbital basis recorded (nred=', nred, &
+           ', nfull=', nfull, '), keeping reduced vectors'
+      call cg_swap_out(upt)
+      return
+    end if
+
+    write(*,'(a,i0,a,i0,a,i0)') '(cg) finalize: lifting nred=', nred, &
+         ' -> nfull=', nfull, ', num_ev=', num_ev
+
+    allocate(reduced(nred, num_ev))
+    reduced = upt%eigen_vectors(1:nred, 1:num_ev)
+
+    allocate(lifted(nfull, num_ev))
+    call cg_lift_active(upt, reduced, lifted)
+
+    deallocate(upt%eigen_vectors)
+    allocate(upt%eigen_vectors(nfull, num_ev))
+    upt%eigen_vectors = lifted
+
+    deallocate(reduced, lifted)
+
+    call cg_swap_out(upt)
+  end subroutine cg_finalize_eigenvectors
+
+  ! Orbital dimension of the original Hamiltonian, as recorded when the reduced
+  ! operator was built. Zero when coarse-graining is not active.
+  function cg_orbital_dim(upt) result(n)
+    type(OUPT), intent(in) :: upt
+    integer :: n
+    logical :: ready
+    integer :: od, rd, nb
+    real(dp) :: cf
+
+    n = 0
+    if (cg_active(upt)) then
+      call cg_get_info(upt, ready, od, rd, nb, cf)
+      if (ready) n = od
+    else if (icg_active(upt)) then
+      call icg_get_info(upt, ready, od, rd, nb, cf)
+      if (ready) n = od
+    else if (icgn_active(upt)) then
+      block
+        real(dp) :: s2
+        logical :: conv
+        call icgn_get_info(upt, ready, od, rd, nb, cf, s2, conv)
+        if (ready) n = od
+      end block
+    end if
+  end function cg_orbital_dim
+
   subroutine cg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
     type(OUPT), intent(in) :: upt
     logical, intent(out) :: ready
@@ -114,6 +302,53 @@ contains
     nblocks = upt%cg_num_blocks
     cut_fraction = upt%cg_cut_fraction
   end subroutine cg_get_info
+
+  ! Drops every pointer into the reduced operator. Must be called before the
+  ! operator is destroyed, otherwise cg_original_ham/cg_original_u and the
+  ! swap bookkeeping keep pointing at freed memory.
+  subroutine cg_forget(upt)
+    type(OUPT), intent(inout) :: upt
+    nullify(cg_saved_ham, cg_saved_u)
+    cg_original_valid = .false.
+    ! Null out pointer components to avoid stale pointer values (defensive)
+    nullify(cg_original_ham%M, cg_original_ham%Mi, cg_original_ham%Mj)
+    cg_original_ham%nrow = 0
+    cg_original_ham%nnz  = 0
+    nullify(cg_original_u%M, cg_original_u%Mi, cg_original_u%Mj)
+    cg_original_u%nrow = 0
+    cg_original_u%nnz  = 0
+    cg_saved_shift_init = 0
+    cg_saved_shift_end = 0
+    cg_saved_shift_init_mi = 0
+    cg_saved_shift_end_mi = 0
+    cg_saved_n_spin = 0
+  end subroutine cg_forget
+
+  ! Drops every pointer into the reduced operator. Only for teardown: cg_clear()
+  ! runs at the start of every cg_prepare(), so it must not touch the record of
+  ! the original operator.
+  subroutine cg_destroy_operator(upt)
+    type(OUPT), intent(inout), target :: upt
+    integer :: i
+    call cg_forget(upt)
+    if (associated(upt%cg_ham%M)) call destroy_matrix(upt%cg_ham)
+    if (associated(upt%cg_U%M)) call destroy_matrix(upt%cg_U)
+    if (associated(upt%cg_blocks)) then
+       do i = 1, size(upt%cg_blocks)
+          if (associated(upt%cg_blocks(i)%rows)) deallocate(upt%cg_blocks(i)%rows)
+          if (associated(upt%cg_blocks(i)%eval)) deallocate(upt%cg_blocks(i)%eval)
+          if (associated(upt%cg_blocks(i)%q)) deallocate(upt%cg_blocks(i)%q)
+          if (associated(upt%cg_blocks(i)%evals_full)) deallocate(upt%cg_blocks(i)%evals_full)
+          if (associated(upt%cg_blocks(i)%S_full)) deallocate(upt%cg_blocks(i)%S_full)
+          if (associated(upt%cg_blocks(i)%retained_idx)) deallocate(upt%cg_blocks(i)%retained_idx)
+       end do
+       deallocate(upt%cg_blocks)
+    end if
+    upt%cg_ready = .false.
+    upt%cg_original_dim = 0
+    upt%cg_reduced_dim = 0
+    upt%cg_cut_fraction = 0.0_dp
+  end subroutine cg_destroy_operator
 
   subroutine cg_clear(upt)
     type(OUPT), intent(inout) :: upt

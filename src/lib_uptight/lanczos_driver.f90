@@ -22,7 +22,6 @@ MODULE lanczos_driver
   USE errors
   USE lanczos_diag
   USE savemofile, only : append_eigenstate
-   USE coarse_grain, only : cg_active, icg_active, icgn_active, cg_get_active, cg_lift_active
 
   IMPLICIT NONE
   PRIVATE
@@ -50,10 +49,6 @@ MODULE lanczos_driver
  
       CHARACTER(LEN=:), ALLOCATABLE :: states_file
 
-      if (cg_active(upt) .or. icg_active(upt) .or. icgn_active(upt)) then
-         call lanczos_coarse(upt)
-         return
-      end if
       ! clear the states files, but only after all processes have read the states
       ! NOTE: maybe it would be more elegant to broadcast the vectors?
       if (id0) then
@@ -195,85 +190,7 @@ MODULE lanczos_driver
       end if !end valence
       ! -------------------------------------------------------------------------
 
-    end subroutine lanczos
-
-    subroutine lanczos_coarse(upt)
-      type(OUPT), target :: upt
-      type(CSR), pointer :: active_ham, active_u
-      logical :: active
-      integer :: nfull, nred, num_ev, num_cb, num_vb, end_cb, end_vb, err
-      integer :: old_shift_init, old_shift_end
-      integer :: old_shift_init_mi, old_shift_end_mi
-      real(dp), allocatable, target :: raw_values(:)
-      complex(dp), allocatable, target :: raw_vectors(:,:)
-      real(dp), pointer :: raw_values_slice(:)
-      complex(dp), pointer :: raw_vectors_slice(:,:)
-      complex(dp), allocatable :: reduced_vectors(:,:), lifted(:,:)
-
-      call cg_get_active(upt, active_ham, active_u, active)
-      if (.not.active) return
-      nred = active_ham%nrow
-      nfull = upt%ham%nrow
-       if (upt%verbose > 0 .and. id0) write(*,'(a,i0,a,i0,a,a1,a,i0,a,i0)') &
-          '(cg lanczos) active rows ', nred, ', nnz ', active_ham%nnz, &
-          ', format ', active_ham%sparse_fmt, ', Mi(1) ', active_ham%Mi(1), &
-          ', Mi(end) ', active_ham%Mi(nred+1)
-      num_ev = upt%num_vb + upt%num_cb
-      num_cb = upt%num_cb - upt%start_cb + 1
-      num_vb = upt%num_vb - upt%start_vb + 1
-      allocate(raw_values(num_ev), raw_vectors(nred,num_ev), stat=err)
-      if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','vectors')
-      raw_values = 0.0_dp
-      raw_vectors = (0.0_dp, 0.0_dp)
-      old_shift_init = shift_init
-      old_shift_end = shift_end
-      old_shift_init_mi = shift_init_Mi(id)
-      old_shift_end_mi = shift_end_Mi(id)
-      shift_init = 1
-      shift_end = nred
-      shift_init_Mi(id) = 1
-      shift_end_Mi(id) = nred
-
-      if (num_cb > 0) then
-         raw_values_slice => raw_values(upt%num_vb+1:num_ev)
-         raw_vectors_slice => raw_vectors(:,upt%num_vb+1:num_ev)
-         end_cb = upt%start_cb + num_cb - 1
-         call LANCZOS_EV(active_ham, active_u, 1, upt%min_iter, upt%long_iter, &
-              upt%max_iter, raw_values_slice, raw_vectors_slice, upt%start_cb, &
-              end_cb, nred, upt%lambda_cb, upt%solver_flag, upt%fast_tol, &
-              upt%long_tol, upt%ort_tol, 1, upt%dynamic, upt%bitoff, .false., &
-              upt%verbose)
-      end if
-      if (num_vb > 0) then
-         raw_values_slice => raw_values(1:upt%num_vb)
-         raw_vectors_slice => raw_vectors(:,1:upt%num_vb)
-         end_vb = upt%start_vb + num_vb - 1
-         call LANCZOS_EV(active_ham, active_u, 1, upt%min_iter, upt%long_iter, &
-              upt%max_iter, raw_values_slice, raw_vectors_slice, upt%start_vb, &
-              end_vb, nred, upt%lambda_vb, upt%solver_flag, upt%fast_tol, &
-              upt%long_tol, upt%ort_tol, -1, upt%dynamic, upt%bitoff, .false., &
-              upt%verbose)
-      end if
-
-      if (associated(upt%eigen_values)) deallocate(upt%eigen_values)
-      if (associated(upt%eigen_vectors)) deallocate(upt%eigen_vectors)
-      if (associated(upt%particles)) deallocate(upt%particles)
-      allocate(upt%eigen_values(num_ev), upt%eigen_vectors(nfull,num_ev), &
-           upt%particles(num_ev), stat=err)
-      if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','states')
-      upt%eigen_values = raw_values
-      upt%particles = 0
-      allocate(lifted(nfull,num_ev), stat=err)
-      if (err /= 0) call alloc_error('Lanczos coarse grain','allocate','lifted')
-      call cg_lift_active(upt, raw_vectors, lifted)
-      shift_init = old_shift_init
-      shift_end = old_shift_end
-      shift_init_Mi(id) = old_shift_init_mi
-      shift_end_Mi(id) = old_shift_end_mi
-      upt%eigen_vectors = lifted
-      deallocate(raw_values, raw_vectors, lifted)
-    end subroutine lanczos_coarse
-
+end subroutine lanczos
 
 END MODULE lanczos_driver
 

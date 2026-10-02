@@ -33,6 +33,7 @@ module UPTIGHT
   USE alloys, only : init_mat_ion
   USE TB_ham, only : sparse_ham, hermitianize, check_if_hermitian
   USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, cg_log_progress, &
+                           cg_swap_in, cg_swap_out, cg_set_original, cg_destroy_operator, cg_finalize_eigenvectors, &
                            icg_prepare, icg_clear, icg_configure, &
                            icgn_prepare, icgn_clear, icgn_configure
   USE lanczos_driver, only : lanczos
@@ -55,6 +56,7 @@ module UPTIGHT
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
   public :: upt_get_coarse_graining_error
+  public :: upt_coarse_graining_swap_out
   public :: upt_configure_improved_cg, upt_get_improved_cg_info
   public :: upt_configure_icgn, upt_get_icgn_info
   public :: upt_configure_coarse_graining_mode
@@ -272,14 +274,11 @@ contains
   !---------------------------------------------------------------------
 
   subroutine UPT_destruct(upt)
-  
-    TYPE(OUPT) :: upt     
+
+    TYPE(OUPT) :: upt
     INTEGER :: i
 
-    call destroy_matrix(upt%ham)
-    call cg_clear(upt)
-    call icg_clear(upt)
-    call icgn_clear(upt)
+    call cg_destroy_operator(upt)
 
     !write(*,*) '(debug) deallocate basis'
     call destroy_basis(upt%basis)
@@ -336,15 +335,26 @@ contains
   !---------------------------------------------------------------------
   subroutine UPT_hamiltonian(upt)
 
-    TYPE(OUPT), pointer :: upt 
+    TYPE(OUPT), pointer :: upt
     integer :: ierr
+    logical :: cg_on
 
-    if(upt%verbose.gt.0) write(*,*) '(uptight) clear any prev. matrix'    
+    ! A previous solve may have left the reduced operator in place: restore the
+    ! original one before rebuilding it, otherwise the pointers saved by
+    ! cg_swap_in would be dangling after destroy_matrix below.
+    call cg_swap_out(upt)
+
+    if(upt%verbose.gt.0) write(*,*) '(uptight) clear any prev. matrix'
     call destroy_matrix(upt%ham)
 
     if(upt%verbose.gt.0) write(*,*) '(uptight) compute new matrix'
     upt%cg_error = 0
     call sparse_ham(upt)
+    ! ===== CG DIAGNOSTIC =====
+    write(*,'(a,i0,a,i0,a,es14.6)') '[CG-DIAG] orbital H: nrow=', upt%ham%nrow, &
+         ' nnz=', upt%ham%nnz, ' sum_abs_M=', sum(abs(upt%ham%M))
+    ! ===========================
+
     if (upt%cg_enabled) then
        if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain subsolver ', upt%cg_subsolver, &
             ' backend ', upt%cg_subsolver_type
@@ -389,9 +399,28 @@ contains
              write(*,*) '(icgn) WARNING: Neumann norm >= 1: series is not guaranteed to converge', upt%icgn_sigma_T2
           end if
        end if
-    end if
+     end if
 
-    ! VERY IMPORTANT NOTE: The full H is non-hermitian when there are 
+! From here on upt%ham is the operator that has to be solved. Solvers do
+    ! not know whether it is the original or a reduced one; the coarse-graining
+    ! layer swaps it in and lifts the eigenvectors back on the way out.
+    ! Record the orbital operator last, right before the swap: cg_prepare()
+    ! rebuilds the coarse-graining bookkeeping, and nothing may overwrite the
+    ! record afterwards.
+    ! ===== CG DIAGNOSTIC =====
+    if (upt%cg_enabled .and. upt%cg_ready) then
+       write(*,'(a,i0,a,i0,a,es14.6)') '[CG-DIAG] reduced H: nrow=', upt%cg_ham%nrow, &
+            ' nnz=', upt%cg_ham%nnz, ' sum_abs_M=', sum(abs(upt%cg_ham%M))
+    end if
+    ! ===========================
+    call cg_set_original(upt)
+
+    call cg_swap_in(upt, cg_on)
+     if (cg_on .and. upt%verbose > 0) then
+        write(*,'(a,i0)') '(uptight) coarse-graining active, solving operator of dimension ', upt%ham%nrow
+     end if
+
+     ! VERY IMPORTANT NOTE: The full H is non-hermitian when there are
     ! interfaces Alloy/Alloy or Alloy/Pure since there is no symmetry 
     ! between the interaction parameters a-b/b-a because they are seen 
     ! as pure in one case and alloy in the other. 
@@ -489,6 +518,24 @@ contains
     error_code = upt%cg_error
   end subroutine UPT_get_coarse_graining_error
 
+  !---------------------------------------------------------------------------
+  ! Entry points for solvers that live outside uptight (e.g. SLEPc). They work
+  ! on whatever upt%ham currently is: UPT_hamiltonian has already swapped in the
+  ! reduced operator when coarse-graining is active, so an external solver just
+  ! solves it and hands the eigenvectors back in that basis. Calling
+  ! UPT_coarse_graining_swap_out with lift=.true. maps them back to the orbital
+  ! basis and restores the original operator.
+  !---------------------------------------------------------------------------
+  subroutine UPT_coarse_graining_swap_out(upt, lift)
+    type(OUPT), intent(inout), target :: upt
+    integer, intent(in) :: lift
+    if (lift /= 0) then
+       call cg_finalize_eigenvectors(upt)
+    else
+       call cg_swap_out(upt)
+    end if
+  end subroutine UPT_coarse_graining_swap_out
+
   subroutine UPT_configure_improved_cg(upt, enabled, nblocks, core_emin, core_emax, &
                                         top_buffer, bottom_buffer, epsilon, imbalance)
     type(OUPT), intent(inout) :: upt
@@ -563,6 +610,7 @@ contains
     call mpi_barrier(upt_comm,ierr)
 #endif
     call lanczos(upt)
+    call cg_finalize_eigenvectors(upt)
 
   end subroutine UPT_lanczos
   
@@ -574,6 +622,7 @@ contains
     
     if(upt%verbose.gt.0) write(*,*) '(uptight) Jacobi-Davidson diagonalization'
     call jd(upt)
+    call cg_finalize_eigenvectors(upt)
 
   end subroutine UPT_jd
   
@@ -587,6 +636,7 @@ contains
 
     if(upt%verbose.gt.0) write(*,*) '(uptight) LAPACK diagonalization'
     call lapack(upt)
+    call cg_finalize_eigenvectors(upt)
 
   end subroutine UPT_lapack
 
