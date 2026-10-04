@@ -1,4 +1,49 @@
 ! Coarse-grained tight-binding projection after Liu et al. (2022).
+!
+! ======================================================================
+! OVERVIEW (read this first)
+! ======================================================================
+! This module is a "mid-layer" between the assembly of the orbital
+! Hamiltonian H (sparse_ham, stored in upt%ham as CSR) and the eigensolvers
+! (Lanczos, Jacobi-Davidson, LAPACK, external SLEPc). It replaces H by a much
+! smaller reduced Hamiltonian H_red = Q^H H Q so that the eigensolver has less
+! work to do, then maps the eigenvectors back to the orbital basis.
+!
+! Three variants are implemented (selected by UPT_configure_coarse_graining_mode):
+!
+!   CG   (mode 1) original Liu method. The atoms are partitioned into blocks
+!                 (METIS, or a built-in graph-BFS fallback). Each block
+!                 Hamiltonian is diagonalized; the eigenstates whose energy
+!                 lies in [cg_emin, cg_emax] are retained (columns of Q_I).
+!                 Inter-block couplings are projected, T = H_IJ Q_J and
+!                 H_red(I,J) = Q_I^H T, and small entries are dropped with
+!                 the threshold epsilon.
+!   ICG  (mode 2) "improved" CG. Same partition, but the retained window is
+!                 a core energy window plus top/bottom buffers; the full block
+!                 eigenbasis (S_full, evals_full) is kept and the pair
+!                 couplings are projected in that eigenbasis, then sliced to
+!                 the retained states.
+!   ICGN (mode 3) ICG plus a Neumann-series self-energy correction
+!                 Sigma = H_PQ (E0 - D)^-1 [W (E0 - D)^-1]^order H_QP
+!                 (P = retained states, Q = discarded states) added to the
+!                 reduced Hamiltonian.
+!
+! Life cycle of one calculation (driven by uptight.F90):
+!   1. UPT_hamiltonian builds H, then calls cg_prepare / icg_prepare /
+!      icgn_prepare, which fill upt%cg_ham / icg_ham / icgn_ham (CSR) and the
+!      per-block data (upt%cg_blocks / icg_blocks / icgn_blocks, type CGBlock:
+!      rows, eigenvalues, Q = retained eigenvectors).
+!   2. cg_set_original remembers the orbital operator, cg_swap_in makes
+!      upt%ham point at the reduced operator. From now on every solver sees
+!      only the reduced matrix and does not know about coarse-graining.
+!   3. After the solve, cg_finalize_eigenvectors lifts the eigenvectors back
+!      (physical = Q * reduced, see cg_lift / icg_lift / icgn_lift) and
+!      cg_swap_out restores the original operator.
+!
+! Sparse storage convention used everywhere: CSR with Mi = row pointer
+! (size nrow+1), Mj = column index, M = values; sparse_fmt is 'F' (full),
+! 'U' (upper triangle) or 'L' (lower triangle).
+! ======================================================================
 module coarse_grain
    use, intrinsic :: iso_c_binding, only : c_int, c_double, c_char
   use precision, only : dp
@@ -11,6 +56,13 @@ module coarse_grain
   implicit none
   private
 
+  ! Set to .true. to print detailed coarse-graining statistics (per-block
+  ! progress, timings, METIS/BFS partition notes...). They are routed through
+  ! cg_log_progress. Messages that matter to the user (dimension summary,
+  ! fall-backs, Neumann diagnostics) use cg_log_important and are always shown.
+  logical, parameter :: CG_LOG_STATS = .false.
+
+  ! A CGPair holds the data of one pair (a,b), a<b, of blocks.
   type CGPair
      integer :: a = 0, b = 0
      ! v = transformed coupling; h = physical-space coupling collected sparsely
@@ -22,7 +74,7 @@ module coarse_grain
   end type CGPair
 
   public :: cg_configure, cg_prepare, cg_clear, cg_active, cg_lift
-  public :: cg_log_progress
+  public :: cg_log_progress, cg_log_important
   public :: cg_get_active, cg_lift_active
   public :: cg_swap_in, cg_swap_out, cg_set_original, cg_forget, cg_destroy_operator, &
            cg_finalize_eigenvectors
@@ -254,6 +306,7 @@ contains
     reduced = upt%eigen_vectors(1:nred, 1:num_ev)
 
     allocate(lifted(nfull, num_ev))
+    ! Map the eigenvectors of the reduced operator back to the physical basis.
     call cg_lift_active(upt, reduced, lifted)
 
     deallocate(upt%eigen_vectors)
@@ -709,7 +762,7 @@ contains
     if (.not.associated(energies) .or. .not.associated(eigenvectors)) then
        ierr = 13
     else if (.not. block_spectrum_valid(a, energies, eigenvectors, upt%cg_sub_tolerance)) then
-       call cg_log_progress(upt, 'iterative block subsolver failed validation; falling back to LAPACK for this block')
+       call cg_log_important(upt, 'iterative block subsolver failed validation; falling back to LAPACK for this block')
        call dense_eigh(a, w, ierr)
     else
        w = energies
@@ -845,12 +898,21 @@ contains
           ia=min(a,b); ib=max(a,b)
           slot=pair_slot_cg(pairs,npair,ia,ib,upt,pair_map)
           if(slot==0) then; ierr=11; return; end if
+          ! Accumulate T = H_AB * Q_B directly from the CSR entries, without
+          ! building the dense H_AB. Pairs are stored once with ia < ib, so
+          ! T always has the rows of block ia and the columns of Q_ib.
+          !   a < b : entry (r,c) already is an (ia,ib) element:
+          !           T(local(r),:) += M * Q_b(local(c),:)
+          !   a > b : the entry is the (ib,ia) element, so use its Hermitian
+          !           conjugate, which lives at (local(c), local(r)):
+          !           T(local(c),:) += conjg(M) * Q_a(local(r),:)
+          !           (Q of block a = ib, the row's block; NOT block b.)
           if(a < b) then
              pairs(slot)%t(local(r),:) = pairs(slot)%t(local(r),:) + &
                   upt%ham%M(k) * upt%cg_blocks(b)%q(local(c),:)
           else
              pairs(slot)%t(local(c),:) = pairs(slot)%t(local(c),:) + &
-                  conjg(upt%ham%M(k)) * upt%cg_blocks(b)%q(local(r),:)
+                  conjg(upt%ham%M(k)) * upt%cg_blocks(a)%q(local(r),:)
           end if
        end do
     end do
@@ -1084,22 +1146,39 @@ contains
     if (.not. present(keep_h) .or. .not. keep_h) deallocate(p%h)
   end subroutine project_pair
 
-  subroutine emit_pair(h,p,oa,ob,fmt,next)
+  ! Write the coupling block p%v of the block pair (a,b) into the reduced CSR h.
+  !   oa, ob     : offsets of the retained states of blocks a and b in the reduced basis
+  !   fmt        : 'F' writes the block and its Hermitian conjugate, 'U' only
+  !                the block (upper), 'L' only the conjugate (lower)
+  !   next(:)    : running insertion position of every reduced row (updated)
+  !   keep_zeros : if .true. exact zeros are written too. CG sizes its CSR from
+  !                the non-zero count (default, zeros skipped); ICG/ICGN size it
+  !                from the dense block size and must pass .true.
+  ! The number of slots written must match what the caller counted, otherwise
+  ! the tail of M/Mj of a row is left uninitialized.
+  subroutine emit_pair(h,p,oa,ob,fmt,next,keep_zeros)
     type(CSR),intent(inout)::h
     type(CGPair),intent(in)::p
     integer,intent(in)::oa,ob
     character(1),intent(in)::fmt
     integer,intent(inout)::next(:)
+    logical,intent(in),optional::keep_zeros
     integer::i,j,k
+    logical::skip_zero
+    ! CG counts only non-zero entries when sizing the CSR; ICG/ICGN size it with
+    ! the full nret x nret blocks, so they must emit every entry (keep_zeros),
+    ! otherwise the unfilled slots of M/Mj stay uninitialized.
+    skip_zero = .true.
+    if (present(keep_zeros)) skip_zero = .not. keep_zeros
     if(fmt/='L') then
        do i=1,size(p%v,1); do j=1,size(p%v,2)
-          if (abs(p%v(i,j)) == 0.0_dp) cycle
+          if (skip_zero .and. abs(p%v(i,j)) == 0.0_dp) cycle
           k=next(oa+i-1); h%Mj(k)=ob+j-1; h%M(k)=p%v(i,j); next(oa+i-1)=k+1
        end do; end do
     end if
     if(fmt=='F' .or. fmt=='L') then
        do j=1,size(p%v,2); do i=1,size(p%v,1)
-          if (abs(p%v(i,j)) == 0.0_dp) cycle
+          if (skip_zero .and. abs(p%v(i,j)) == 0.0_dp) cycle
           k=next(ob+j-1); h%Mj(k)=oa+i-1; h%M(k)=conjg(p%v(i,j)); next(ob+j-1)=k+1
        end do; end do
     end if
@@ -1349,8 +1428,8 @@ contains
        end do
        ! Reuse diagonalize_block but operating on icg_blocks:
        ! We replicate inline for icg_blocks (can't pass icg vs cg distinction).
-      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'processing')
-      call diagonalize_block(upt, i, atom_of, row_of, ierr)
+      call cg_log_block(upt, 'icg', i, upt%icg_blocks(i)%nrow, 'processing')
+      call icg_diagonalize_block(upt, i, row_of, ierr)
        if (ierr /= 0) return
        row_of(upt%icg_blocks(i)%rows) = 0
     end do
@@ -1603,6 +1682,10 @@ contains
     allocate(rowcount(nred), next(nred)); rowcount = 1
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
+       ! CSR sizing: every retained row gets 1 diagonal entry (the eigenvalue)
+       ! plus a FULL nret(b) x nret(a) coupling block per neighbouring pair. The
+       ! count is the dense block size, so emit_pair must be called with
+       ! keep_zeros=.true. below, otherwise some slots of M/Mj stay unwritten.
        select case(upt%ham%sparse_fmt)
        case('F')
           rowcount(roff(a):roff(a+1)-1) = rowcount(roff(a):roff(a+1)-1) + upt%icg_blocks(b)%nret
@@ -1627,7 +1710,7 @@ contains
     end do
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
-       call emit_pair(upt%icg_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next)
+       call emit_pair(upt%icg_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next, .true.)
     end do
     upt%icg_ham%nnz = nnz
     call create_matrix(upt%icg_U, nred, nred, nred)
@@ -1906,8 +1989,8 @@ contains
        do j = 1, upt%icgn_blocks(i)%nrow
           row_of(upt%icgn_blocks(i)%rows(j)) = j
        end do
-      call cg_log_block(upt, 'cg', i, upt%cg_blocks(i)%nrow, 'processing')
-      call diagonalize_block(upt, i, atom_of, row_of, ierr)
+      call cg_log_block(upt, 'icgn', i, upt%icgn_blocks(i)%nrow, 'processing')
+      call icgn_diagonalize_block(upt, i, row_of, ierr)
        if (ierr /= 0) return
        row_of(upt%icgn_blocks(i)%rows) = 0
     end do
@@ -2365,7 +2448,17 @@ contains
 
   end subroutine icgn_prepare
 
+   ! Statistics/progress message: printed only when CG_LOG_STATS is .true.
+   ! (disabled by default so that a normal run is not flooded with CG details).
    subroutine cg_log_progress(upt, message)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: message
+      if (CG_LOG_STATS) call cg_log_important(upt, message)
+   end subroutine cg_log_progress
+
+   ! Message that is always forwarded to the host application log (through the
+   ! C++ callback upt_cg_log_message): summaries, fall-backs, diagnostics.
+   subroutine cg_log_important(upt, message)
       type(OUPT), intent(in) :: upt
       character(*), intent(in) :: message
       character(kind=c_char), allocatable :: c_message(:)
@@ -2378,7 +2471,7 @@ contains
       end do
       call upt_cg_log_message(c_message, int(message_length, c_int))
       deallocate(c_message)
-   end subroutine cg_log_progress
+   end subroutine cg_log_important
 
    subroutine cg_log_block(upt, mode, block_number, block_dimension, phase)
       type(OUPT), intent(in) :: upt
@@ -2407,6 +2500,9 @@ contains
       call cg_log_progress(upt, trim(message))
    end subroutine cg_log_timing
 
+   ! One-shot summary of a finished preparation: original -> reduced dimension,
+   ! number of blocks, cut fraction and (ICGN) Neumann-series norm estimate.
+   ! This is the only CG statistic shown by default.
    subroutine cg_log_info(upt, mode, subsolver, backend, original_dim, reduced_dim, &
      nblocks, cut_fraction, sigma_t2, pi_converged, has_norm)
     type(OUPT), intent(in) :: upt
@@ -2420,13 +2516,13 @@ contains
         ', subsolver=', subsolver, ', backend=', backend, ', dimension=', &
         original_dim, ' -> ', reduced_dim, ', blocks=', nblocks, &
         ', retained fraction=', real(reduced_dim,dp)/max(1.0_dp,real(original_dim,dp))
-      call cg_log_progress(upt, trim(line))
+      call cg_log_important(upt, trim(line))
       write(line,'(a,f8.4)') 'cut fraction=', cut_fraction
-      call cg_log_progress(upt, trim(line))
+      call cg_log_important(upt, trim(line))
    if (has_norm) then
          write(line,'(a,f12.6,a,l1)') 'Neumann norm=', sigma_t2, &
          ', power iteration converged=', pi_converged
-         call cg_log_progress(upt, trim(line))
+         call cg_log_important(upt, trim(line))
     end if
   end subroutine cg_log_info
 
@@ -2539,6 +2635,9 @@ contains
     allocate(rowcount(nred), next(nred)); rowcount = 1
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
+       ! Same sizing rule as ICG: dense nret x nret blocks, hence keep_zeros=.true.
+       ! in the emit_pair call below. (This CSR is later converted to a dense
+       ! matrix, the Neumann self-energy is added, and it is re-sparsified.)
        select case(upt%ham%sparse_fmt)
        case('F')
           rowcount(roff(a):roff(a+1)-1) = rowcount(roff(a):roff(a+1)-1) + upt%icgn_blocks(b)%nret
@@ -2563,7 +2662,7 @@ contains
     end do
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
-       call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next)
+       call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next, .true.)
     end do
     upt%icgn_ham%nnz = nnz
     deallocate(roff, rowcount, next)

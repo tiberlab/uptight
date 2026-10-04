@@ -1945,7 +1945,9 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
        p1 = Mi( i + 1 ) - 1
        DO j = p0, p1
           col = Mj( j )
-          Bfac( i, col ) = M( j )
+          ! accumulate (not overwrite): sprs_ax sums duplicate (row,col)
+          ! entries, so the dense copy used for the LU must do the same.
+          Bfac( i, col ) = Bfac( i, col ) + M( j )
        END DO
     END DO
     IF ( fmt .EQ. 'U' .OR. fmt .EQ. 'L' .OR. fmt .EQ. 'u' .OR. fmt .EQ. 'l' ) THEN
@@ -1960,6 +1962,8 @@ SUBROUTINE fast_lanczos_ev_pold_opt( M, Mi, Mj,  sparse_fmt, &
        END DO
     END IF
     CALL SYSTEM_CLOCK( tc0 )
+    ! LU factorization of B = H - shift*I (dense, LAPACK). Every solve with
+    ! B^-1 in the Lanczos loop below is then a cheap ZGETRS back-substitution.
     CALL ZGETRF( n_ham, n_ham, Bfac, n_ham, ipiv, info )
     CALL SYSTEM_CLOCK( tc1 )
     t_fac = REAL( tc1 - tc0, dp ) / REAL( trate, dp )
@@ -2051,8 +2055,16 @@ CALL SYSTEM_CLOCK( tc0 )
        END DO
 
        S( 1:mm, 1:mm ) = Hm( 1:mm, 1:mm )
+       ! Diagonalize the projected (mm x mm) matrix. Its eigenvalues theta are
+       ! those of B^-1 = (H - shift)^-1; the physical ones are shift + 1/theta.
        CALL ZHEEV( 'V', 'U', mm, S, ncv, theta, work, 2 * ncv, rwork, info )
-       IF ( info .NE. 0 ) CALL throw_solve_exception(ERR_LANCZ_DIAG)
+       IF ( info .NE. 0 ) THEN
+          ! Typical cause: NaN/Inf in the projected matrix, i.e. a non-finite
+          ! or singular H - shift. Report it before aborting.
+          WRITE(*,*) 'ERROR: ZHEEV failed in shift-invert Lanczos, info =', info, &
+                     ' cycle=', cyc, ' mm=', mm, ' ncv=', ncv, ' n_ham=', n_ham
+          CALL throw_solve_exception(ERR_LANCZ_DIAG)
+       END IF
 
        best = 0
        DO i = 1, mm

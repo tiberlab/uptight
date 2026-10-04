@@ -32,7 +32,7 @@ module UPTIGHT
                                    sort_states
   USE alloys, only : init_mat_ion
   USE TB_ham, only : sparse_ham, hermitianize, check_if_hermitian
-  USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, cg_log_progress, &
+  USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, cg_log_progress, cg_log_important, &
                            cg_swap_in, cg_swap_out, cg_set_original, cg_destroy_operator, cg_finalize_eigenvectors, &
                            icg_prepare, icg_clear, icg_configure, &
                            icgn_prepare, icgn_clear, icgn_configure
@@ -350,11 +350,12 @@ contains
     if(upt%verbose.gt.0) write(*,*) '(uptight) compute new matrix'
     upt%cg_error = 0
     call sparse_ham(upt)
-    ! ===== CG DIAGNOSTIC =====
-    write(*,'(a,i0,a,i0,a,es14.6)') '[CG-DIAG] orbital H: nrow=', upt%ham%nrow, &
-         ' nnz=', upt%ham%nnz, ' sum_abs_M=', sum(abs(upt%ham%M))
-    ! ===========================
 
+    ! ---- Optional coarse-graining (CG / ICG / ICGN) --------------------
+    ! cg_prepare/icg_prepare/icgn_prepare build a reduced Hamiltonian from
+    ! the full orbital Hamiltonian just assembled. cg_swap_in (called at the
+    ! end of this routine) then makes upt%ham point at the reduced matrix so
+    ! that every solver transparently works on the smaller problem.
     if (upt%cg_enabled) then
        if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain subsolver ', upt%cg_subsolver, &
             ' backend ', upt%cg_subsolver_type
@@ -365,7 +366,7 @@ contains
          return
        end if
        if (upt%cg_check_neumann_convergence) then
-         call cg_log_progress(upt, 'mode=cg Neumann norm diagnostic is unavailable: CG has no discarded-state Q-Q operator')
+         call cg_log_important(upt, 'mode=cg Neumann norm diagnostic is unavailable: CG has no discarded-state Q-Q operator')
        end if
     end if
     if (upt%icg_enabled) then
@@ -378,7 +379,7 @@ contains
          return
        end if
        if (upt%cg_check_neumann_convergence) then
-         call cg_log_progress(upt, 'mode=icg Neumann norm diagnostic is unavailable: ICG has no retained Q-Q operator')
+         call cg_log_important(upt, 'mode=icg Neumann norm diagnostic is unavailable: ICG has no retained Q-Q operator')
        end if
     end if
     if (upt%icgn_enabled) then
@@ -401,18 +402,13 @@ contains
        end if
      end if
 
-! From here on upt%ham is the operator that has to be solved. Solvers do
+    ! ---- Hand the operator over to the solvers --------------------------
+    ! From here on upt%ham is the operator that has to be solved. Solvers do
     ! not know whether it is the original or a reduced one; the coarse-graining
     ! layer swaps it in and lifts the eigenvectors back on the way out.
     ! Record the orbital operator last, right before the swap: cg_prepare()
     ! rebuilds the coarse-graining bookkeeping, and nothing may overwrite the
     ! record afterwards.
-    ! ===== CG DIAGNOSTIC =====
-    if (upt%cg_enabled .and. upt%cg_ready) then
-       write(*,'(a,i0,a,i0,a,es14.6)') '[CG-DIAG] reduced H: nrow=', upt%cg_ham%nrow, &
-            ' nnz=', upt%cg_ham%nnz, ' sum_abs_M=', sum(abs(upt%cg_ham%M))
-    end if
-    ! ===========================
     call cg_set_original(upt)
 
     call cg_swap_in(upt, cg_on)
