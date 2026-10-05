@@ -26,7 +26,6 @@ MODULE lapack_driver
   private
   
   public :: lapack
-  public :: lapack_icgn_solve, lapack_icgn
 
   private :: assemble_dense_H, diagonalize_ham_i
   private :: diagonalize_ham
@@ -359,24 +358,5 @@ contains
       enddo
 
     end subroutine printmat_fc
-
-  subroutine lapack_icgn_solve(upt, h, eval)
-    use upt_param, only : OUPT
-    type(OUPT), intent(in)                        :: upt
-    complex(dp), intent(out), allocatable         :: h(:,:)
-    real(dp),    intent(out), allocatable         :: eval(:)
-    integer :: nred, err
-    nred = upt%icgn_ham%nrow
-    allocate(h(nred,nred), eval(nred), stat=err)
-    if (err /= 0) call alloc_error('lapack_icgn_solve','allocate','work')
-    call assemble_dense_H(upt%icgn_ham%M, upt%icgn_ham%Mj, upt%icgn_ham%Mi, &
-                          upt%icgn_ham%sparse_fmt, nred, h)
-    call diagonalize_ham(h, nred, eval)
-  end subroutine lapack_icgn_solve
-
-  subroutine lapack_icgn(upt)
-      type(OUPT), target :: upt
-      call lapack_active(upt)
-  end subroutine lapack_icgn
 
 END MODULE lapack_driver

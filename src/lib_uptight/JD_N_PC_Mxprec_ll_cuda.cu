@@ -102,7 +102,7 @@ extern "C" {
 void jd_single_gpu_no_pc_split_mxprec_pal_(int * N_ham, int * Size_Mat_real, int * Size_Mat_img, float * valptr_real, int * rowptr_real, int * colptr_real, float * valptr_img, int * rowptr_img, int * colptr_img, char * sparse_fmt, int * Band_type, double * JD_tol, double * Shift,  int * JD_Min_step, int * JD_Max_step, int * Num_ev, double * lambda_out, cuDoubleComplex * eigen_vec_out, double * LS_tol, int * LS_restart, int *LS_maxit, int *col_ind_low, int *col_ind_high, int *shift_init, int *shift_end, int * NUM_PROCS, int * ID,  int * UPT_COMM);
 
 void setdevicebeforeinit_();
-void upt_cg_log_message(const char* message, int length);
+void upt_log_message(const char* message, int length);
 
 } 
 
@@ -125,7 +125,7 @@ printf("gpu_env = %s, gpu = %d\n", gpu_env, gpu);
 
 static void jd_file_log(const char *message)
 {
-  upt_cg_log_message(message, (int)strlen(message));
+  upt_log_message(message, (int)strlen(message));
 }
 
 

@@ -53,11 +53,11 @@ MODULE JD_DIAG
   PRIVATE
 
   interface
-    subroutine upt_cg_log_message(message, length) bind(C, name='upt_cg_log_message')
+    subroutine upt_log_message(message, length) bind(C, name='upt_log_message')
       import :: c_char, c_int
       character(kind=c_char), intent(in) :: message(*)
       integer(c_int), value :: length
-    end subroutine upt_cg_log_message
+    end subroutine upt_log_message
   end interface
 
 !===========================================================================
@@ -75,7 +75,7 @@ CONTAINS
     do i = 1, n
       c_message(i) = message(i:i)
     end do
-    call upt_cg_log_message(c_message, int(n, c_int))
+    call upt_log_message(c_message, int(n, c_int))
     deallocate(c_message)
   end subroutine jd_log_dispatch
 
@@ -144,9 +144,9 @@ SUBROUTINE JD_EV(H, U, n_spin, min_step, long_step, max_step, &
     IF ( err .NE. 0 ) CALL alloc_error( 'jd_diag', 'jd_ev', 'eigen_seed' )
 
 
-    ! The CG preparation path may request the complete block spectrum.  In
-    ! that case num_ev can equal n_ham; the JD subspace must never exceed the
-    ! matrix dimension.
+    ! The coarse-graining preparation path may request the complete block
+    ! spectrum. In that case num_ev can equal n_ham; the JD subspace must
+    ! never exceed the matrix dimension.
     jd_min = min(num_ev+4, n_ham)
     jd_max = min(num_ev+10, n_ham)
     if (jd_max < jd_min) jd_max = jd_min

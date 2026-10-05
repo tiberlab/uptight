@@ -62,7 +62,7 @@ program test_supercell
                                   UPT_configure_icgn,              &
                                   UPT_get_icgn_info,               &
                                   upt_hamiltonian
-  USE lapack_driver,       only : lapack, lapack_icgn
+  USE lapack_driver,       only : lapack
   USE JD_driver,           only : jd
   USE lanczos_driver,      only : lanczos
   USE sparse_matrix,       only : destroy_matrix
@@ -356,7 +356,7 @@ program test_supercell
   upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
   upt%icgn_enabled = .true.
   select case (trim(solver_choice))
-  case ('LK'); call lapack_icgn(upt)  ! includes icgn_lift
+  case ('LK'); call lapack(upt)
   case default
      write(*,*) ' ICGN currently supports LK solver only'
      call destroy_matrix(upt%ham)

@@ -84,11 +84,11 @@ module coarse_grain
   public :: icgn_get_info
 
   interface
-       subroutine upt_cg_log_message(message, length) bind(C, name='upt_cg_log_message')
+       subroutine upt_log_message(message, length) bind(C, name='upt_log_message')
           import :: c_char, c_int
           character(kind=c_char), intent(in) :: message(*)
           integer(c_int), value :: length
-       end subroutine upt_cg_log_message
+       end subroutine upt_log_message
 
        integer(c_int) function cg_metis_partition(nvtxs, xadj, adjncy, vwgt, &
           adjwgt, nparts, ufactor, seed, part) bind(C, name='upt_cg_metis_partition')
@@ -1921,7 +1921,7 @@ contains
    end subroutine cg_log_progress
 
    ! Message that is always forwarded to the host application log (through the
-   ! C++ callback upt_cg_log_message): summaries, fall-backs, diagnostics.
+   ! C++ callback upt_log_message): summaries, fall-backs, diagnostics.
    subroutine cg_log_important(upt, message)
       type(OUPT), intent(in) :: upt
       character(*), intent(in) :: message
@@ -1933,7 +1933,7 @@ contains
       do i = 1, message_length
           c_message(i) = message(i:i)
       end do
-      call upt_cg_log_message(c_message, int(message_length, c_int))
+      call upt_log_message(c_message, int(message_length, c_int))
       deallocate(c_message)
    end subroutine cg_log_important
 
