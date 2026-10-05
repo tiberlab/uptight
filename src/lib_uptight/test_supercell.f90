@@ -26,17 +26,17 @@
 !   7:  nCB  (standard mode)
 !   8:  lambda_vb  (eV)
 !   9:  lambda_cb  (eV)
-!   10: n_blocks   (CG & ICG & ICGN)
+!   10: n_blocks   (CG & ICGN)
 !   11: cg_emin    (eV)
 !   12: cg_emax    (eV)
 !   13: imbalance  (METIS)
-!   14: icg_core_emin  (eV)
-!   15: icg_core_emax  (eV)
-!   16: icg_top_buffer   (eV)
-!   17: icg_bottom_buffer (eV)
-!   18: icg_epsilon    (threshold factor)
+!   14: icgn_core_emin  (eV)
+!   15: icgn_core_emax  (eV)
+!   16: icgn_top_buffer   (eV)
+!   17: icgn_bottom_buffer (eV)
+!   18: icgn_epsilon    (threshold factor)
 !   19: sub_tolerance (CG block solver tolerance)
-!   20: icgn_selfenergy_order (0,1,2,...)
+!   20: icgn_selfenergy_order (<0 = no correction, >=0 = Neumann order)
 !   21: icgn_E0     (eV, 0.0 = auto = core window midpoint)
 !   22: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
 !   23: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
@@ -59,12 +59,10 @@ program test_supercell
   USE alloys,              only : init_mat_ion
   USE uptight,             only : UPT_configure_coarse_graining,  &
                                   UPT_get_coarse_graining_info,    &
-                                  UPT_configure_improved_cg,       &
-                                  UPT_get_improved_cg_info,        &
                                   UPT_configure_icgn,              &
                                   UPT_get_icgn_info,               &
                                   upt_hamiltonian
-  USE lapack_driver,       only : lapack, lapack_icg, lapack_icgn
+  USE lapack_driver,       only : lapack, lapack_icgn
   USE JD_driver,           only : jd
   USE lanczos_driver,      only : lanczos
   USE sparse_matrix,       only : destroy_matrix
@@ -80,7 +78,7 @@ program test_supercell
   CHARACTER(MST) :: solver_choice
   INTEGER        :: n_blocks, nVB, nCB
   REAL(dp)       :: cg_emin, cg_emax, imbalance
-   REAL(dp)       :: icg_core_emin, icg_core_emax, icg_top_buffer, icg_bottom_buffer, icg_epsilon
+   REAL(dp)       :: icgn_core_emin, icgn_core_emax, icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local
    REAL(dp)       :: sub_tolerance
   INTEGER        :: icgn_selfenergy_order
   REAL(dp)       :: icgn_E0
@@ -89,7 +87,7 @@ program test_supercell
   INTEGER        :: icgn_pi_maxiter
   INTEGER        :: n_up, n_down
   REAL(sp)       :: solve_time
-  LOGICAL        :: cg_ready, icg_ready_flag, icgn_ready_flag
+  LOGICAL        :: cg_ready, icgn_ready_flag
   INTEGER        :: orig_dim, red_dim, nb_out
   REAL(dp)       :: cut_frac
   ! Reference eigenvalues from mode 1 (sorted ascending, allocated after mode 1)
@@ -129,11 +127,11 @@ program test_supercell
   read(10,*) cg_emin
   read(10,*) cg_emax
   read(10,*) imbalance
-  read(10,*) icg_core_emin
-  read(10,*) icg_core_emax
-   read(10,*) icg_top_buffer
-   read(10,*) icg_bottom_buffer
-  read(10,*) icg_epsilon
+  read(10,*) icgn_core_emin
+  read(10,*) icgn_core_emax
+   read(10,*) icgn_top_buffer
+   read(10,*) icgn_bottom_buffer
+  read(10,*) icgn_epsilon_local
    read(10,*) sub_tolerance
    read(10,*) icgn_selfenergy_order
   read(10,*) icgn_E0
@@ -151,10 +149,10 @@ program test_supercell
   write(*,'(a,a)')     ' Solver:       ', trim(solver_choice)
   write(*,'(a,i0)')    ' n_blocks:     ', n_blocks
   write(*,'(a,2f8.3)') '  CG window:   ', cg_emin, cg_emax
-  write(*,'(a,2f8.3)') '  ICG core:    ', icg_core_emin, icg_core_emax
-   write(*,'(a,f8.3)')  '  ICG top buffer:  ', icg_top_buffer
-   write(*,'(a,f8.3)')  '  ICG bottom buffer:  ', icg_bottom_buffer
-  write(*,'(a,es10.2)')'  ICG epsilon: ', icg_epsilon
+  write(*,'(a,2f8.3)') '  ICGN core:   ', icgn_core_emin, icgn_core_emax
+   write(*,'(a,f8.3)')  '  ICGN top buffer:  ', icgn_top_buffer
+   write(*,'(a,f8.3)')  '  ICGN bottom buffer:  ', icgn_bottom_buffer
+  write(*,'(a,es10.2)')'  ICGN epsilon: ', icgn_epsilon_local
    write(*,'(a,es10.2)')'  CG sub tolerance: ', sub_tolerance
   write(*,'(a,i0)')    '  ICGN order:  ', icgn_selfenergy_order
   write(*,'(a,f8.3)')  '  ICGN E0:     ', icgn_E0
@@ -219,7 +217,6 @@ program test_supercell
 
   ! ---- build the sparse Hamiltonian once (no CG); record n_ham -------------
   upt%cg_enabled   = .false.
-  upt%icg_enabled  = .false.
   upt%icgn_enabled = .false.
   upt%verbose = 0
   call upt_hamiltonian(pupt)
@@ -237,7 +234,6 @@ program test_supercell
   write(*,'(a)') '========================================'
 
   upt%cg_enabled   = .false.
-  upt%icg_enabled  = .false.
   upt%icgn_enabled = .false.
   num_ev = nVB + nCB
   allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
@@ -277,11 +273,9 @@ program test_supercell
 
   ! Re-build with only CG enabled so prepare is included in the timed region
   call destroy_matrix(upt%ham)
-  call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance, icg_epsilon)
-  call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-     icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
-  call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-     icg_top_buffer, icg_bottom_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+  call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance, icgn_epsilon_local)
+  call UPT_configure_icgn           (upt, .false., n_blocks, icgn_core_emin, icgn_core_emax, &
+     icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local, icgn_selfenergy_order, icgn_E0, imbalance, &
        icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes cg_prepare) ---
@@ -316,68 +310,19 @@ program test_supercell
 300 continue
 
   ! ==========================================================================
-  ! MODE 3: Improved coarse-graining
-  !   Clock starts: icg_prepare receives H
-  !   Clock stops:  eigenvectors lifted to original orbital basis
-  ! ==========================================================================
-  write(*,'(a)') '========================================'
-  write(*,'(a)') ' MODE 3: Improved coarse-graining'
-  write(*,'(a)') '========================================'
-
-  call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
-  call UPT_configure_improved_cg    (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
-     icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
-  call UPT_configure_icgn           (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-     icg_top_buffer, icg_bottom_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
-       icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
-
-  call set_clock()          ! --- start timing (includes icg_prepare) ---
-  call upt_hamiltonian(pupt)
-
-  call UPT_get_improved_cg_info(upt, icg_ready_flag, orig_dim, red_dim, nb_out, cut_frac)
-  if (.not. icg_ready_flag) then
-     write(*,*) ' WARNING: ICG not ready, skipping mode 3'
-     call destroy_matrix(upt%ham); goto 400
-  end if
-  write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
-       '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
-  num_ev = red_dim
-  allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
-           upt%particles(num_ev), stat=err)
-  upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
-  upt%icg_enabled = .true.
-  select case (trim(solver_choice))
-  case ('LK'); call lapack_icg(upt)   ! includes icg_lift
-  case default
-     write(*,*) ' ICG currently supports LK solver only'
-     call destroy_matrix(upt%ham)
-     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles); goto 400
-  end select
-  solve_time = get_sclock() ! --- stop timing (after lift) ---
-
-  write(*,'(a,i0)')     ' Bands found:  ', size(upt%eigen_values)
-  write(*,'(a,f10.3)')  ' Total time:   ', solve_time
-  write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
-  call write_eigenvalues('eigenvalues_icg.dat', upt%eigen_values, solve_time, &
-       'ICG', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down)
-  call destroy_matrix(upt%ham)
-  deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
-400 continue
-
-  ! ==========================================================================
-  ! MODE 4: Improved CG + Neumann self-energy correction (ICGN)
+  ! MODE 3: ICGN (improved CG with optional Neumann self-energy correction)
+  !   neumann_order < 0: no Neumann correction (same as plain ICG)
+  !   neumann_order >= 0: Neumann series applied to that order
   !   Clock starts: icgn_prepare receives H (includes self-energy build)
   !   Clock stops:  eigenvectors lifted to original orbital basis
   ! ==========================================================================
   write(*,'(a)') '========================================'
-  write(*,'(a)') ' MODE 4: ICGN (Neumann self-energy)'
+  write(*,'(a)') ' MODE 3: ICGN (improved CG + optional Neumann self-energy)'
   write(*,'(a)') '========================================'
 
   call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
-  call UPT_configure_improved_cg    (upt, .false., n_blocks, icg_core_emin, icg_core_emax, &
-     icg_top_buffer, icg_bottom_buffer, icg_epsilon, imbalance)
-  call UPT_configure_icgn           (upt, .true.,  n_blocks, icg_core_emin, icg_core_emax, &
-     icg_top_buffer, icg_bottom_buffer, icg_epsilon, icgn_selfenergy_order, icgn_E0, imbalance, &
+  call UPT_configure_icgn           (upt, .true.,  n_blocks, icgn_core_emin, icgn_core_emax, &
+     icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local, icgn_selfenergy_order, icgn_E0, imbalance, &
        icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes icgn_prepare) ---
@@ -386,8 +331,8 @@ program test_supercell
   call UPT_get_icgn_info(upt, icgn_ready_flag, orig_dim, red_dim, nb_out, cut_frac, &
        sigma_T2, pi_converged)
   if (.not. icgn_ready_flag) then
-     write(*,*) ' WARNING: ICGN not ready, skipping mode 4'
-     call destroy_matrix(upt%ham); goto 500
+     write(*,*) ' WARNING: ICGN not ready, skipping mode 3'
+     call destroy_matrix(upt%ham); goto 400
   end if
   write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
        '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
@@ -415,7 +360,7 @@ program test_supercell
   case default
      write(*,*) ' ICGN currently supports LK solver only'
      call destroy_matrix(upt%ham)
-     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles); goto 500
+     deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles); goto 400
   end select
   solve_time = get_sclock() ! --- stop timing (after lift) ---
 
@@ -427,7 +372,7 @@ program test_supercell
        sigma_T2=sigma_T2, pi_conv=pi_converged)
   call destroy_matrix(upt%ham)
   deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
-500 continue
+400 continue
 
   ! ---- cleanup --------------------------------------------------------------
   if (allocated(ref_evals)) deallocate(ref_evals)

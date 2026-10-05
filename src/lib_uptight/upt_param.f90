@@ -108,18 +108,9 @@ module upt_param
      type(CSR) :: cg_ham, cg_U
      type(CGBlock), dimension(:), pointer :: cg_blocks => null()
 
-     ! Improved coarse-graining state (core + buffer + level-1 acquaintance)
-     logical :: icg_enabled, icg_ready
-     integer :: icg_num_blocks, icg_original_dim, icg_reduced_dim
-     integer :: icg_subsolver, icg_subsolver_type
-     real(dp) :: icg_core_emin, icg_core_emax  ! core window
-    real(dp) :: icg_top_buffer, icg_bottom_buffer
-     real(dp) :: icg_epsilon                   ! acquaintance threshold factor
-     real(dp) :: icg_imbalance, icg_cut_fraction
-     type(CSR) :: icg_ham, icg_U
-     type(CGBlock), dimension(:), pointer :: icg_blocks => null()
-
-     ! Improved CG with Neumann self-energy correction (same P-space as ICG)
+     ! ICGN: improved coarse-graining with optional Neumann self-energy correction.
+     ! neumann_order < 0 means no Neumann correction (behaves like plain ICG);
+     ! neumann_order >= 0 applies the Neumann series to that order.
      logical :: icgn_enabled, icgn_ready
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
      integer :: icgn_subsolver, icgn_subsolver_type
@@ -222,21 +213,6 @@ contains
   upt%cg_pi_maxiter = 1000
   upt%cg_pi_tol = 1.e-3_dp
 
-   upt%icg_enabled = .false.
-   upt%icg_ready = .false.
-   upt%icg_num_blocks = 1
-   upt%icg_subsolver = 0
-   upt%icg_subsolver_type = 0
-   upt%icg_original_dim = 0
-   upt%icg_reduced_dim = 0
-   upt%icg_core_emin = -huge(1.0_dp)
-   upt%icg_core_emax = huge(1.0_dp)
-  upt%icg_top_buffer = 0.0_dp
-  upt%icg_bottom_buffer = 0.0_dp
-   upt%icg_epsilon = 1.e-3_dp
-   upt%icg_imbalance = 0.03_dp
-   upt%icg_cut_fraction = 0.0_dp
-
    upt%icgn_enabled = .false.
    upt%icgn_ready = .false.
    upt%icgn_num_blocks = 1
@@ -251,7 +227,7 @@ contains
    upt%icgn_epsilon = 1.e-3_dp
    upt%icgn_imbalance = 0.03_dp
    upt%icgn_cut_fraction = 0.0_dp
-   upt%icgn_selfenergy_order = 0
+   upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)
    upt%icgn_E0 = 0.0_dp
    upt%icgn_check_convergence = .false.
    upt%icgn_pi_maxiter = 1000

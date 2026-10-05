@@ -18,26 +18,27 @@
 !                 Inter-block couplings are projected, T = H_IJ Q_J and
 !                 H_red(I,J) = Q_I^H T, and small entries are dropped with
 !                 the threshold epsilon.
-!   ICG  (mode 2) "improved" CG. Same partition, but the retained window is
-!                 a core energy window plus top/bottom buffers; the full block
-!                 eigenbasis (S_full, evals_full) is kept and the pair
-!                 couplings are projected in that eigenbasis, then sliced to
-!                 the retained states.
-!   ICGN (mode 3) ICG plus a Neumann-series self-energy correction
+!   ICG  (mode 2) "improved" CG — this mode is now folded into ICGN.
+!                 Set neumann_order < 0 to skip the Neumann correction and
+!                 recover the plain ICG behaviour.
+!   ICGN (mode 2) improved CG with optional Neumann-series self-energy
+!                 correction:
 !                 Sigma = H_PQ (E0 - D)^-1 [W (E0 - D)^-1]^order H_QP
 !                 (P = retained states, Q = discarded states) added to the
 !                 reduced Hamiltonian.
+!                 neumann_order < 0 disables the correction (plain ICG);
+!                 neumann_order = 0, 1, 2, ... applies the series to that order.
 !
 ! Life cycle of one calculation (driven by uptight.F90):
-!   1. UPT_hamiltonian builds H, then calls cg_prepare / icg_prepare /
-!      icgn_prepare, which fill upt%cg_ham / icg_ham / icgn_ham (CSR) and the
-!      per-block data (upt%cg_blocks / icg_blocks / icgn_blocks, type CGBlock:
-!      rows, eigenvalues, Q = retained eigenvectors).
+!   1. UPT_hamiltonian builds H, then calls cg_prepare / icgn_prepare,
+!      which fill upt%cg_ham / icgn_ham (CSR) and the per-block data
+!      (upt%cg_blocks / icgn_blocks, type CGBlock: rows, eigenvalues,
+!      Q = retained eigenvectors).
 !   2. cg_set_original remembers the orbital operator, cg_swap_in makes
 !      upt%ham point at the reduced operator. From now on every solver sees
 !      only the reduced matrix and does not know about coarse-graining.
 !   3. After the solve, cg_finalize_eigenvectors lifts the eigenvectors back
-!      (physical = Q * reduced, see cg_lift / icg_lift / icgn_lift) and
+!      (physical = Q * reduced, see cg_lift / icgn_lift) and
 !      cg_swap_out restores the original operator.
 !
 ! Sparse storage convention used everywhere: CSR with Mi = row pointer
@@ -79,8 +80,6 @@ module coarse_grain
   public :: cg_swap_in, cg_swap_out, cg_set_original, cg_forget, cg_destroy_operator, &
            cg_finalize_eigenvectors
   public :: cg_get_info
-  public :: icg_configure, icg_prepare, icg_clear, icg_active, icg_lift
-  public :: icg_get_info
   public :: icgn_configure, icgn_prepare, icgn_clear, icgn_active, icgn_lift
   public :: icgn_get_info
 
@@ -136,7 +135,7 @@ contains
     upt%cg_num_blocks = nblocks
     upt%cg_emin = emin
     upt%cg_emax = emax
-    upt%icg_epsilon = epsilon
+    upt%icgn_epsilon = epsilon
     upt%cg_imbalance = imbalance
   end subroutine cg_configure
 
@@ -155,10 +154,6 @@ contains
        active_ham => upt%cg_ham
        active_u => upt%cg_U
        active = .true.
-    else if (icg_active(upt)) then
-       active_ham => upt%icg_ham
-       active_u => upt%icg_U
-       active = .true.
     else if (icgn_active(upt)) then
        active_ham => upt%icgn_ham
        active_u => upt%icgn_U
@@ -172,8 +167,6 @@ contains
     complex(dp), intent(out) :: physical(:,:)
     if (cg_active(upt)) then
        call cg_lift(upt, reduced, physical)
-    else if (icg_active(upt)) then
-       call icg_lift(upt, reduced, physical)
     else if (icgn_active(upt)) then
        call icgn_lift(upt, reduced, physical)
     else
@@ -330,9 +323,6 @@ contains
     n = 0
     if (cg_active(upt)) then
       call cg_get_info(upt, ready, od, rd, nb, cf)
-      if (ready) n = od
-    else if (icg_active(upt)) then
-      call icg_get_info(upt, ready, od, rd, nb, cf)
       if (ready) n = od
     else if (icgn_active(upt)) then
       block
@@ -941,7 +931,7 @@ contains
           do k = 1, size(pairs(i)%v,2)
              if (abs(pairs(i)%v(j,k))**2 / &
                  max(abs(upt%cg_blocks(a)%eval(j) - upt%cg_blocks(b)%eval(k)), tiny(1.0_dp)) < &
-                 upt%icg_epsilon) then
+                 upt%icgn_epsilon) then
                 pairs(i)%v(j,k) = (0.0_dp,0.0_dp)
              end if
           end do
@@ -956,7 +946,7 @@ contains
     call system_clock(timer_end)
     timer_seconds = real(timer_end-timer_start,dp) / real(max(1_8,timer_rate),dp)
     call cg_log_timing(upt, 'CG dense left projection + epsilon filtering', timer_seconds)
-    write(line,'(a,es12.4)') 'mode=cg coupling filter epsilon=', upt%icg_epsilon
+    write(line,'(a,es12.4)') 'mode=cg coupling filter epsilon=', upt%icgn_epsilon
     call cg_log_progress(upt, trim(line))
     call cg_log_progress(upt, 'mode=cg interblock projection + epsilon filtering complete')
     call cg_log_progress(upt, 'mode=cg reduced Hamiltonian: projection phase exited')
@@ -1165,8 +1155,8 @@ contains
     logical,intent(in),optional::keep_zeros
     integer::i,j,k
     logical::skip_zero
-    ! CG counts only non-zero entries when sizing the CSR; ICG/ICGN size it with
-    ! the full nret x nret blocks, so they must emit every entry (keep_zeros),
+    ! CG counts only non-zero entries when sizing the CSR; ICGN sizes it with
+    ! the full nret x nret blocks, so it must emit every entry (keep_zeros),
     ! otherwise the unfilled slots of M/Mj stay uninitialized.
     skip_zero = .true.
     if (present(keep_zeros)) skip_zero = .not. keep_zeros
@@ -1213,544 +1203,15 @@ contains
   end subroutine cg_lift
 
   ! ===========================================================================
-  ! IMPROVED COARSE-GRAINING (core + buffer + level-1 acquaintance)
-  ! ===========================================================================
-
-   subroutine icg_configure(upt, enabled, nblocks, core_emin, core_emax, &
-                                          top_buffer, bottom_buffer, epsilon, imbalance)
-    type(OUPT), intent(inout) :: upt
-    logical, intent(in) :: enabled
-    integer, intent(in) :: nblocks
-   real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, imbalance
-    call icg_clear(upt)
-    upt%icg_enabled     = enabled
-    upt%icg_num_blocks  = nblocks
-    upt%icg_core_emin   = core_emin
-    upt%icg_core_emax   = core_emax
-   upt%icg_top_buffer = top_buffer
-   upt%icg_bottom_buffer = bottom_buffer
-    upt%icg_epsilon     = epsilon
-    upt%icg_imbalance   = imbalance
-  end subroutine icg_configure
-
-  logical function icg_active(upt)
-    type(OUPT), intent(in) :: upt
-    icg_active = upt%icg_enabled .and. upt%icg_ready
-  end function icg_active
-
-  subroutine icg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
-    type(OUPT), intent(in) :: upt
-    logical, intent(out) :: ready
-    integer, intent(out) :: original_dim, reduced_dim, nblocks
-    real(dp), intent(out) :: cut_fraction
-    ready         = upt%icg_ready
-    original_dim  = upt%icg_original_dim
-    reduced_dim   = upt%icg_reduced_dim
-    nblocks       = upt%icg_num_blocks
-    cut_fraction  = upt%icg_cut_fraction
-  end subroutine icg_get_info
-
-  subroutine icg_clear(upt)
-    type(OUPT), intent(inout) :: upt
-    integer :: i
-    if (associated(upt%icg_ham%M)) call destroy_matrix(upt%icg_ham)
-    if (associated(upt%icg_U%M))   call destroy_matrix(upt%icg_U)
-    if (associated(upt%icg_blocks)) then
-       do i = 1, size(upt%icg_blocks)
-          if (associated(upt%icg_blocks(i)%rows))       deallocate(upt%icg_blocks(i)%rows)
-          if (associated(upt%icg_blocks(i)%eval))       deallocate(upt%icg_blocks(i)%eval)
-          if (associated(upt%icg_blocks(i)%q))          deallocate(upt%icg_blocks(i)%q)
-          if (associated(upt%icg_blocks(i)%evals_full)) deallocate(upt%icg_blocks(i)%evals_full)
-          if (associated(upt%icg_blocks(i)%S_full))     deallocate(upt%icg_blocks(i)%S_full)
-          if (associated(upt%icg_blocks(i)%retained_idx)) deallocate(upt%icg_blocks(i)%retained_idx)
-       end do
-       deallocate(upt%icg_blocks)
-    end if
-    upt%icg_ready        = .false.
-    upt%icg_original_dim = 0
-    upt%icg_reduced_dim  = 0
-    upt%icg_cut_fraction = 0.0_dp
-  end subroutine icg_clear
-
-  ! ---------------------------------------------------------------------------
-  ! icg_prepare: partition → diagonalize blocks (full S) → select states with
-  !   improved criterion → project inter-block couplings → build icg_ham CSR
-  ! ---------------------------------------------------------------------------
-  subroutine icg_prepare(upt, ierr)
-    type(OUPT), intent(inout) :: upt
-    integer, intent(out) :: ierr
-
-    ! Reuse cg_prepare's partition + block-diag machinery by temporarily
-    ! mapping icg_* params into cg_* fields, running cg_prepare, then
-    ! replacing the keep mask with the improved criterion.
-    ! We do NOT call cg_prepare directly to avoid coupling; instead we
-    ! reproduce the minimal needed steps inline, calling the same helpers.
-
-    integer :: n, na, nb_atoms, i, j, k, p, q_int, status, nedge, maxedge
-    integer :: r, c, br, bc, npair, total_ret, pos
-    integer, allocatable :: atom_of(:), local_of(:), label(:), row_of(:)
-    integer, allocatable :: counts(:), cursor(:), offsets(:), bsize(:)
-    integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
-    real(dp), allocatable :: edge_weight(:)
-    real(dp) :: max_weight, all_weight, cut_weight, workspace_mib
-    character(len=256) :: line
-    type(CGPair), allocatable :: pairs(:)
-
-    ! keep_mask(b, i) : should state i of block b be retained?
-    logical, allocatable :: is_core(:,:), keep_mask(:,:)
-
-    integer :: ia, ib, slot, nred, nnz
-    integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:), pair_map(:,:)
-    complex(dp), allocatable :: g_full(:,:)
-
-    ierr = 0
-    call icg_clear(upt)
-    if (.not. upt%icg_enabled) return
-   call cg_log_progress(upt, 'mode=icg preparation started')
-    if (num_procs /= 1) then
-       ierr = 1; write(*,*) '(icg) MPI not supported'; return
-    end if
-
-    na = upt%basis%n_basis
-    n  = upt%ham%nrow
-    if (na < 1 .or. upt%icg_num_blocks < 1 .or. upt%icg_num_blocks > na) then
-       ierr = 2; write(*,*) '(icg) invalid number of blocks'; return
-    end if
-   if (upt%icg_core_emin >= upt%icg_core_emax .or. upt%icg_top_buffer < 0.0_dp .or. &
-      upt%icg_bottom_buffer < 0.0_dp) then
-       ierr = 3; write(*,*) '(icg) invalid core window or buffer'; return
-    end if
-    if (.not. associated(upt%ham%M)) then
-       ierr = 4; write(*,*) '(icg) Hamiltonian not initialized'; return
-    end if
-
-    ! ---- Build atom→orbital mapping (same as cg_prepare) -------------------
-    allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
-    pos = 1
-    do i = 1, na
-       offsets(i) = pos
-       bsize(i)   = upt%n_spin * upt%basis%n_st(i)
-       do j = 1, bsize(i)
-          atom_of(pos) = i; local_of(pos) = j; pos = pos + 1
-       end do
-    end do
-    offsets(na+1) = pos
-    if (pos-1 /= n) then
-       ierr = 5; write(*,*) '(icg) atom/orbital mapping inconsistent'; return
-    end if
-
-    ! ---- Build atom graph and METIS partition (same as cg_prepare) ----------
-    maxedge = max(1, upt%ham%nnz)
-    allocate(edge_weight(maxedge), counts(na), label(na))
-    nedge = 0; max_weight = 0.0_dp; counts = 0
-    do r = 1, n
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (atom_of(r) == atom_of(c)) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          nedge = nedge + 1
-          if (nedge > maxedge) then; ierr = 6; return; end if
-          edge_weight(nedge) = abs(upt%ham%M(k))**2
-          counts(atom_of(r)) = counts(atom_of(r)) + 1
-          counts(atom_of(c)) = counts(atom_of(c)) + 1
-          max_weight = max(max_weight, edge_weight(nedge))
-       end do
-    end do
-    if (nedge == 0 .or. max_weight == 0.0_dp) then
-       ierr = 7; write(*,*) '(icg) atom graph has no couplings'; return
-    end if
-    allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
-    xadj(1) = 0_c_int
-    do i = 1, na
-       xadj(i+1) = xadj(i) + int(counts(i), c_int)
-       cursor(i)  = int(xadj(i)) + 1
-       vwgt(i)    = int(bsize(i), c_int)
-    end do
-    do r = 1, n
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (atom_of(r) == atom_of(c)) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          br = atom_of(r); bc = atom_of(c)
-          p  = max(1, nint(abs(upt%ham%M(k))**2 / max_weight * 1000000.0_dp))
-          adjncy(cursor(br)) = int(bc-1,c_int); adjwgt(cursor(br)) = int(p,c_int); cursor(br)=cursor(br)+1
-          adjncy(cursor(bc)) = int(br-1,c_int); adjwgt(cursor(bc)) = int(p,c_int); cursor(bc)=cursor(bc)+1
-       end do
-    end do
-    status = cg_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
-         int(upt%icg_num_blocks,c_int), int(nint(1000.0_dp*upt%icg_imbalance),c_int), 42_c_int, part)
-    if (status /= 0) then
-       call cg_log_progress(upt, 'METIS unavailable, using built-in graph-BFS fallback partitioning')
-       call cg_graph_partition(na, upt%icg_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
-    else
-       call cg_log_progress(upt, 'METIS partitioning done')
-    end if
-    do i = 1, na; label(i) = int(part(i)) + 1; end do
-
-    ! ---- cut fraction -------------------------------------------------------
-    all_weight = 0.0_dp; cut_weight = 0.0_dp
-    do r = 1, n
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (atom_of(r) == atom_of(c)) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          all_weight = all_weight + abs(upt%ham%M(k))**2
-          if (label(atom_of(r)) /= label(atom_of(c))) &
-               cut_weight = cut_weight + abs(upt%ham%M(k))**2
-       end do
-    end do
-    upt%icg_cut_fraction = cut_weight / all_weight
-
-    ! ---- Allocate blocks and fill rows arrays --------------------------------
-    deallocate(counts)
-    allocate(upt%icg_blocks(upt%icg_num_blocks), counts(upt%icg_num_blocks))
-    counts = 0
-    do i = 1, na; counts(label(i)) = counts(label(i)) + bsize(i); end do
-    do i = 1, upt%icg_num_blocks
-       upt%icg_blocks(i)%nrow = counts(i)
-       allocate(upt%icg_blocks(i)%rows(counts(i)))
-    end do
-    cursor = 0
-    do i = 1, na
-       br = label(i)
-       do j = offsets(i), offsets(i+1)-1
-          cursor(br) = cursor(br) + 1
-          upt%icg_blocks(br)%rows(cursor(br)) = j
-       end do
-    end do
-    call cg_log_progress(upt, 'mode=icg graph partition complete')
-
-    ! ---- Diagonalize each block fully (store S_full) -------------------------
-    allocate(row_of(n)); row_of = 0
-    do i = 1, upt%icg_num_blocks
-       do j = 1, upt%icg_blocks(i)%nrow
-          row_of(upt%icg_blocks(i)%rows(j)) = j
-       end do
-       ! Reuse diagonalize_block but operating on icg_blocks:
-       ! We replicate inline for icg_blocks (can't pass icg vs cg distinction).
-      call cg_log_block(upt, 'icg', i, upt%icg_blocks(i)%nrow, 'processing')
-      call icg_diagonalize_block(upt, i, row_of, ierr)
-       if (ierr /= 0) return
-       row_of(upt%icg_blocks(i)%rows) = 0
-    end do
-
-    ! ---- Improved keep mask: core + buffer + acquaintance -------------------
-    allocate(is_core(upt%icg_num_blocks, maxval(counts)), &
-             keep_mask(upt%icg_num_blocks, maxval(counts)))
-    is_core   = .false.
-    keep_mask = .false.
-
-    ! Step 1 & 2: core and buffer
-    do i = 1, upt%icg_num_blocks
-       do j = 1, upt%icg_blocks(i)%nrow
-          if (.not. associated(upt%icg_blocks(i)%evals_full)) cycle
-          associate(e => upt%icg_blocks(i)%evals_full(j))
-            if (e >= upt%icg_core_emin .and. e <= upt%icg_core_emax) then
-               is_core(i,j)   = .true.
-               keep_mask(i,j) = .true.
-            else if (e >= upt%icg_core_emin - upt%icg_bottom_buffer .and. &
-                     e <= upt%icg_core_emax + upt%icg_top_buffer) then
-               keep_mask(i,j) = .true.
-            end if
-          end associate
-       end do
-    end do
-
-    ! Step 3: level-1 acquaintance via inter-block coupling in eigenbasis
-    ! We need the transformed couplings g_ab = S_a^T * V_ab * S_b.
-    ! Build them on the fly from S_full and the physical Hamiltonian.
-    ! Rebuild row_of for all blocks simultaneously (needed for coupling loop)
-    row_of = 0
-    do i = 1, upt%icg_num_blocks
-       do j = 1, upt%icg_blocks(i)%nrow
-          row_of(upt%icg_blocks(i)%rows(j)) = j
-       end do
-    end do
-
-    ! Collect each physical block coupling once.  Only after all sparse
-    ! entries belonging to a pair have been collected do we perform the dense
-    ! block projection S_a^H H_ab S_b.
-    allocate(pairs(max(1, upt%ham%nnz))); npair = 0
-    allocate(pair_map(upt%icg_num_blocks, upt%icg_num_blocks)); pair_map = 0
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          ia = label(atom_of(r)); ib = label(atom_of(c))
-          if (ia == ib) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          if (upt%icg_blocks(ia)%nrow == 0 .or. upt%icg_blocks(ib)%nrow == 0) cycle
-          slot = pair_slot_icg(pairs, npair, min(ia,ib), max(ia,ib), upt, pair_map)
-          if (slot == 0) then; ierr = 11; return; end if
-          if (ia < ib) then
-             pairs(slot)%h(row_of(r),row_of(c)) = pairs(slot)%h(row_of(r),row_of(c)) + upt%ham%M(k)
-          else
-             pairs(slot)%h(row_of(c),row_of(r)) = pairs(slot)%h(row_of(c),row_of(r)) + conjg(upt%ham%M(k))
-          end if
-       end do
-    end do
-    deallocate(pair_map)
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       call project_pair(pairs(i), upt%icg_blocks(ia)%S_full, upt%icg_blocks(ib)%S_full)
-    end do
-
-   ! Now scan each pair using |g_ij|^2 / |E_i-E_j| > epsilon.
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       ! core in a → unselected in b
-       do j = 1, upt%icg_blocks(ia)%nrow
-          if (.not. is_core(ia, j)) cycle
-          do k = 1, upt%icg_blocks(ib)%nrow
-             if (keep_mask(ib, k)) cycle
-               if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icg_blocks(ia)%evals_full(j) - &
-                  upt%icg_blocks(ib)%evals_full(k)), tiny(1.0_dp)) > upt%icg_epsilon) &
-                  keep_mask(ib, k) = .true.
-          end do
-       end do
-       ! core in b → unselected in a (g_ba = g_ab^†)
-       do k = 1, upt%icg_blocks(ib)%nrow
-          if (.not. is_core(ib, k)) cycle
-          do j = 1, upt%icg_blocks(ia)%nrow
-             if (keep_mask(ia, j)) cycle
-               if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icg_blocks(ib)%evals_full(k) - &
-                  upt%icg_blocks(ia)%evals_full(j)), tiny(1.0_dp)) > upt%icg_epsilon) &
-                  keep_mask(ia, j) = .true.
-          end do
-       end do
-    end do
-    call destroy_pairs(pairs)
-
-    ! ---- Apply keep_mask to set nret and allocate q/eval --------------------
-    total_ret = 0
-    do i = 1, upt%icg_num_blocks
-       upt%icg_blocks(i)%nret = count(keep_mask(i, 1:upt%icg_blocks(i)%nrow))
-       total_ret = total_ret + upt%icg_blocks(i)%nret
-    end do
-    if (total_ret == 0) then
-       ierr = 9; write(*,*) '(icg) no states retained'; return
-    end if
-    upt%icg_original_dim = n; upt%icg_reduced_dim = total_ret
-
-    ! Build q/eval for each block using the keep_mask
-    do i = 1, upt%icg_num_blocks
-       if (upt%icg_blocks(i)%nret == 0) cycle
-       allocate(upt%icg_blocks(i)%eval(upt%icg_blocks(i)%nret))
-       allocate(upt%icg_blocks(i)%q(upt%icg_blocks(i)%nrow, upt%icg_blocks(i)%nret))
-       allocate(upt%icg_blocks(i)%retained_idx(upt%icg_blocks(i)%nret))
-       j = 0
-       do k = 1, upt%icg_blocks(i)%nrow
-          if (.not. keep_mask(i, k)) cycle
-          j = j + 1
-          upt%icg_blocks(i)%eval(j)         = upt%icg_blocks(i)%evals_full(k)
-          upt%icg_blocks(i)%q(:, j)         = upt%icg_blocks(i)%S_full(:, k)
-          upt%icg_blocks(i)%retained_idx(j) = k
-       end do
-    end do
-    deallocate(is_core, keep_mask)
-
-    ! ---- Rebuild row_of for all blocks (needed by build_icg_reduced_ham) ----
-    row_of = 0
-    do i = 1, upt%icg_num_blocks
-       do j = 1, upt%icg_blocks(i)%nrow
-          row_of(upt%icg_blocks(i)%rows(j)) = j
-       end do
-    end do
-
-    ! ---- Build reduced Hamiltonian using full S projection then cut ---------
-    call build_icg_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, ierr)
-    if (ierr /= 0) return
-    call destroy_pairs(pairs)
-
-    ! ---- Free S_full after projection ---------------------------------------
-    do i = 1, upt%icg_num_blocks
-       if (associated(upt%icg_blocks(i)%S_full))     deallocate(upt%icg_blocks(i)%S_full)
-       if (associated(upt%icg_blocks(i)%evals_full)) deallocate(upt%icg_blocks(i)%evals_full)
-       nullify(upt%icg_blocks(i)%S_full, upt%icg_blocks(i)%evals_full)
-    end do
-
-    upt%icg_ready = .true.
-       call cg_log_info(upt, 'icg', upt%icg_subsolver, upt%icg_subsolver_type, n, total_ret, &
-          upt%icg_num_blocks, upt%icg_cut_fraction, -1.0_dp, .false., .false.)
-
-  end subroutine icg_prepare
-
-  ! Diagonalize block ib of icg_blocks (identical logic to diagonalize_block but for icg).
-  subroutine icg_diagonalize_block(upt, ib, local, ierr)
-    type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: ib, local(:)
-    integer, intent(out) :: ierr
-    integer :: n, k, r, c
-    complex(dp), allocatable :: h(:,:)
-    real(dp), allocatable :: w(:)
-    ierr = 0; n = upt%icg_blocks(ib)%nrow
-    if (n == 0) then; upt%icg_blocks(ib)%nret = 0; return; end if
-    allocate(h(n,n), w(n)); h = (0.0_dp, 0.0_dp)
-    do r = 1, upt%ham%nrow
-       if (local(r) == 0) cycle
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (local(c) == 0) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          h(local(r), local(c)) = upt%ham%M(k)
-          if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
-       end do
-    end do
-   call coarse_eigh(upt, h, w, ierr, upt%icg_subsolver, upt%icg_subsolver_type)
-    if (ierr /= 0) return
-    allocate(upt%icg_blocks(ib)%evals_full(n), upt%icg_blocks(ib)%S_full(n,n))
-    upt%icg_blocks(ib)%evals_full = w
-    upt%icg_blocks(ib)%S_full     = h
-    deallocate(h, w)
-  end subroutine icg_diagonalize_block
-
-  ! pair_slot variant for icg: allocates v(nrow_a, nrow_b).
-  integer function pair_slot_icg(pairs, npair, a, b, upt, pair_map)
-    type(CGPair), intent(inout) :: pairs(:)
-    integer, intent(inout) :: npair
-    integer, intent(in) :: a, b
-    type(OUPT), intent(in) :: upt
-    integer, intent(inout) :: pair_map(:,:)
-    if (pair_map(a,b) /= 0) then
-       pair_slot_icg = pair_map(a,b); return
-    end if
-    npair = npair + 1
-    if (npair > size(pairs)) then; pair_slot_icg = 0; return; end if
-    pairs(npair)%a = a; pairs(npair)%b = b
-    allocate(pairs(npair)%h(upt%icg_blocks(a)%nrow, upt%icg_blocks(b)%nrow))
-    pairs(npair)%h = (0.0_dp, 0.0_dp)
-    pair_map(a,b) = npair
-    pair_slot_icg = npair
-  end function pair_slot_icg
-
-  ! Build reduced Hamiltonian for ICG — same algorithm as build_reduced_hamiltonian
-  ! but operating on icg_blocks and icg_ham.
-  subroutine build_icg_reduced_hamiltonian(upt, atom_of, label, local, pairs, npair, ierr)
-    type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: atom_of(:), label(:)
-    integer, intent(inout) :: local(:)
-    type(CGPair), allocatable, intent(out) :: pairs(:)
-    integer, intent(out) :: npair, ierr
-    integer :: i, j, k, r, c, a, b, ia, ib, nnz, pos, slot, nred
-    integer, allocatable :: roff(:), rowcount(:), next(:), pair_map(:,:)
-    complex(dp), allocatable :: g_full(:,:)
-    ierr = 0; nred = upt%icg_reduced_dim
-    allocate(roff(upt%icg_num_blocks+1)); roff(1) = 1
-    do i = 1, upt%icg_num_blocks; roff(i+1) = roff(i) + upt%icg_blocks(i)%nret; end do
-    allocate(pairs(max(1, upt%ham%nnz))); npair = 0
-    allocate(pair_map(upt%icg_num_blocks, upt%icg_num_blocks)); pair_map = 0
-
-    ! Collect physical H_ab first; transform each block pair only once.
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
-          if (a == b) cycle
-          if (upt%icg_blocks(a)%nrow == 0 .or. upt%icg_blocks(b)%nrow == 0) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          ia = min(a,b); ib = max(a,b)
-          slot = pair_slot_icg(pairs, npair, ia, ib, upt, pair_map)
-          if (slot == 0) then; ierr = 11; return; end if
-          if (a < b) then
-             pairs(slot)%h(local(r),local(c)) = pairs(slot)%h(local(r),local(c)) + upt%ham%M(k)
-          else
-             pairs(slot)%h(local(c),local(r)) = pairs(slot)%h(local(c),local(r)) + conjg(upt%ham%M(k))
-          end if
-       end do
-    end do
-    deallocate(pair_map)
-
-    do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       call project_pair(pairs(i), upt%icg_blocks(a)%S_full, upt%icg_blocks(b)%S_full)
-    end do
-
-    ! Slice to retained states using retained_idx
-    do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       g_full = pairs(i)%v
-       deallocate(pairs(i)%v)
-       allocate(pairs(i)%v(upt%icg_blocks(a)%nret, upt%icg_blocks(b)%nret))
-       do j = 1, upt%icg_blocks(b)%nret
-          do k = 1, upt%icg_blocks(a)%nret
-             pairs(i)%v(k,j) = g_full(upt%icg_blocks(a)%retained_idx(k), &
-                                       upt%icg_blocks(b)%retained_idx(j))
-          end do
-       end do
-       deallocate(g_full)
-    end do
-
-    ! Build CSR
-    allocate(rowcount(nred), next(nred)); rowcount = 1
-    do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       ! CSR sizing: every retained row gets 1 diagonal entry (the eigenvalue)
-       ! plus a FULL nret(b) x nret(a) coupling block per neighbouring pair. The
-       ! count is the dense block size, so emit_pair must be called with
-       ! keep_zeros=.true. below, otherwise some slots of M/Mj stay unwritten.
-       select case(upt%ham%sparse_fmt)
-       case('F')
-          rowcount(roff(a):roff(a+1)-1) = rowcount(roff(a):roff(a+1)-1) + upt%icg_blocks(b)%nret
-          rowcount(roff(b):roff(b+1)-1) = rowcount(roff(b):roff(b+1)-1) + upt%icg_blocks(a)%nret
-       case('L')
-          rowcount(roff(b):roff(b+1)-1) = rowcount(roff(b):roff(b+1)-1) + upt%icg_blocks(a)%nret
-       case default
-          rowcount(roff(a):roff(a+1)-1) = rowcount(roff(a):roff(a+1)-1) + upt%icg_blocks(b)%nret
-       end select
-    end do
-    nnz = sum(rowcount); call create_matrix(upt%icg_ham, nred, nred, nnz)
-    upt%icg_ham%sparse_fmt = upt%ham%sparse_fmt; upt%icg_ham%Mi(1) = 1
-    do i = 1, nred; upt%icg_ham%Mi(i+1) = upt%icg_ham%Mi(i) + rowcount(i); end do
-    next = upt%icg_ham%Mi(1:nred)
-    do a = 1, upt%icg_num_blocks
-       do i = 1, upt%icg_blocks(a)%nret
-          pos = next(roff(a)+i-1)
-          upt%icg_ham%Mj(pos) = roff(a)+i-1
-          upt%icg_ham%M(pos)  = upt%icg_blocks(a)%eval(i)
-          next(roff(a)+i-1) = pos + 1
-       end do
-    end do
-    do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       call emit_pair(upt%icg_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next, .true.)
-    end do
-    upt%icg_ham%nnz = nnz
-    call create_matrix(upt%icg_U, nred, nred, nred)
-    upt%icg_U%sparse_fmt = 'F'; upt%icg_U%Mi(1) = 1
-    do i = 1, nred
-       upt%icg_U%Mi(i) = i; upt%icg_U%Mj(i) = i; upt%icg_U%M(i) = (1.0_dp, 0.0_dp)
-    end do
-    upt%icg_U%Mi(nred+1) = nred + 1; upt%icg_U%nnz = nred
-    deallocate(roff, rowcount, next)
-  end subroutine build_icg_reduced_hamiltonian
-
-  ! Lift ICG eigenvectors from reduced basis back to physical space.
-  subroutine icg_lift(upt, reduced, physical)
-    type(OUPT), intent(in) :: upt
-    complex(dp), intent(in) :: reduced(:,:)
-    complex(dp), intent(out) :: physical(:,:)
-    integer :: i, j, off
-    physical = (0.0_dp, 0.0_dp); off = 1
-    do i = 1, size(upt%icg_blocks)
-       if (upt%icg_blocks(i)%nret > 0) then
-          do j = 1, size(upt%icg_blocks(i)%rows)
-             physical(upt%icg_blocks(i)%rows(j),:) = &
-                  matmul(upt%icg_blocks(i)%q(j,:), reduced(off:off+upt%icg_blocks(i)%nret-1,:))
-          end do
-       end if
-       off = off + upt%icg_blocks(i)%nret
-    end do
-  end subroutine icg_lift
-
-
   ! ==========================================================================
-  ! ICGN (improved CG + Neumann self-energy correction) routines
+  ! ICGN: improved CG with optional Neumann self-energy correction (mode 2)
   !
-  ! Strategy: icgn_prepare is a near-copy of icg_prepare operating on
-  ! icgn_* OUPT fields.  After building the reduced Hamiltonian (identical
-  ! P-space selection), we extract the H_PQ coupling matrices from the
-  ! already-built 'pairs' array (which holds the sliced block-eigenbasis
-  ! couplings between retained and discarded states) and add the Neumann
+  ! Strategy: icgn_prepare partitions atoms → diagonalizes blocks (full S) →
+  ! selects retained states with a core+buffer criterion → projects inter-block
+  ! couplings → builds icgn_ham CSR. When neumann_order >= 0, the Neumann
   ! self-energy  Sigma = H_PQ * (E0-D)^-1 * [W*(E0-D)^-1]^order * H_QP
-  ! directly into the dense form of icgn_ham before converting back to CSR.
+  ! is extracted from 'pairs' and added into the dense form of icgn_ham before
+  ! converting back to CSR. When neumann_order < 0 the correction is skipped.
   ! ==========================================================================
 
   subroutine icgn_configure(upt, enabled, nblocks, core_emin, core_emax, &
@@ -1887,7 +1348,7 @@ contains
        ierr = 4; write(*,*) '(icgn) Hamiltonian not initialized'; return
     end if
 
-    ! ---- Build atom→orbital mapping (identical to icg_prepare) -------------
+    ! ---- Build atom→orbital mapping (identical to icgn_prepare) ------------
     allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
     pos = 1
     do i = 1, na
@@ -1903,7 +1364,7 @@ contains
        ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'; return
     end if
 
-    ! ---- METIS partition (identical to icg_prepare) -------------------------
+    ! ---- METIS partition (same as icgn_prepare) ----------------------------
     maxedge = max(1, upt%ham%nnz)
     allocate(edge_weight(maxedge), counts(na), label(na))
     nedge = 0; max_weight = 0.0_dp; counts = 0
@@ -2110,16 +1571,17 @@ contains
        end do
     end do
 
-    ! ---- Build reduced Hamiltonian (same as ICG), keeping pairs for Sigma --
+    ! ---- Build reduced Hamiltonian (keeping pairs for Sigma) ----------------
     call build_icgn_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, ierr)
     if (ierr /= 0) return
 
-    ! =====================================================================
-    ! Self-energy correction  Sigma_{p,p'} via Neumann series
+    ! ====================================================================
+    ! Self-energy correction via Neumann series (skipped when neumann_order < 0)
+    ! ====================================================================
+    if (upt%icgn_selfenergy_order >= 0) then
     ! pairs(s)%v is now (nret_a x nret_b): H_PP sliced couplings.
     ! We need H_PQ: from the *unsliced* g_full before retained_idx slicing.
     ! Strategy: re-project directly from S_full to extract P-Q and Q-Q.
-    ! =====================================================================
 
     nred = total_ret
     allocate(H_dense(nred, nred))
@@ -2428,6 +1890,8 @@ contains
     upt%icgn_ham%nnz = k
     deallocate(H_dense)
 
+    end if  ! icgn_selfenergy_order >= 0 (Neumann correction)
+
     ! Build icgn_U (identity)
     call create_matrix(upt%icgn_U, nred, nred, nred)
     upt%icgn_U%sparse_fmt = 'F'; upt%icgn_U%Mi(1) = 1
@@ -2574,7 +2038,7 @@ contains
     pair_slot_icgn = npair
   end function pair_slot_icgn
 
-  ! Build reduced Hamiltonian for ICGN (same algorithm as build_icg_reduced_hamiltonian).
+  ! Build reduced Hamiltonian for ICGN.
   subroutine build_icgn_reduced_hamiltonian(upt, atom_of, label, local, pairs, npair, ierr)
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: atom_of(:), label(:)
@@ -2635,7 +2099,7 @@ contains
     allocate(rowcount(nred), next(nred)); rowcount = 1
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
-       ! Same sizing rule as ICG: dense nret x nret blocks, hence keep_zeros=.true.
+       ! Same sizing rule as ICGN: dense nret x nret blocks, hence keep_zeros=.true.
        ! in the emit_pair call below. (This CSR is later converted to a dense
        ! matrix, the Neumann self-energy is added, and it is re-sparsified.)
        select case(upt%ham%sparse_fmt)

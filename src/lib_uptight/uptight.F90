@@ -34,7 +34,6 @@ module UPTIGHT
   USE TB_ham, only : sparse_ham, hermitianize, check_if_hermitian
   USE coarse_grain, only : cg_prepare, cg_clear, cg_configure, cg_log_progress, cg_log_important, &
                            cg_swap_in, cg_swap_out, cg_set_original, cg_destroy_operator, cg_finalize_eigenvectors, &
-                           icg_prepare, icg_clear, icg_configure, &
                            icgn_prepare, icgn_clear, icgn_configure
   USE lanczos_driver, only : lanczos
   USE lapack_driver, only : lapack
@@ -57,7 +56,6 @@ module UPTIGHT
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
   public :: upt_get_coarse_graining_error
   public :: upt_coarse_graining_swap_out
-  public :: upt_configure_improved_cg, upt_get_improved_cg_info
   public :: upt_configure_icgn, upt_get_icgn_info
   public :: upt_configure_coarse_graining_mode
   public :: upt_writehamiltonian
@@ -91,12 +89,6 @@ contains
     NULLIFY(upt%cg_U%M)
     NULLIFY(upt%cg_U%Mj)
     NULLIFY(upt%cg_U%Mi)
-    NULLIFY(upt%icg_ham%M)
-    NULLIFY(upt%icg_ham%Mj)
-    NULLIFY(upt%icg_ham%Mi)
-    NULLIFY(upt%icg_U%M)
-    NULLIFY(upt%icg_U%Mj)
-    NULLIFY(upt%icg_U%Mi)
     NULLIFY(upt%icgn_ham%M)
     NULLIFY(upt%icgn_ham%Mj)
     NULLIFY(upt%icgn_ham%Mi)
@@ -351,11 +343,11 @@ contains
     upt%cg_error = 0
     call sparse_ham(upt)
 
-    ! ---- Optional coarse-graining (CG / ICG / ICGN) --------------------
-    ! cg_prepare/icg_prepare/icgn_prepare build a reduced Hamiltonian from
-    ! the full orbital Hamiltonian just assembled. cg_swap_in (called at the
-    ! end of this routine) then makes upt%ham point at the reduced matrix so
-    ! that every solver transparently works on the smaller problem.
+    ! ---- Optional coarse-graining (CG / ICGN) ---------------------------
+    ! cg_prepare/icgn_prepare build a reduced Hamiltonian from the full orbital
+    ! Hamiltonian just assembled. cg_swap_in (called at the end of this routine)
+    ! then makes upt%ham point at the reduced matrix so that every solver
+    ! transparently works on the smaller problem.
     if (upt%cg_enabled) then
        if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain subsolver ', upt%cg_subsolver, &
             ' backend ', upt%cg_subsolver_type
@@ -367,19 +359,6 @@ contains
        end if
        if (upt%cg_check_neumann_convergence) then
          call cg_log_important(upt, 'mode=cg Neumann norm diagnostic is unavailable: CG has no discarded-state Q-Q operator')
-       end if
-    end if
-    if (upt%icg_enabled) then
-       if (upt%verbose > 0) write(*,*) '(uptight) ICG subsolver ', upt%icg_subsolver, &
-            ' backend ', upt%icg_subsolver_type
-       call icg_prepare(upt, ierr)
-       if (ierr /= 0) then
-         upt%cg_error = ierr
-          write(*,*) '(uptight) improved coarse-graining preparation failed'
-         return
-       end if
-       if (upt%cg_check_neumann_convergence) then
-         call cg_log_important(upt, 'mode=icg Neumann norm diagnostic is unavailable: ICG has no retained Q-Q operator')
        end if
     end if
     if (upt%icgn_enabled) then
@@ -441,7 +420,7 @@ contains
     real(dp), intent(in), optional :: epsilon
     real(dp) :: cg_epsilon
 
-    cg_epsilon = upt%icg_epsilon
+    cg_epsilon = upt%icgn_epsilon
     if (present(epsilon)) cg_epsilon = epsilon
     call cg_configure(upt, enabled, nblocks, emin, emax, cg_epsilon, imbalance)
   end subroutine UPT_configure_coarse_graining
@@ -460,8 +439,7 @@ contains
     upt%cg_check_neumann_convergence = check_neumann_convergence
     upt%cg_pi_maxiter = pi_maxiter
     upt%cg_pi_tol = pi_tol
-    call icg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, imbalance)
-    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, 0, 0.0_dp, &
+    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, -1, 0.0_dp, &
         imbalance, .false., pi_maxiter, pi_tol)
     select case (mode)
     case (1)
@@ -469,11 +447,6 @@ contains
         upt%cg_subsolver = subsolver; upt%cg_subsolver_type = subsolver_type
         upt%cg_sub_tolerance = sub_tolerance
     case (2)
-       call icg_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
-           top_buffer, bottom_buffer, epsilon, imbalance)
-       upt%icg_subsolver = subsolver; upt%icg_subsolver_type = subsolver_type
-       upt%cg_sub_tolerance = sub_tolerance
-    case (3)
        call icgn_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
            top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, imbalance, &
            check_neumann_convergence, pi_maxiter, pi_tol)
@@ -485,7 +458,7 @@ contains
   end subroutine UPT_configure_coarse_graining_mode
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
-     use coarse_grain, only : cg_get_info, icg_get_info, icgn_get_info
+     use coarse_grain, only : cg_get_info, icgn_get_info
     type(OUPT), intent(in), target :: upt
     logical, intent(out) :: ready
      logical :: pi_converged
@@ -494,8 +467,6 @@ contains
     real(dp), intent(out) :: cut_fraction
      if (upt%cg_enabled) then
        call cg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
-     else if (upt%icg_enabled) then
-       call icg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
      else if (upt%icgn_enabled) then
        call icgn_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction, &
           sigma_t2, pi_converged)
@@ -531,24 +502,6 @@ contains
        call cg_swap_out(upt)
     end if
   end subroutine UPT_coarse_graining_swap_out
-
-  subroutine UPT_configure_improved_cg(upt, enabled, nblocks, core_emin, core_emax, &
-                                        top_buffer, bottom_buffer, epsilon, imbalance)
-    type(OUPT), intent(inout) :: upt
-    logical, intent(in) :: enabled
-    integer, intent(in) :: nblocks
-    real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, imbalance
-    call icg_configure(upt, enabled, nblocks, core_emin, core_emax, top_buffer, bottom_buffer, epsilon, imbalance)
-  end subroutine UPT_configure_improved_cg
-
-  subroutine UPT_get_improved_cg_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
-    use coarse_grain, only : icg_get_info
-    type(OUPT), intent(in) :: upt
-    logical, intent(out) :: ready
-    integer, intent(out) :: original_dim, reduced_dim, nblocks
-    real(dp), intent(out) :: cut_fraction
-    call icg_get_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
-  end subroutine UPT_get_improved_cg_info
 
   subroutine UPT_configure_icgn(upt, enabled, nblocks, core_emin, core_emax, &
                                  top_buffer, bottom_buffer, epsilon, selfenergy_order, E0, imbalance, &
@@ -637,7 +590,7 @@ contains
   end subroutine UPT_lapack
 
     subroutine UPT_validate_requested_states(upt)
-     use coarse_grain, only : cg_active, icg_active, icgn_active
+     use coarse_grain, only : cg_active, icgn_active
      type(OUPT), intent(in), target :: upt
      integer :: matrix_dimension, requested_states
      character(len=16) :: matrix_kind
@@ -647,9 +600,6 @@ contains
      if (cg_active(upt)) then
        matrix_dimension = upt%cg_ham%nrow
        matrix_kind = 'reduced CG'
-     else if (icg_active(upt)) then
-       matrix_dimension = upt%icg_ham%nrow
-       matrix_kind = 'reduced ICG'
      else if (icgn_active(upt)) then
        matrix_dimension = upt%icgn_ham%nrow
        matrix_kind = 'reduced ICGN'
