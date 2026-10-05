@@ -99,8 +99,6 @@ module upt_param
      logical :: cg_enabled, cg_ready
    integer :: cg_error
      integer :: cg_num_blocks, cg_original_dim, cg_reduced_dim
-     integer :: cg_subsolver, cg_subsolver_type
-    real(dp) :: cg_sub_tolerance
      real(dp) :: cg_emin, cg_emax, cg_imbalance, cg_cut_fraction
     logical :: cg_check_neumann_convergence
     integer :: cg_pi_maxiter
@@ -113,7 +111,6 @@ module upt_param
      ! neumann_order >= 0 applies the Neumann series to that order.
      logical :: icgn_enabled, icgn_ready
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
-     integer :: icgn_subsolver, icgn_subsolver_type
      real(dp) :: icgn_core_emin, icgn_core_emax
     real(dp) :: icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon
      real(dp) :: icgn_imbalance, icgn_cut_fraction
@@ -200,9 +197,6 @@ contains
    upt%cg_ready = .false.
    upt%cg_error = 0
    upt%cg_num_blocks = 1
-   upt%cg_subsolver = 0
-   upt%cg_subsolver_type = 0
-  upt%cg_sub_tolerance = 1.e-9_dp
    upt%cg_original_dim = 0
    upt%cg_reduced_dim = 0
    upt%cg_emin = -huge(1.0_dp)
@@ -216,8 +210,6 @@ contains
    upt%icgn_enabled = .false.
    upt%icgn_ready = .false.
    upt%icgn_num_blocks = 1
-   upt%icgn_subsolver = 0
-   upt%icgn_subsolver_type = 0
    upt%icgn_original_dim = 0
    upt%icgn_reduced_dim = 0
    upt%icgn_core_emin = -huge(1.0_dp)

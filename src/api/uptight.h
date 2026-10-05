@@ -250,9 +250,6 @@ extern "C"
 // Corresponding F77 arguments for upt_set_coarse_graining_mode:
 // integer, intent(in) :: handler(DAC_handlerSize)
 // integer, intent(in) :: mode
-// integer, intent(in) :: subsolver
-// integer, intent(in) :: subsolver_type
-// real(dp), intent(in) :: sub_tolerance
 // integer, intent(in) :: n_blocks
 // real(dp), intent(in) :: imbalance
 // real(dp), intent(in) :: energy_min
@@ -271,15 +268,13 @@ extern "C"
 
 {
   void upt_set_coarse_graining_mode_ (int const* handler, int const& mode, int 
-      const& subsolver, int const& subsolver_type, f77_double const& 
-      sub_tolerance, int const& n_blocks, f77_double const& imbalance, 
-      f77_double const& energy_min, f77_double const& energy_max, f77_double 
-      const& core_energy_min, f77_double const& core_energy_max, f77_double 
-      const& top_buffer, f77_double const& bottom_buffer, f77_double const& 
-      epsilon, int const& neumann_order, f77_double const& expansion_energy, 
-      int const& check_neumann_convergence, int const& 
-      power_iteration_max_iterations, f77_double const& 
-      power_iteration_tolerance);
+      const& n_blocks, f77_double const& imbalance, f77_double const& 
+      energy_min, f77_double const& energy_max, f77_double const& 
+      core_energy_min, f77_double const& core_energy_max, f77_double const& 
+      top_buffer, f77_double const& bottom_buffer, f77_double const& epsilon, 
+      int const& neumann_order, f77_double const& expansion_energy, int const& 
+      check_neumann_convergence, int const& power_iteration_max_iterations, 
+      f77_double const& power_iteration_tolerance);
 }
 
 

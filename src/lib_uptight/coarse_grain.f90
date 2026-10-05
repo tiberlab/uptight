@@ -52,8 +52,6 @@ module coarse_grain
   use sparse_matrix, only : CSR, create_matrix, destroy_matrix, write_csr
       use mpi_globals, only : num_procs, id0, id, shift_init, shift_end, &
          shift_init_Mi, shift_end_Mi
-   use jd_diag, only : JD_EV
-   use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
   implicit none
   private
 
@@ -599,7 +597,7 @@ contains
     call cg_log_progress(upt, trim(line))
     call destroy_pairs(pairs)
     upt%cg_ready = .true.
-       call cg_log_info(upt, 'cg', upt%cg_subsolver, upt%cg_subsolver_type, n, total_ret, &
+       call cg_log_info(upt, 'cg', n, total_ret, &
           upt%cg_num_blocks, upt%cg_cut_fraction, -1.0_dp, .false., .false.)
   end subroutine cg_prepare
 
@@ -626,7 +624,7 @@ contains
           if (r /= c) h(local(c),local(r)) = conjg(upt%ham%M(k))
        end do
     end do
-   call coarse_eigh(upt, h, w, ierr, upt%cg_subsolver, upt%cg_subsolver_type)
+   call coarse_eigh(h, w, ierr)
     if (ierr /= 0) return
     ! Store the FULL eigensystem — projection happens in build_reduced_hamiltonian
     ! using all nrow columns of S before the energy window truncation.
@@ -659,159 +657,13 @@ contains
     deallocate(work,rwork,iwork); ierr=info
   end subroutine dense_eigh
 
-  subroutine coarse_eigh(upt, a, w, ierr, subsolver, backend)
-    type(OUPT), intent(in) :: upt
+  ! Block diagonalization always uses LAPACK (ZHEEVD via dense_eigh).
+  subroutine coarse_eigh(a, w, ierr)
     complex(dp), intent(inout) :: a(:,:)
     real(dp), intent(out) :: w(:)
     integer, intent(out) :: ierr
-    integer, intent(in) :: subsolver, backend
-    type(CSR) :: block_ham, block_u
-    real(dp), pointer :: energies(:) => null()
-    complex(dp), pointer :: eigenvectors(:,:) => null()
-   integer :: n, i, j, pos, max_steps
-   integer :: old_shift_init, old_shift_end
-   integer :: old_shift_init_mi, old_shift_end_mi
-   integer :: seed_size, seed_value
-   integer, allocatable :: saved_seed(:), block_seed(:)
-
-    ierr = 0
-    n = size(w)
-    if (subsolver == 0) then
-       call dense_eigh(a, w, ierr)
-       return
-    end if
-   if (subsolver /= 1) then
-       ierr = 12
-       return
-    end if
-
-    call create_matrix(block_ham, n, n, n*n)
-    block_ham%sparse_fmt = 'F'
-    block_ham%Mi(1) = 1
-    pos = 1
-    do i = 1, n
-       do j = 1, n
-          block_ham%Mj(pos) = j
-          block_ham%M(pos) = a(i,j)
-          pos = pos + 1
-       end do
-       block_ham%Mi(i+1) = pos
-    end do
-
-    call create_matrix(block_u, n, n, n)
-    block_u%sparse_fmt = 'F'
-    block_u%Mi(1) = 1
-    do i = 1, n
-       block_u%Mj(i) = i
-       block_u%M(i) = (1.0_dp, 0.0_dp)
-       block_u%Mi(i+1) = i + 1
-    end do
-
-   ! The block solver must compute the complete spectrum, but it should use
-   ! the configured iteration budget. Scaling the iteration count with n makes
-   ! a large block effectively run thousands of expensive solves per state.
-   max_steps = upt%max_iter
-    allocate(energies(n), eigenvectors(n,n), stat=i)
-    if (i /= 0) then
-       ierr = 14
-       call destroy_matrix(block_ham)
-       call destroy_matrix(block_u)
-       return
-    end if
-    energies = 0.0_dp
-    eigenvectors = (0.0_dp, 0.0_dp)
-   ! Per-block solver logging intentionally disabled; phase timing is reported by cg_prepare.
-   ! Iterative full-spectrum preparation is sensitive to the random start
-   ! vector. Make each block solve reproducible and restore the caller's RNG
-   ! state afterward so direct solver behavior is unaffected.
-   call random_seed(size=seed_size)
-   allocate(saved_seed(seed_size), block_seed(seed_size))
-   call random_seed(get=saved_seed)
-   seed_value = 104729 + 7919*n + 97*subsolver
-   block_seed = seed_value + [(i-1, i=1,seed_size)]
-   call random_seed(put=block_seed)
-   old_shift_init = shift_init
-   old_shift_end = shift_end
-   old_shift_init_mi = shift_init_Mi(id)
-   old_shift_end_mi = shift_end_Mi(id)
-   shift_init = 1
-   shift_end = n
-   shift_init_Mi(id) = 1
-   shift_end_Mi(id) = n
-      call JD_EV(block_ham, block_u, 1, upt%min_iter, upt%long_iter, &
-             max_steps, energies, eigenvectors, 1, n, n, 0.0_dp, backend, &
-             upt%fast_tol, upt%cg_sub_tolerance, upt%ort_tol, 0, upt%dynamic, .false., &
-             upt%verbose, 1)
-   ! Per-block solver logging intentionally disabled.
-             shift_init = old_shift_init
-             shift_end = old_shift_end
-             shift_init_Mi(id) = old_shift_init_mi
-             shift_end_Mi(id) = old_shift_end_mi
-            call random_seed(put=saved_seed)
-            deallocate(saved_seed, block_seed)
-    if (.not.associated(energies) .or. .not.associated(eigenvectors)) then
-       ierr = 13
-    else if (.not. block_spectrum_valid(a, energies, eigenvectors, upt%cg_sub_tolerance)) then
-       call cg_log_important(upt, 'iterative block subsolver failed validation; falling back to LAPACK for this block')
-       call dense_eigh(a, w, ierr)
-    else
-       w = energies
-       a = eigenvectors
-    end if
-   if (associated(energies)) deallocate(energies)
-   if (associated(eigenvectors)) deallocate(eigenvectors)
-    call destroy_matrix(block_ham)
-    call destroy_matrix(block_u)
+    call dense_eigh(a, w, ierr)
   end subroutine coarse_eigh
-
-  logical function block_spectrum_valid(hamiltonian, energies, vectors, tolerance)
-    complex(dp), intent(in) :: hamiltonian(:,:), vectors(:,:)
-    real(dp), intent(in) :: energies(:), tolerance
-    integer :: n, i, j
-    real(dp) :: vector_norm, residual_norm, orthogonality, scale, limit
-    complex(dp), allocatable :: residual(:)
-
-    block_spectrum_valid = .false.
-    n = size(energies)
-    if (size(vectors,1) /= n .or. size(vectors,2) /= n) return
-    limit = max(1.0e-8_dp, 100.0_dp * max(tolerance, 1.0e-12_dp))
-    allocate(residual(n))
-
-    do i = 1, n
-       if (.not.ieee_is_finite(energies(i))) then
-          deallocate(residual)
-          return
-       end if
-       do j = 1, n
-          if (.not.ieee_is_finite(real(vectors(j,i))) .or. &
-              .not.ieee_is_finite(aimag(vectors(j,i)))) then
-             deallocate(residual)
-             return
-          end if
-       end do
-       vector_norm = sqrt(max(0.0_dp, real(dot_product(vectors(:,i), vectors(:,i)), dp)))
-       if (.not.ieee_is_finite(vector_norm) .or. vector_norm <= 1.0e-12_dp) then
-          deallocate(residual)
-          return
-       end if
-       residual = matmul(hamiltonian, vectors(:,i)) - energies(i) * vectors(:,i)
-       residual_norm = sqrt(max(0.0_dp, real(dot_product(residual, residual), dp)))
-       scale = max(1.0_dp, abs(energies(i)) * vector_norm)
-       if (.not.ieee_is_finite(residual_norm) .or. residual_norm / scale > limit) then
-          deallocate(residual)
-          return
-       end if
-       do j = 1, i - 1
-          orthogonality = abs(dot_product(vectors(:,j), vectors(:,i))) / vector_norm
-          if (.not.ieee_is_finite(orthogonality) .or. orthogonality > sqrt(limit)) then
-             deallocate(residual)
-             return
-          end if
-       end do
-    end do
-    deallocate(residual)
-    block_spectrum_valid = .true.
-  end function block_spectrum_valid
 
   logical function stored_entry(fmt, r, c)
     character(1), intent(in) :: fmt
@@ -1902,7 +1754,7 @@ contains
     upt%icgn_U%nnz = nred
 
     upt%icgn_ready = .true.
-       call cg_log_info(upt, 'icgn', upt%icgn_subsolver, upt%icgn_subsolver_type, n, total_ret, &
+       call cg_log_info(upt, 'icgn', n, total_ret, &
           upt%icgn_num_blocks, upt%icgn_cut_fraction, upt%icgn_sigma_T2, &
           upt%icgn_pi_converged, upt%icgn_check_convergence)
 
@@ -1967,18 +1819,17 @@ contains
    ! One-shot summary of a finished preparation: original -> reduced dimension,
    ! number of blocks, cut fraction and (ICGN) Neumann-series norm estimate.
    ! This is the only CG statistic shown by default.
-   subroutine cg_log_info(upt, mode, subsolver, backend, original_dim, reduced_dim, &
+   subroutine cg_log_info(upt, mode, original_dim, reduced_dim, &
      nblocks, cut_fraction, sigma_t2, pi_converged, has_norm)
     type(OUPT), intent(in) :: upt
     character(*), intent(in) :: mode
-    integer, intent(in) :: subsolver, backend, original_dim, reduced_dim, nblocks
+    integer, intent(in) :: original_dim, reduced_dim, nblocks
     real(dp), intent(in) :: cut_fraction, sigma_t2
     logical, intent(in) :: pi_converged, has_norm
       character(len=512) :: line
 
-      write(line,'(a,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,f8.4)') 'mode=', trim(mode), &
-        ', subsolver=', subsolver, ', backend=', backend, ', dimension=', &
-        original_dim, ' -> ', reduced_dim, ', blocks=', nblocks, &
+      write(line,'(a,a,a,i0,a,i0,a,i0,a,f8.4)') 'mode=', trim(mode), &
+        ', dimension=', original_dim, ' -> ', reduced_dim, ', blocks=', nblocks, &
         ', retained fraction=', real(reduced_dim,dp)/max(1.0_dp,real(original_dim,dp))
       call cg_log_important(upt, trim(line))
       write(line,'(a,f8.4)') 'cut fraction=', cut_fraction
@@ -2011,7 +1862,7 @@ contains
           if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
        end do
     end do
-   call coarse_eigh(upt, h, w, ierr, upt%icgn_subsolver, upt%icgn_subsolver_type)
+   call coarse_eigh(h, w, ierr)
     if (ierr /= 0) return
     allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
     upt%icgn_blocks(ib)%evals_full = w

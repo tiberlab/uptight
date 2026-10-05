@@ -349,8 +349,7 @@ contains
     ! then makes upt%ham point at the reduced matrix so that every solver
     ! transparently works on the smaller problem.
     if (upt%cg_enabled) then
-       if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain subsolver ', upt%cg_subsolver, &
-            ' backend ', upt%cg_subsolver_type
+       if (upt%verbose > 0) write(*,*) '(uptight) coarse-grain preparation started'
        call cg_prepare(upt, ierr)
        if (ierr /= 0) then
          upt%cg_error = ierr
@@ -362,8 +361,7 @@ contains
        end if
     end if
     if (upt%icgn_enabled) then
-       if (upt%verbose > 0) write(*,*) '(uptight) ICGN subsolver ', upt%icgn_subsolver, &
-            ' backend ', upt%icgn_subsolver_type
+       if (upt%verbose > 0) write(*,*) '(uptight) ICGN preparation started'
        call icgn_prepare(upt, ierr)
        if (ierr /= 0) then
          upt%cg_error = ierr
@@ -425,14 +423,14 @@ contains
     call cg_configure(upt, enabled, nblocks, emin, emax, cg_epsilon, imbalance)
   end subroutine UPT_configure_coarse_graining
 
-  subroutine UPT_configure_coarse_graining_mode(upt, mode, subsolver, subsolver_type, &
-      sub_tolerance, nblocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
+  subroutine UPT_configure_coarse_graining_mode(upt, mode, &
+      nblocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
       top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, check_neumann_convergence, &
       pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: mode, subsolver, subsolver_type, nblocks, neumann_order, pi_maxiter
+    integer, intent(in) :: mode, nblocks, neumann_order, pi_maxiter
     real(dp), intent(in) :: imbalance, energy_min, energy_max, core_energy_min, core_energy_max
-    real(dp), intent(in) :: top_buffer, bottom_buffer, epsilon, expansion_energy, pi_tol, sub_tolerance
+    real(dp), intent(in) :: top_buffer, bottom_buffer, epsilon, expansion_energy, pi_tol
     logical, intent(in) :: check_neumann_convergence
 
     call cg_configure(upt, .false., 1, -1.0_dp, 1.0_dp, epsilon, imbalance)
@@ -444,14 +442,10 @@ contains
     select case (mode)
     case (1)
        call cg_configure(upt, .true., nblocks, energy_min, energy_max, epsilon, imbalance)
-        upt%cg_subsolver = subsolver; upt%cg_subsolver_type = subsolver_type
-        upt%cg_sub_tolerance = sub_tolerance
     case (2)
        call icgn_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
            top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, imbalance, &
            check_neumann_convergence, pi_maxiter, pi_tol)
-      upt%icgn_subsolver = subsolver; upt%icgn_subsolver_type = subsolver_type
-      upt%cg_sub_tolerance = sub_tolerance
     case default
        write(*,*) '(uptight) invalid coarse-graining mode'; stop 1
     end select

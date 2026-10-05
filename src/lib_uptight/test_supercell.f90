@@ -35,8 +35,7 @@
 !   16: icgn_top_buffer   (eV)
 !   17: icgn_bottom_buffer (eV)
 !   18: icgn_epsilon    (threshold factor)
-!   19: sub_tolerance (CG block solver tolerance)
-!   20: icgn_selfenergy_order (<0 = no correction, >=0 = Neumann order)
+!   19: icgn_selfenergy_order (<0 = no correction, >=0 = Neumann order)
 !   21: icgn_E0     (eV, 0.0 = auto = core window midpoint)
 !   22: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
 !   23: n_down (n largest  negative eigenvalues for AAD, 0 to skip)
@@ -79,7 +78,6 @@ program test_supercell
   INTEGER        :: n_blocks, nVB, nCB
   REAL(dp)       :: cg_emin, cg_emax, imbalance
    REAL(dp)       :: icgn_core_emin, icgn_core_emax, icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local
-   REAL(dp)       :: sub_tolerance
   INTEGER        :: icgn_selfenergy_order
   REAL(dp)       :: icgn_E0
   LOGICAL        :: icgn_check_conv
@@ -132,7 +130,6 @@ program test_supercell
    read(10,*) icgn_top_buffer
    read(10,*) icgn_bottom_buffer
   read(10,*) icgn_epsilon_local
-   read(10,*) sub_tolerance
    read(10,*) icgn_selfenergy_order
   read(10,*) icgn_E0
   read(10,*) n_up
@@ -153,7 +150,6 @@ program test_supercell
    write(*,'(a,f8.3)')  '  ICGN top buffer:  ', icgn_top_buffer
    write(*,'(a,f8.3)')  '  ICGN bottom buffer:  ', icgn_bottom_buffer
   write(*,'(a,es10.2)')'  ICGN epsilon: ', icgn_epsilon_local
-   write(*,'(a,es10.2)')'  CG sub tolerance: ', sub_tolerance
   write(*,'(a,i0)')    '  ICGN order:  ', icgn_selfenergy_order
   write(*,'(a,f8.3)')  '  ICGN E0:     ', icgn_E0
   write(*,'(a,l1)')    '  ICGN check convergence: ', icgn_check_conv
@@ -181,7 +177,6 @@ program test_supercell
   upt%start_vb = 1;    upt%start_cb = 1
   upt%min_iter = 2;    upt%long_iter = 30;  upt%max_iter = 100000
   upt%fast_tol = 1.0d-1; upt%long_tol = 1.0d-10; upt%ort_tol = 1.0d-5
-   upt%cg_sub_tolerance = sub_tolerance
    upt%cg_check_neumann_convergence = icgn_check_conv
    upt%cg_pi_maxiter = icgn_pi_maxiter
    upt%cg_pi_tol = icgn_pi_tol

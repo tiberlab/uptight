@@ -553,7 +553,7 @@ subroutine upt_set_coarse_graining(handler, enabled, n_blocks, emin, emax, imbal
   call upt_configure_coarse_graining(pUPTs%pUPT, enabled /= 0, n_blocks, emin, emax, imbalance)
 end subroutine upt_set_coarse_graining
 
-subroutine upt_set_coarse_graining_mode(handler, mode, subsolver, subsolver_type, sub_tolerance, n_blocks, &
+subroutine upt_set_coarse_graining_mode(handler, mode, n_blocks, &
   imbalance, energy_min, energy_max, core_energy_min, core_energy_max, top_buffer, bottom_buffer, &
     epsilon, neumann_order, expansion_energy, check_neumann_convergence, &
     power_iteration_max_iterations, power_iteration_tolerance)
@@ -563,9 +563,6 @@ subroutine upt_set_coarse_graining_mode(handler, mode, subsolver, subsolver_type
   implicit none
   integer :: handler(DAC_handlerSize) ! if:var:in
   integer :: mode ! if:var:in
-  integer :: subsolver ! if:var:in
-  integer :: subsolver_type ! if:var:in
-  real(dp) :: sub_tolerance ! if:var:in
   integer :: n_blocks ! if:var:in
   real(dp) :: imbalance ! if:var:in
   real(dp) :: energy_min ! if:var:in
@@ -582,8 +579,8 @@ subroutine upt_set_coarse_graining_mode(handler, mode, subsolver, subsolver_type
   real(dp) :: power_iteration_tolerance ! if:var:in
   type(UPTPointers) :: pUPTs
   pUPTs = transfer(handler, pUPTs)
-  call upt_configure_coarse_graining_mode(pUPTs%pUPT, mode, subsolver, subsolver_type, &
-      sub_tolerance, n_blocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
+  call upt_configure_coarse_graining_mode(pUPTs%pUPT, mode, &
+      n_blocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
       top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
       power_iteration_max_iterations, power_iteration_tolerance)
 end subroutine upt_set_coarse_graining_mode
