@@ -119,6 +119,11 @@ coarse_grain_metis.o: coarse_grain_metis.c
 
 coarse_grain.o: lanczos.o JD.o
 
+# lanczos.F90 calls MPI_Bcast/MPI_Allreduce with several buffer types/ranks
+# (no explicit interface). Harmless; silence it for this file only so the
+# warning stays active everywhere else.
+lanczos.o: FFLAGS += -Wno-argument-mismatch
+
 ifdef CUDA
   OBJECTS += lanczos_cuda.o JD_N_PC_Mxprec_cuda.o
   ifdef UPT_MPI
