@@ -1124,8 +1124,8 @@ CONTAINS
        !-------------------------------------------------
        INTEGER i
        DO WHILE (i .LT. SIZE(Mi)-1 )
-          WRITE (*,*) ,'[',i,Mj(Mi(i):Mi(i+1)-1),']'
-          WRITE (*,*) ,' ',M(Mi(i):Mi(i+1)-1)
+          WRITE (*,*) '[',i,Mj(Mi(i):Mi(i+1)-1),']'
+          WRITE (*,*) ' ',M(Mi(i):Mi(i+1)-1)
           WRITE (*,*)
        END DO
      END SUBROUTINE sprs_screen
