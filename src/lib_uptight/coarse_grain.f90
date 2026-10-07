@@ -1362,26 +1362,32 @@ contains
     end do
 
     ! Level-1 acquaintance: collect physical block couplings, then project
-    ! each pair once at matrix level.
-    allocate(pairs(max(1, upt%ham%nnz))); npair = 0
-    allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          ia = label(atom_of(r)); ib = label(atom_of(c))
-          if (ia == ib) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
-          slot = pair_slot_icgn(pairs, npair, min(ia,ib), max(ia,ib), upt, pair_map)
-          if (slot == 0) then; ierr = 11; return; end if
-          if (ia < ib) then
-             pairs(slot)%h(row_of(r),row_of(c)) = pairs(slot)%h(row_of(r),row_of(c)) + upt%ham%M(k)
-          else
-             pairs(slot)%h(row_of(c),row_of(r)) = pairs(slot)%h(row_of(c),row_of(r)) + conjg(upt%ham%M(k))
-          end if
+    ! each pair once at matrix level.  The zero-acquaintance/no-Neumann case
+    ! defers pair construction until q is available and uses the CG-style
+    ! sparse projection path instead of materializing dense physical H_ab.
+    if (upt%icgn_add_core_acquaintances > 0 .or. upt%icgn_selfenergy_order >= 0) then
+       allocate(pairs(max(1, upt%ham%nnz))); npair = 0
+       allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
+       do r = 1, upt%ham%nrow
+          do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+             c = upt%ham%Mj(k)
+             ia = label(atom_of(r)); ib = label(atom_of(c))
+             if (ia == ib) cycle
+             if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+             if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
+             slot = pair_slot_icgn(pairs, npair, min(ia,ib), max(ia,ib), upt, pair_map)
+             if (slot == 0) then; ierr = 11; return; end if
+             if (ia < ib) then
+                pairs(slot)%h(row_of(r),row_of(c)) = pairs(slot)%h(row_of(r),row_of(c)) + upt%ham%M(k)
+             else
+                pairs(slot)%h(row_of(c),row_of(r)) = pairs(slot)%h(row_of(c),row_of(r)) + conjg(upt%ham%M(k))
+             end if
+          end do
        end do
-    end do
-    deallocate(pair_map)
+       deallocate(pair_map)
+    else
+       allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2))); npair = 0
+    end if
     if (upt%icgn_add_core_acquaintances > 0) then
        do i = 1, npair
           ia = pairs(i)%a; ib = pairs(i)%b
@@ -1422,7 +1428,8 @@ contains
        end do
     end do
        end if
-    call destroy_pairs(pairs)
+    ! Keep physical pair matrices for the zero-acquaintance fast path.
+    if (upt%icgn_add_core_acquaintances > 0) call destroy_pairs(pairs)
 
     ! ---- Apply keep_mask to nret, q, eval, retained_idx --------------------
     total_ret = 0
@@ -1935,6 +1942,36 @@ contains
     pair_slot_icgn = npair
   end function pair_slot_icgn
 
+  integer function pair_slot_icgn_fast(pairs,npair,a,b,upt,pair_map)
+    type(CGPair), intent(inout) :: pairs(:)
+    integer, intent(inout) :: npair
+    integer, intent(in) :: a,b
+    type(OUPT), intent(in) :: upt
+    integer, intent(inout) :: pair_map(:,:)
+
+    if (pair_map(a,b) /= 0) then
+       pair_slot_icgn_fast = pair_map(a,b)
+       return
+    end if
+
+    npair = npair + 1
+    if (npair > size(pairs)) then; pair_slot_icgn_fast = 0; return; end if
+    pairs(npair)%a = a; pairs(npair)%b = b
+    allocate(pairs(npair)%t(upt%icgn_blocks(a)%nrow, upt%icgn_blocks(b)%nret))
+    pairs(npair)%t = (0.0_dp, 0.0_dp)
+    pair_map(a,b) = npair
+    pair_slot_icgn_fast = npair
+  end function pair_slot_icgn_fast
+
+  subroutine project_accumulated_pair_icgn(p, qa)
+    type(CGPair), intent(inout) :: p
+    complex(dp), intent(in) :: qa(:,:)
+
+    allocate(p%v(size(qa,2), size(p%t,2)))
+    p%v = matmul(conjg(transpose(qa)), p%t)
+    deallocate(p%t)
+  end subroutine project_accumulated_pair_icgn
+
   ! Build reduced Hamiltonian for ICGN.
   subroutine build_icgn_reduced_hamiltonian(upt, atom_of, label, local, pairs, npair, ierr)
     type(OUPT), intent(inout) :: upt
@@ -1949,50 +1986,105 @@ contains
     ierr = 0; nred = upt%icgn_reduced_dim
     allocate(roff(upt%icgn_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icgn_num_blocks; roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret; end do
-    if (allocated(pairs)) call destroy_pairs(pairs)
-    allocate(pairs(max(1, upt%ham%nnz))); npair = 0
-    allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
 
-    ! Collect physical H_ab first; project each pair once at matrix level.
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
-          if (a == b) cycle
-          if (upt%icgn_blocks(a)%nrow == 0 .or. upt%icgn_blocks(b)%nrow == 0) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          ia = min(a,b); ib = max(a,b)
-          slot = pair_slot_icgn(pairs, npair, ia, ib, upt, pair_map)
-          if (slot == 0) then; ierr = 11; return; end if
-          if (a < b) then
-             pairs(slot)%h(local(r),local(c)) = pairs(slot)%h(local(r),local(c)) + upt%ham%M(k)
-          else
-             pairs(slot)%h(local(c),local(r)) = pairs(slot)%h(local(c),local(r)) + conjg(upt%ham%M(k))
-          end if
-       end do
-    end do
-    deallocate(pair_map)
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full, .true.)
-    end do
-
-    ! Slice to retained states using retained_idx
-    do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       g_full = pairs(i)%v
-       deallocate(pairs(i)%v)
-       allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
-       do j = 1, upt%icgn_blocks(b)%nret
-          do k = 1, upt%icgn_blocks(a)%nret
-             pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
-                                       upt%icgn_blocks(b)%retained_idx(j))
-             if (.not. cg_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
-                 upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
-                 pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
+    if (upt%icgn_add_core_acquaintances == 0 .and. upt%icgn_selfenergy_order < 0) then
+       ! Fast path: accumulate T = H_AB * Q_B directly from the global CSR,
+       ! exactly like CG.  No dense physical H_AB is needed because Neumann
+       ! corrections are disabled and the pairs are used only to build H_PP.
+       npair = 0
+       allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
+       do r = 1, upt%ham%nrow
+          do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+             c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
+             if (a == b) cycle
+             if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) cycle
+             if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+             ia = min(a,b); ib = max(a,b)
+             slot = pair_slot_icgn_fast(pairs, npair, ia, ib, upt, pair_map)
+             if (slot == 0) then; ierr = 11; return; end if
+             if (a < b) then
+                pairs(slot)%t(local(r),:) = pairs(slot)%t(local(r),:) + &
+                     upt%ham%M(k) * upt%icgn_blocks(b)%q(local(c),:)
+             else
+                pairs(slot)%t(local(c),:) = pairs(slot)%t(local(c),:) + &
+                     conjg(upt%ham%M(k)) * upt%icgn_blocks(a)%q(local(r),:)
+             end if
           end do
        end do
-       deallocate(g_full)
-    end do
+       deallocate(pair_map)
+       do i = 1, npair
+          a = pairs(i)%a; b = pairs(i)%b
+          call project_accumulated_pair_icgn(pairs(i), upt%icgn_blocks(a)%q)
+          do j = 1, upt%icgn_blocks(a)%nret
+             do k = 1, upt%icgn_blocks(b)%nret
+                if (.not. cg_coupling_survives(pairs(i)%v(j,k), &
+                    upt%icgn_blocks(a)%eval(j), upt%icgn_blocks(b)%eval(k), &
+                    upt%icgn_epsilon)) pairs(i)%v(j,k) = (0.0_dp, 0.0_dp)
+             end do
+          end do
+       end do
+    else if (upt%icgn_add_core_acquaintances == 0) then
+       ! Zero-acquaintance path with Neumann enabled: keep the full physical
+       ! pair matrices because the correction needs P-Q and Q-Q couplings.
+       do i = 1, npair
+          a = pairs(i)%a; b = pairs(i)%b
+          call project_pair(pairs(i), upt%icgn_blocks(a)%q, &
+               upt%icgn_blocks(b)%q, .true.)
+          do j = 1, upt%icgn_blocks(a)%nret
+             do k = 1, upt%icgn_blocks(b)%nret
+                if (.not. cg_coupling_survives(pairs(i)%v(j,k), &
+                    upt%icgn_blocks(a)%eval(j), upt%icgn_blocks(b)%eval(k), &
+                    upt%icgn_epsilon)) pairs(i)%v(j,k) = (0.0_dp, 0.0_dp)
+             end do
+          end do
+       end do
+    else
+       if (allocated(pairs)) call destroy_pairs(pairs)
+       allocate(pairs(max(1, upt%ham%nnz))); npair = 0
+       allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
+
+       ! Collect physical H_ab first; project each pair once at matrix level.
+       do r = 1, upt%ham%nrow
+          do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+             c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
+             if (a == b) cycle
+             if (upt%icgn_blocks(a)%nrow == 0 .or. upt%icgn_blocks(b)%nrow == 0) cycle
+             if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+             ia = min(a,b); ib = max(a,b)
+             slot = pair_slot_icgn(pairs, npair, ia, ib, upt, pair_map)
+             if (slot == 0) then; ierr = 11; return; end if
+             if (a < b) then
+                pairs(slot)%h(local(r),local(c)) = pairs(slot)%h(local(r),local(c)) + upt%ham%M(k)
+             else
+                pairs(slot)%h(local(c),local(r)) = pairs(slot)%h(local(c),local(r)) + conjg(upt%ham%M(k))
+             end if
+          end do
+       end do
+       deallocate(pair_map)
+       do i = 1, npair
+          ia = pairs(i)%a; ib = pairs(i)%b
+          call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, &
+               upt%icgn_blocks(ib)%S_full, .true.)
+       end do
+
+       ! Slice to retained states using retained_idx.
+       do i = 1, npair
+          a = pairs(i)%a; b = pairs(i)%b
+          g_full = pairs(i)%v
+          deallocate(pairs(i)%v)
+          allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+          do j = 1, upt%icgn_blocks(b)%nret
+             do k = 1, upt%icgn_blocks(a)%nret
+                pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
+                                          upt%icgn_blocks(b)%retained_idx(j))
+                if (.not. cg_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
+                    upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
+                    pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
+             end do
+          end do
+          deallocate(g_full)
+       end do
+    end if
 
     ! Build CSR.  Count exactly the entries that emit_pair will write:
     ! zero-valued reduced couplings are omitted to keep the sparse matrix small.
