@@ -436,33 +436,6 @@ contains
     upt%cg_cut_fraction = 0.0_dp
   end subroutine cg_clear
 
-  subroutine build_orbital_mapping(upt, atom_of, local_of, offsets, bsize, ierr, tag)
-    type(OUPT), intent(in) :: upt
-    integer, allocatable, intent(out) :: atom_of(:), local_of(:), offsets(:), bsize(:)
-    integer, intent(out) :: ierr
-    character(len=*), intent(in) :: tag
-    integer :: n, na, i, j, pos
-
-    ierr = 0
-    na = upt%basis%n_basis
-    n = upt%ham%nrow
-    allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
-    pos = 1
-    do i = 1, na
-       offsets(i) = pos
-       bsize(i) = upt%n_spin * upt%basis%n_st(i)
-       do j = 1, bsize(i)
-          atom_of(pos) = i; local_of(pos) = j; pos = pos + 1
-       end do
-    end do
-    offsets(na+1) = pos
-    if (pos-1 /= n) then
-       ierr = 5
-       write(*,*) '('//trim(tag)//') atom/orbital mapping is inconsistent'
-       return
-    end if
-  end subroutine build_orbital_mapping
-
   subroutine cg_prepare(upt, ierr)
     type(OUPT), intent(inout) :: upt
     integer, intent(out) :: ierr
@@ -500,7 +473,19 @@ contains
        write(*,*) '(cg) one block selected; energy window controls rank'
     end if
 
-    call build_orbital_mapping(upt, atom_of, local_of, offsets, bsize, ierr, 'cg')
+    allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
+    pos = 1
+    do i = 1, na
+       offsets(i) = pos
+       bsize(i) = upt%n_spin * upt%basis%n_st(i)
+       do j = 1, bsize(i)
+          atom_of(pos) = i; local_of(pos) = j; pos = pos + 1
+       end do
+    end do
+    offsets(na+1) = pos
+    if (pos-1 /= n) then
+       ierr = 5; write(*,*) '(cg) atom/orbital mapping is inconsistent'; return
+    end if
 
     ! Parallel graph edges are intentional: their summed weights are the
     ! Frobenius norm squared of an atom-to-atom Hamiltonian block.
@@ -1238,8 +1223,20 @@ contains
     end if
 
     ! ---- Build atom→orbital mapping (identical to icgn_prepare) ------------
-    call build_orbital_mapping(upt, atom_of, local_of, offsets, bsize, ierr, 'icgn')
+    allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
+    pos = 1
+    do i = 1, na
+       offsets(i) = pos
+       bsize(i)   = upt%n_spin * upt%basis%n_st(i)
+       do j = 1, bsize(i)
+          atom_of(pos) = i; local_of(pos) = j; pos = pos + 1
+       end do
+    end do
     call cg_log_progress(upt, 'mode=icgn graph partition complete')
+    offsets(na+1) = pos
+    if (pos-1 /= n) then
+       ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'; return
+    end if
 
     ! ---- METIS partition (same as icgn_prepare) ----------------------------
     maxedge = max(1, upt%ham%nnz)
