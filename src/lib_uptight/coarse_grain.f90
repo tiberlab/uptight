@@ -1015,9 +1015,9 @@ contains
   !   fmt        : 'F' writes the block and its Hermitian conjugate, 'U' only
   !                the block (upper), 'L' only the conjugate (lower)
   !   next(:)    : running insertion position of every reduced row (updated)
-  !   keep_zeros : if .true. exact zeros are written too. CG sizes its CSR from
-  !                the non-zero count (default, zeros skipped); ICG/ICGN size it
-  !                from the dense block size and must pass .true.
+  !   keep_zeros : if .true. exact zeros are written too. Default: zeros are
+  !                skipped. The caller must size the CSR with the same rule
+  !                (CG and ICGN both count only the non-zero entries).
   ! The number of slots written must match what the caller counted, otherwise
   ! the tail of M/Mj of a row is left uninitialized.
   subroutine emit_pair(h,p,oa,ob,fmt,next,keep_zeros)
@@ -1029,9 +1029,10 @@ contains
     logical,intent(in),optional::keep_zeros
     integer::i,j,k
     logical::skip_zero
-    ! CG counts only non-zero entries when sizing the CSR; ICGN sizes it with
-    ! the full nret x nret blocks, so it must emit every entry (keep_zeros),
-    ! otherwise the unfilled slots of M/Mj stay uninitialized.
+    ! Both CG and ICGN count only non-zero entries when sizing the CSR, so
+    ! zeros are skipped by default; with keep_zeros the caller must have
+    ! sized the CSR from the dense blocks, otherwise the unfilled slots of
+    ! M/Mj stay uninitialized.
     skip_zero = .true.
     if (present(keep_zeros)) skip_zero = .not. keep_zeros
     if(fmt/='L') then
@@ -1381,10 +1382,12 @@ contains
        end do
     end do
     deallocate(pair_map)
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full)
-    end do
+    if (upt%icgn_add_core_acquaintances > 0) then
+       do i = 1, npair
+          ia = pairs(i)%a; ib = pairs(i)%b
+          call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full)
+       end do
+    end if
 
     ! Acquaintance selection is optional. Level 1 is the currently implemented
     ! core-state acquaintance level; higher requested levels fall back to it.
@@ -1968,10 +1971,9 @@ contains
        end do
     end do
     deallocate(pair_map)
-
     do i = 1, npair
-       a = pairs(i)%a; b = pairs(i)%b
-       call project_pair(pairs(i), upt%icgn_blocks(a)%S_full, upt%icgn_blocks(b)%S_full, .true.)
+       ia = pairs(i)%a; ib = pairs(i)%b
+       call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full, .true.)
     end do
 
     ! Slice to retained states using retained_idx
@@ -1984,7 +1986,6 @@ contains
           do k = 1, upt%icgn_blocks(a)%nret
              pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
                                        upt%icgn_blocks(b)%retained_idx(j))
-             ! Common epsilon filter: failing couplings become exact zero.
              if (.not. cg_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
                  upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
                  pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
@@ -1993,22 +1994,19 @@ contains
        deallocate(g_full)
     end do
 
-    ! Build CSR
+    ! Build CSR.  Count exactly the entries that emit_pair will write:
+    ! zero-valued reduced couplings are omitted to keep the sparse matrix small.
     allocate(rowcount(nred), next(nred)); rowcount = 1
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
-       ! Same sizing rule as ICGN: dense nret x nret blocks, hence keep_zeros=.true.
-       ! in the emit_pair call below. (This CSR is later converted to a dense
-       ! matrix, the Neumann self-energy is added, and it is re-sparsified.)
-       select case(upt%ham%sparse_fmt)
-       case('F')
-          rowcount(roff(a):roff(a+1)-1) = rowcount(roff(a):roff(a+1)-1) + upt%icgn_blocks(b)%nret
-          rowcount(roff(b):roff(b+1)-1) = rowcount(roff(b):roff(b+1)-1) + upt%icgn_blocks(a)%nret
-       case('L')
-          rowcount(roff(b):roff(b+1)-1) = rowcount(roff(b):roff(b+1)-1) + upt%icgn_blocks(a)%nret
-       case default
-          rowcount(roff(a):roff(a+1)-1) = rowcount(roff(a):roff(a+1)-1) + upt%icgn_blocks(b)%nret
-       end select
+       do j = 1, size(pairs(i)%v,1)
+          do k = 1, size(pairs(i)%v,2)
+             if (abs(pairs(i)%v(j,k)) == 0.0_dp) cycle
+             if (upt%ham%sparse_fmt /= 'L') rowcount(roff(a)+j-1) = rowcount(roff(a)+j-1) + 1
+             if (upt%ham%sparse_fmt == 'F' .or. upt%ham%sparse_fmt == 'L') &
+                  rowcount(roff(b)+k-1) = rowcount(roff(b)+k-1) + 1
+          end do
+       end do
     end do
     nnz = sum(rowcount); call create_matrix(upt%icgn_ham, nred, nred, nnz)
     upt%icgn_ham%sparse_fmt = upt%ham%sparse_fmt; upt%icgn_ham%Mi(1) = 1
@@ -2024,7 +2022,7 @@ contains
     end do
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
-       call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next, .true.)
+       call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next)
     end do
     upt%icgn_ham%nnz = nnz
     deallocate(roff, rowcount, next)
