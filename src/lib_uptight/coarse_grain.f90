@@ -123,6 +123,29 @@ contains
     cg_original_valid = .true.
   end subroutine cg_set_original
 
+  ! Common coupling filter shared by CG and ICGN. A coupling V between two
+  ! block eigenstates with energies ea, eb survives only if
+  !   |V|^2 > epsilon * |ea - eb|        (strict: equality is filtered out)
+  ! with epsilon >= 0. This is the product form of |V|^2/|ea - eb| > epsilon,
+  ! so no division by a (nearly) vanishing energy difference occurs: for
+  ! degenerate states the right-hand side is 0 and any non-zero coupling
+  ! survives, without overflow or NaN. For epsilon = 0 the test reduces to
+  ! |V|^2 > 0, i.e. only exact zeros are dropped.
+  pure logical function cg_coupling_survives(v, ea, eb, epsilon)
+    complex(dp), intent(in) :: v
+    real(dp), intent(in) :: ea, eb, epsilon
+    real(dp) :: v2, de
+    v2 = real(v,dp)**2 + aimag(v)**2
+    cg_coupling_survives = .false.
+    if (.not. (v2 > 0.0_dp)) return            ! exact zero (or NaN): no coupling
+    de = abs(ea - eb)
+    if (de <= 0.0_dp) then
+       cg_coupling_survives = .true.           ! degenerate: |V|^2 > 0 = epsilon*0
+    else
+       cg_coupling_survives = (v2 > max(epsilon, 0.0_dp)*de)
+    end if
+  end function cg_coupling_survives
+
   subroutine cg_configure(upt, enabled, nblocks, emin, emax, epsilon, imbalance)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled
@@ -790,15 +813,14 @@ contains
        call project_accumulated_pair_cg(pairs(i), upt%cg_blocks(a)%q)
 
        ! CG keeps all retained states, but sparsifies the projected couplings
-       ! using the same criterion as ICG/ICGN:
-       !   |V_ij|^2 / |E_i-E_j| >= epsilon
-       ! Couplings below the threshold are explicitly zeroed; the states
-       ! themselves remain in the reduced Hamiltonian.
+       ! with the common filter (see cg_coupling_survives):
+       !   |V_ij|^2 > epsilon * |E_i-E_j|   (strict)
+       ! Couplings failing it are set to exact zero; the states themselves
+       ! remain in the reduced Hamiltonian. epsilon = 0 only removes exact zeros.
        do j = 1, size(pairs(i)%v,1)
           do k = 1, size(pairs(i)%v,2)
-             if (abs(pairs(i)%v(j,k))**2 / &
-                 max(abs(upt%cg_blocks(a)%eval(j) - upt%cg_blocks(b)%eval(k)), tiny(1.0_dp)) < &
-                 upt%icgn_epsilon) then
+             if (.not. cg_coupling_survives(pairs(i)%v(j,k), upt%cg_blocks(a)%eval(j), &
+                 upt%cg_blocks(b)%eval(k), upt%icgn_epsilon)) then
                 pairs(i)%v(j,k) = (0.0_dp,0.0_dp)
              end if
           end do
@@ -1363,15 +1385,18 @@ contains
        call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full)
     end do
 
+    ! Acquaintance selection: a non-kept state is added only if it has at least
+    ! one coupling to a core state that survives the common epsilon filter
+    ! (cg_coupling_survives), i.e. is non-zero after filtering.
     do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
-       do j = 1, upt%icgn_blocks(ib)%nrow
+       do j = 1, upt%icgn_blocks(ia)%nrow
           if (is_core(ia, j)) then
              do k = 1, upt%icgn_blocks(ib)%nrow
                 if (.not. keep_mask(ib, k)) then
-                      if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icgn_blocks(ia)%evals_full(j) - &
-                         upt%icgn_blocks(ib)%evals_full(k)), tiny(1.0_dp)) > upt%icgn_epsilon) &
-                         keep_mask(ib, k) = .true.
+                   if (cg_coupling_survives(pairs(i)%v(j,k), upt%icgn_blocks(ia)%evals_full(j), &
+                       upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) &
+                       keep_mask(ib, k) = .true.
                 end if
              end do
           end if
@@ -1380,9 +1405,9 @@ contains
           if (is_core(ib, k)) then
              do j = 1, upt%icgn_blocks(ia)%nrow
                 if (.not. keep_mask(ia, j)) then
-                      if (abs(pairs(i)%v(j,k))**2 / max(abs(upt%icgn_blocks(ib)%evals_full(k) - &
-                         upt%icgn_blocks(ia)%evals_full(j)), tiny(1.0_dp)) > upt%icgn_epsilon) &
-                         keep_mask(ia, j) = .true.
+                   if (cg_coupling_survives(pairs(i)%v(j,k), upt%icgn_blocks(ib)%evals_full(k), &
+                       upt%icgn_blocks(ia)%evals_full(j), upt%icgn_epsilon)) &
+                       keep_mask(ia, j) = .true.
                 end if
              end do
           end if
@@ -1533,6 +1558,9 @@ contains
           do k = 1, upt%icgn_blocks(ib)%nrow
              if (local_ret_idx(ib, k) /= 0) cycle ! k is in P
              if (abs(g_full(upt%icgn_blocks(ia)%retained_idx(j), k)) < 1.0e-14_dp) cycle
+             if (.not. cg_coupling_survives(g_full(upt%icgn_blocks(ia)%retained_idx(j), k), &
+                 upt%icgn_blocks(ia)%evals_full(upt%icgn_blocks(ia)%retained_idx(j)), &
+                 upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) cycle
              npq = npq + 1
              if (npq > size(pq_p)) then
                 call grow_int_array(pq_p, 2*size(pq_p))
@@ -1549,6 +1577,10 @@ contains
           do k = 1, upt%icgn_blocks(ia)%nrow
              if (local_ret_idx(ia, k) /= 0) cycle ! k is in P
              if (abs(g_full(k, upt%icgn_blocks(ib)%retained_idx(j))) < 1.0e-14_dp) cycle
+             if (.not. cg_coupling_survives(g_full(k, upt%icgn_blocks(ib)%retained_idx(j)), &
+                 upt%icgn_blocks(ia)%evals_full(k), &
+                 upt%icgn_blocks(ib)%evals_full(upt%icgn_blocks(ib)%retained_idx(j)), &
+                 upt%icgn_epsilon)) cycle
              npq = npq + 1
              if (npq > size(pq_p)) then
                 call grow_int_array(pq_p, 2*size(pq_p))
@@ -1592,6 +1624,8 @@ contains
              do k = 1, upt%icgn_blocks(ib)%nrow
                 if (local_ret_idx(ib, k) /= 0) cycle ! k in P, skip
                 if (abs(g_full(j, k)) < 1.0e-14_dp) cycle
+                if (.not. cg_coupling_survives(g_full(j, k), upt%icgn_blocks(ia)%evals_full(j), &
+                    upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) cycle
                 nqq = nqq + 1
                 if (nqq > size(qq_i)) then
                    call grow_int_array(qq_i, 2*size(qq_i))
@@ -1944,6 +1978,10 @@ contains
           do k = 1, upt%icgn_blocks(a)%nret
              pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
                                        upt%icgn_blocks(b)%retained_idx(j))
+             ! Common epsilon filter: failing couplings become exact zero.
+             if (.not. cg_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
+                 upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
+                 pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
           end do
        end do
        deallocate(g_full)

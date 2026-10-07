@@ -216,7 +216,7 @@ contains
    upt%icgn_core_emax = huge(1.0_dp)
   upt%icgn_top_buffer = 0.0_dp
   upt%icgn_bottom_buffer = 0.0_dp
-   upt%icgn_epsilon = 1.e-3_dp
+   upt%icgn_epsilon = 0.0_dp   ! 0 = coupling filter disabled
    upt%icgn_imbalance = 0.03_dp
    upt%icgn_cut_fraction = 0.0_dp
    upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)
