@@ -6,7 +6,7 @@
 #include <metis.h>
 #endif
 
-int upt_cg_metis_partition(int nvtxs, const int *xadj, const int *adjncy,
+int upt_icgn_metis_partition(int nvtxs, const int *xadj, const int *adjncy,
                            const int *vwgt, const int *adjwgt, int nparts,
                            int ufactor, int seed, int *part)
 {

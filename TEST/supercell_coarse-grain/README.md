@@ -23,16 +23,16 @@ Config file format (one value per line):
   7:  nCB  (standard mode)
   8:  lambda_vb  (eV)
   9:  lambda_cb  (eV)
-  10: n_blocks   (for CG & ICG & ICGN)
-  11: cg_emin    (eV)
-  12: cg_emax    (eV)
-  13: imbalance  (METIS)
-  14: icg_core_emin  (eV)
-  15: icg_core_emax  (eV)
-  16: icg_top_buffer   (eV)
-  17: icg_bottom_buffer (eV)
-  18: icg_epsilon    (threshold factor)
-  19: sub_tolerance (CG block solver tolerance)
+  10: n_blocks   (for ICGN & ICG & ICGN)
+  11: icgn_emin    (eV)
+  12: icgn_emax    (eV)
+  13: metis_imbalance  (METIS)
+  14: icgn_core_emin  (eV)
+  15: icgn_core_emax  (eV)
+  16: icgn_top_buffer   (eV)
+  17: icgn_bottom_buffer (eV)
+  18: icgn_epsilon    (threshold factor)
+  19: sub_tolerance (ICGN block solver tolerance)
   20: icgn_selfenergy_order (0,1,2,...)
   21: icgn_E0     (eV, 0.0 = auto = core window midpoint)
   22: n_up   (n smallest positive eigenvalues for AAD, 0 to skip)
@@ -61,10 +61,10 @@ From `TEST/supercell_coarse-grain/`:
 The program will:
 - Read configuration from `config`
 - Build the structure and Hamiltonian
-- Solve at Gamma point (k = 0, 0, 0) only using individual modes in the order: standard full diagonalization (standard), coarse-graining (cg), improved coarse-graining (icg), improved coarse-graining + Neumann corrections for self-energy (icgn)
-- Write results to `eigenvalues_<mode-label>.dat` where `<mode-label>` is either "standard", "cg", "icg", "icgn"
+- Solve at Gamma point (k = 0, 0, 0) only using individual modes in the order: standard full diagonalization (standard), coarse-graining (icgn), improved coarse-graining (icg), improved coarse-graining + Neumann corrections for self-energy (icgn)
+- Write results to `eigenvalues_<mode-label>.dat` where `<mode-label>` is either "standard", "icgn", "icg", "icgn"
 
 ## Santity checks:
 1. Setting `n_blocks` to 1 in line 10 should make results of other modes exactly the same as that of the "standard" mode, no matter the other inputs
-2. Setting a very large energy window in "cg", "icg" and "icgn" modes that covers the whole spectrum of the Hamiltonian should make the results of these modes exactly the same as that of the "standard" mode, no matter the other inputs, no matter the number of blocks
+2. Setting a very large energy window in "icgn", "icg" and "icgn" modes that covers the whole spectrum of the Hamiltonian should make the results of these modes exactly the same as that of the "standard" mode, no matter the other inputs, no matter the number of blocks
 

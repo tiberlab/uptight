@@ -22,8 +22,8 @@ c     .. PARAMETERS ..
 c
 c===========================================================================
 
-      INTEGER gmres, cgstab
-      PARAMETER ( gmres = 1, cgstab = 2 )
+      INTEGER gmres, icgnstab
+      PARAMETER ( gmres = 1, icgnstab = 2 )
 
       INTEGER kmax, jmax, jmin, method, m, l, maxnmv, maxstep, order
       INTEGER testspace, n, lwork
@@ -142,7 +142,7 @@ c...  v = pointer to search space JDQZ with max dimension jmax
       
       IF ( method .EQ. gmres ) THEN
          v = u + m + 1
-      ELSE IF ( method .EQ. cgstab ) THEN
+      ELSE IF ( method .EQ. icgnstab ) THEN
 	 v = u + 2*l + 6
       END IF
 
@@ -254,7 +254,7 @@ c===========================================================================
      $              work(1,kz), work(1,q), invqkz, ldqkz,
      $              ipivqkz, f, work(1,u), work(1,tp) )
                
-	    ELSEIF ( method.EQ. cgstab ) THEN
+	    ELSEIF ( method.EQ. icgnstab ) THEN
 
 	       CALL zcgstabl_real( n, work( 1, v+j ), work(1,d),
      $              l, deps, mxmv, zalpha, zbeta, k+1,

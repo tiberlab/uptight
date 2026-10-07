@@ -25,20 +25,20 @@ module upt_param
   private
 
 
-   public :: OUPT, set_defaults, CGBlock
+   public :: OUPT, set_defaults, ICGNBlock
 
   ! Local retained basis for one coarse-grained atom partition.
-  type CGBlock
+  type ICGNBlock
      integer :: nrow = 0
      integer :: nret = 0
      integer, dimension(:), pointer :: rows => null()
      real(dp), dimension(:), pointer :: eval => null()      ! retained eigenvalues (nret)
      complex(dp), dimension(:,:), pointer :: q => null()    ! retained eigenvectors (nrow, nret)
-     ! Full eigensystem — kept only during cg_prepare, freed after projection
+     ! Full eigensystem — kept only during icgn_prepare, freed after projection
      real(dp), dimension(:), pointer :: evals_full => null()  ! all nrow eigenvalues
      complex(dp), dimension(:,:), pointer :: S_full => null() ! all nrow eigenvectors (nrow, nrow)
      integer, dimension(:), pointer :: retained_idx => null() ! indices of retained states in S_full (nret)
-  end type CGBlock
+  end type ICGNBlock
 
   !!* Parameters needed during UPT calculations  
   type OUPT
@@ -95,36 +95,29 @@ module upt_param
      type(CSR)    :: U              ! Time-reversal symmetry operator
 
      ! Coarse-grained solver state.  ham always remains the physical matrix;
-     ! cg_ham is used only by eigensolver drivers when cg_ready is true.
-     logical :: cg_enabled, cg_ready
-   integer :: cg_error
-     integer :: cg_num_blocks, cg_original_dim, cg_reduced_dim
-     real(dp) :: cg_emin, cg_emax, cg_imbalance, cg_cut_fraction
-    logical :: cg_check_neumann_convergence
-    integer :: cg_pi_maxiter
-    real(dp) :: cg_pi_tol
-     type(CSR) :: cg_ham, cg_U
-     type(CGBlock), dimension(:), pointer :: cg_blocks => null()
+     ! icgn_ham is used only by eigensolver drivers when icgn_ready is true.
+     logical :: icgn_enabled, icgn_ready
+   integer :: icgn_error
+     integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
+     real(dp) :: icgn_emin, icgn_emax, icgn_metis_imbalance, icgn_cut_fraction
+    logical :: icgn_check_neumann_convergence
+    integer :: icgn_pi_maxiter
+    real(dp) :: icgn_pi_tol
+     type(CSR) :: icgn_ham, icgn_U
+     type(ICGNBlock), dimension(:), pointer :: icgn_blocks => null()
 
      ! ICGN: improved coarse-graining with optional Neumann self-energy correction.
      ! neumann_order < 0 means no Neumann correction (behaves like plain ICG);
      ! neumann_order >= 0 applies the Neumann series to that order.
-     logical :: icgn_enabled, icgn_ready
-     integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
      real(dp) :: icgn_core_emin, icgn_core_emax
     real(dp) :: icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon
-     real(dp) :: icgn_imbalance, icgn_cut_fraction
      integer :: icgn_add_core_acquaintances    ! core-state acquaintance level (0=disabled, 1=level-1)
      integer :: icgn_selfenergy_order          ! Neumann series order (0,1,2,...)
      real(dp) :: icgn_E0                       ! self-energy expansion point
      ! Convergence check: power iteration to estimate ||T||_2 = ||(E0-D)^-1 W||_2
      logical  :: icgn_check_convergence        ! .true. to run power iteration check
-     integer  :: icgn_pi_maxiter               ! max power-iteration sweeps (e.g. 200)
-     real(dp) :: icgn_pi_tol                   ! convergence tolerance (e.g. 1e-6)
      real(dp) :: icgn_sigma_T2                 ! estimated ||T||_2 (output; -1 if not run)
      logical  :: icgn_pi_converged             ! .true. if power iteration converged
-     type(CSR) :: icgn_ham, icgn_U
-     type(CGBlock), dimension(:), pointer :: icgn_blocks => null()
  
      REAL ( dp ),   DIMENSION( : ),    POINTER     :: eigen_values
      COMPLEX ( dp ), DIMENSION( :,: ),    POINTER  :: eigen_vectors
@@ -194,19 +187,26 @@ contains
    upt%hybrid_passivation = .true.  ! Set on the hybrid orbital passivation 
                                    ! (PRB 69, 045316 2004)
 
-   upt%cg_enabled = .false.
-   upt%cg_ready = .false.
-   upt%cg_error = 0
-   upt%cg_num_blocks = 1
-   upt%cg_original_dim = 0
-   upt%cg_reduced_dim = 0
-   upt%cg_emin = -huge(1.0_dp)
-   upt%cg_emax = huge(1.0_dp)
-   upt%cg_imbalance = 0.03_dp
-   upt%cg_cut_fraction = 0.0_dp
-  upt%cg_check_neumann_convergence = .false.
-  upt%cg_pi_maxiter = 1000
-  upt%cg_pi_tol = 1.e-3_dp
+   ! CSR pointer components are not default-initialized by the legacy CSR type.
+   ! They must be explicitly nullified before icgn_clear() can safely query
+   ! ASSOCIATED() on them; otherwise the first ICGN preparation has undefined
+   ! behavior and can segfault depending on the process memory layout.
+   nullify(upt%icgn_ham%M, upt%icgn_ham%Mi, upt%icgn_ham%Mj)
+   nullify(upt%icgn_U%M, upt%icgn_U%Mi, upt%icgn_U%Mj)
+
+   upt%icgn_enabled = .false.
+   upt%icgn_ready = .false.
+   upt%icgn_error = 0
+   upt%icgn_num_blocks = 1
+   upt%icgn_original_dim = 0
+   upt%icgn_reduced_dim = 0
+   upt%icgn_emin = -huge(1.0_dp)
+   upt%icgn_emax = huge(1.0_dp)
+   upt%icgn_metis_imbalance = 0.03_dp
+   upt%icgn_cut_fraction = 0.0_dp
+  upt%icgn_check_neumann_convergence = .false.
+  upt%icgn_pi_maxiter = 1000
+  upt%icgn_pi_tol = 1.e-3_dp
 
    upt%icgn_enabled = .false.
    upt%icgn_ready = .false.
@@ -218,7 +218,7 @@ contains
   upt%icgn_top_buffer = 0.0_dp
   upt%icgn_bottom_buffer = 0.0_dp
    upt%icgn_epsilon = 0.0_dp   ! 0 = coupling filter disabled
-   upt%icgn_imbalance = 0.03_dp
+   upt%icgn_metis_imbalance = 0.03_dp
    upt%icgn_cut_fraction = 0.0_dp
    upt%icgn_add_core_acquaintances = 0   ! default: do not add core-state acquaintances
    upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)

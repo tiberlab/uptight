@@ -75,7 +75,7 @@ contains
       ! eigenvector and tmp_eigvals is sorted in ascending order.
       ! NOTE: upt%ham is whatever operator the coarse-graining layer swapped in
       ! (original or reduced); the eigenvectors are lifted back to the orbital
-      ! basis by cg_finalize_eigenvectors in UPT_lapack, not here.
+      ! basis by icgn_finalize_eigenvectors in UPT_lapack, not here.
       call diagonalize_ham(HAM, n_ham, tmp_eigvals)
       
       !do i_k = 1,n_ham

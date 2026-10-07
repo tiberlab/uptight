@@ -233,27 +233,8 @@ extern "C"
 
 // Corresponding F77 arguments for upt_set_coarse_graining:
 // integer, intent(in) :: handler(DAC_handlerSize)
-// integer, intent(in) :: enabled
 // integer, intent(in) :: n_blocks
-// real(dp), intent(in) :: emin
-// real(dp), intent(in) :: emax
-// real(dp), intent(in) :: imbalance
-extern "C"
-
-{
-  void upt_set_coarse_graining_ (int const* handler, int const& enabled, int 
-      const& n_blocks, f77_double const& emin, f77_double const& emax, 
-      f77_double const& imbalance);
-}
-
-
-// Corresponding F77 arguments for upt_set_coarse_graining_mode:
-// integer, intent(in) :: handler(DAC_handlerSize)
-// integer, intent(in) :: mode
-// integer, intent(in) :: n_blocks
-// real(dp), intent(in) :: imbalance
-// real(dp), intent(in) :: energy_min
-// real(dp), intent(in) :: energy_max
+// real(dp), intent(in) :: metis_imbalance
 // real(dp), intent(in) :: core_energy_min
 // real(dp), intent(in) :: core_energy_max
 // real(dp), intent(in) :: top_buffer
@@ -268,13 +249,12 @@ extern "C"
 extern "C"
 
 {
-  void upt_set_coarse_graining_mode_ (int const* handler, int const& mode, int 
-      const& n_blocks, f77_double const& imbalance, f77_double const& 
-      energy_min, f77_double const& energy_max, f77_double const& 
-      core_energy_min, f77_double const& core_energy_max, f77_double const& 
-      top_buffer, f77_double const& bottom_buffer, f77_double const& epsilon, 
-      int const& add_core_acquaintances, int const& neumann_order, f77_double 
-      const& expansion_energy, int const& check_neumann_convergence, int const& 
+  void upt_set_coarse_graining_ (int const* handler, int const& n_blocks, 
+      f77_double const& metis_imbalance, f77_double const& core_energy_min, 
+      f77_double const& core_energy_max, f77_double const& top_buffer, 
+      f77_double const& bottom_buffer, f77_double const& epsilon, int const& 
+      add_core_acquaintances, int const& neumann_order, f77_double const& 
+      expansion_energy, int const& check_neumann_convergence, int const& 
       power_iteration_max_iterations, f77_double const& 
       power_iteration_tolerance);
 }

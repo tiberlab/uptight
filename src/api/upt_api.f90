@@ -536,37 +536,18 @@ subroutine upt_createhamiltonian(handler,sparse_fmt)
 
 end subroutine upt_createhamiltonian
 
-!!* Configure optional block-basis coarse graining before creating the Hamiltonian.
-subroutine upt_set_coarse_graining(handler, enabled, n_blocks, emin, emax, imbalance)
+!!* Configure optional ICGN coarse graining before creating the Hamiltonian.
+subroutine upt_set_coarse_graining(handler, n_blocks, metis_imbalance, &
+  core_energy_min, core_energy_max, top_buffer, bottom_buffer, epsilon, &
+  add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence, &
+  power_iteration_max_iterations, power_iteration_tolerance)
   use precision, only : dp
-  use uptightAPICommon  ! if:mod:use
+  use uptightAPICommon ! if:mod:use
   use uptight, only : upt_configure_coarse_graining ! if:mod:use
   implicit none
   integer :: handler(DAC_handlerSize) ! if:var:in
-  integer :: enabled ! if:var:in
   integer :: n_blocks ! if:var:in
-  real(dp) :: emin ! if:var:in
-  real(dp) :: emax ! if:var:in
-  real(dp) :: imbalance ! if:var:in
-  type(UPTPointers) :: pUPTs
-  pUPTs = transfer(handler, pUPTs)
-  call upt_configure_coarse_graining(pUPTs%pUPT, enabled /= 0, n_blocks, emin, emax, imbalance)
-end subroutine upt_set_coarse_graining
-
-subroutine upt_set_coarse_graining_mode(handler, mode, n_blocks, &
-  imbalance, energy_min, energy_max, core_energy_min, core_energy_max, top_buffer, bottom_buffer, &
-    epsilon, add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence, &
-    power_iteration_max_iterations, power_iteration_tolerance)
-  use precision, only : dp
-  use uptightAPICommon ! if:mod:use
-  use uptight, only : upt_configure_coarse_graining_mode ! if:mod:use
-  implicit none
-  integer :: handler(DAC_handlerSize) ! if:var:in
-  integer :: mode ! if:var:in
-  integer :: n_blocks ! if:var:in
-  real(dp) :: imbalance ! if:var:in
-  real(dp) :: energy_min ! if:var:in
-  real(dp) :: energy_max ! if:var:in
+  real(dp) :: metis_imbalance ! if:var:in
   real(dp) :: core_energy_min ! if:var:in
   real(dp) :: core_energy_max ! if:var:in
   real(dp) :: top_buffer ! if:var:in
@@ -580,11 +561,11 @@ subroutine upt_set_coarse_graining_mode(handler, mode, n_blocks, &
   real(dp) :: power_iteration_tolerance ! if:var:in
   type(UPTPointers) :: pUPTs
   pUPTs = transfer(handler, pUPTs)
-  call upt_configure_coarse_graining_mode(pUPTs%pUPT, mode, &
-      n_blocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
-      top_buffer, bottom_buffer, epsilon, add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
+  call upt_configure_coarse_graining(pUPTs%pUPT, n_blocks, metis_imbalance, &
+      core_energy_min, core_energy_max, top_buffer, bottom_buffer, epsilon, &
+      add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
       power_iteration_max_iterations, power_iteration_tolerance)
-end subroutine upt_set_coarse_graining_mode
+end subroutine upt_set_coarse_graining
 
 !!* Return coarse-graining reduction statistics after Hamiltonian creation.
 subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)

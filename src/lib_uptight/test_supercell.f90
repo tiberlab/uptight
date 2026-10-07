@@ -2,13 +2,13 @@
 !   (1) Standard full diagonalization
 !   (2) Original coarse-graining (Liu et al. 2022)
 !   (3) Improved coarse-graining (core + buffer + level-1 acquaintance)
-!   (4) Improved CG + Neumann self-energy correction (ICGN)
+!   (4) Improved ICGN + Neumann self-energy correction (ICGN)
 !
 ! TIMING: The sparse Hamiltonian is built once and reused.  For each mode
 ! the clock starts when that mode receives the already-built H and stops
 ! after eigenvectors have been lifted back to the original orbital basis.
 ! For modes 2/3/4 this therefore includes: reduced-H preparation
-! (cg_prepare / icg_prepare / icgn_prepare) + eigensolver + lift.
+! (icgn_prepare / icgn_prepare / icgn_prepare) + eigensolver + lift.
 ! For mode 1 it includes only: eigensolver (no lift needed).
 !
 ! AAD: eigenvalues from modes 2/3/4 are compared to the reference from
@@ -26,10 +26,10 @@
 !   7:  nCB  (standard mode)
 !   8:  lambda_vb  (eV)
 !   9:  lambda_cb  (eV)
-!   10: n_blocks   (CG & ICGN)
-!   11: cg_emin    (eV)
-!   12: cg_emax    (eV)
-!   13: imbalance  (METIS)
+!   10: n_blocks   (ICGN & ICGN)
+!   11: icgn_emin    (eV)
+!   12: icgn_emax    (eV)
+!   13: metis_imbalance  (METIS)
 !   14: icgn_core_emin  (eV)
 !   15: icgn_core_emax  (eV)
 !   16: icgn_top_buffer   (eV)
@@ -76,7 +76,7 @@ program test_supercell
   CHARACTER(LST) :: config_file
   CHARACTER(MST) :: solver_choice
   INTEGER        :: n_blocks, nVB, nCB
-  REAL(dp)       :: cg_emin, cg_emax, imbalance
+  REAL(dp)       :: icgn_emin, icgn_emax, metis_imbalance
    REAL(dp)       :: icgn_core_emin, icgn_core_emax, icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local
   INTEGER        :: icgn_selfenergy_order
   REAL(dp)       :: icgn_E0
@@ -85,7 +85,7 @@ program test_supercell
   INTEGER        :: icgn_pi_maxiter
   INTEGER        :: n_up, n_down
   REAL(sp)       :: solve_time
-  LOGICAL        :: cg_ready, icgn_ready_flag
+  LOGICAL        :: icgn_ready, icgn_ready_flag
   INTEGER        :: orig_dim, red_dim, nb_out
   REAL(dp)       :: cut_frac
   ! Reference eigenvalues from mode 1 (sorted ascending, allocated after mode 1)
@@ -122,9 +122,9 @@ program test_supercell
   read(10,*) upt%lambda_vb
   read(10,*) upt%lambda_cb
   read(10,*) n_blocks
-  read(10,*) cg_emin
-  read(10,*) cg_emax
-  read(10,*) imbalance
+  read(10,*) icgn_emin
+  read(10,*) icgn_emax
+  read(10,*) metis_imbalance
   read(10,*) icgn_core_emin
   read(10,*) icgn_core_emax
    read(10,*) icgn_top_buffer
@@ -145,7 +145,7 @@ program test_supercell
   write(*,'(a,l1)')    ' Scaling:      ', upt%scaling
   write(*,'(a,a)')     ' Solver:       ', trim(solver_choice)
   write(*,'(a,i0)')    ' n_blocks:     ', n_blocks
-  write(*,'(a,2f8.3)') '  CG window:   ', cg_emin, cg_emax
+  write(*,'(a,2f8.3)') '  ICGN window:   ', icgn_emin, icgn_emax
   write(*,'(a,2f8.3)') '  ICGN core:   ', icgn_core_emin, icgn_core_emax
    write(*,'(a,f8.3)')  '  ICGN top buffer:  ', icgn_top_buffer
    write(*,'(a,f8.3)')  '  ICGN bottom buffer:  ', icgn_bottom_buffer
@@ -177,9 +177,9 @@ program test_supercell
   upt%start_vb = 1;    upt%start_cb = 1
   upt%min_iter = 2;    upt%long_iter = 30;  upt%max_iter = 100000
   upt%fast_tol = 1.0d-1; upt%long_tol = 1.0d-10; upt%ort_tol = 1.0d-5
-   upt%cg_check_neumann_convergence = icgn_check_conv
-   upt%cg_pi_maxiter = icgn_pi_maxiter
-   upt%cg_pi_tol = icgn_pi_tol
+   upt%icgn_check_neumann_convergence = icgn_check_conv
+   upt%icgn_pi_maxiter = icgn_pi_maxiter
+   upt%icgn_pi_tol = icgn_pi_tol
   upt%solver_flag = 0;  upt%dynamic = .true.
   upt%seed_flag   = .false.; upt%bitoff = 0.1_dp
   upt%k_point = (/ 0.0d0, 0.0d0, 0.0d0 /)
@@ -210,8 +210,8 @@ program test_supercell
   call subs_dg_ions(upt%basis, upt%materials, upt%nn_map)
   call init_n_st(upt%basis, upt%materials)
 
-  ! ---- build the sparse Hamiltonian once (no CG); record n_ham -------------
-  upt%cg_enabled   = .false.
+  ! ---- build the sparse Hamiltonian once (no ICGN); record n_ham -------------
+  upt%icgn_enabled   = .false.
   upt%icgn_enabled = .false.
   upt%verbose = 0
   call upt_hamiltonian(pupt)
@@ -228,7 +228,7 @@ program test_supercell
   write(*,'(a)') ' MODE 1: Standard full diagonalization'
   write(*,'(a)') '========================================'
 
-  upt%cg_enabled   = .false.
+  upt%icgn_enabled   = .false.
   upt%icgn_enabled = .false.
   num_ev = nVB + nCB
   allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
@@ -258,66 +258,18 @@ program test_supercell
   deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
 
   ! ==========================================================================
-  ! MODE 2: Original coarse-graining (Liu et al.)
-  !   Clock starts: cg_prepare receives H  (inside upt_hamiltonian)
-  !   Clock stops:  eigenvectors lifted to original orbital basis
-  ! ==========================================================================
-  write(*,'(a)') '========================================'
-  write(*,'(a)') ' MODE 2: Original coarse-graining (Liu et al.)'
-  write(*,'(a)') '========================================'
-
-  ! Re-build with only CG enabled so prepare is included in the timed region
-  call destroy_matrix(upt%ham)
-  call UPT_configure_coarse_graining(upt, .true.,  n_blocks, cg_emin, cg_emax, imbalance, icgn_epsilon_local)
-  call UPT_configure_icgn           (upt, .false., n_blocks, icgn_core_emin, icgn_core_emax, &
-     icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local, icgn_selfenergy_order, icgn_E0, imbalance, &
-       icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
-
-  call set_clock()          ! --- start timing (includes cg_prepare) ---
-  call upt_hamiltonian(pupt)
-
-  call UPT_get_coarse_graining_info(upt, cg_ready, orig_dim, red_dim, nb_out, cut_frac)
-  if (.not. cg_ready) then
-     write(*,*) ' WARNING: CG not ready, skipping mode 2'
-     call destroy_matrix(upt%ham); goto 300
-  end if
-  write(*,'(a,i0,a,i0,a,f6.2,a)') ' Reduced: ', orig_dim, ' -> ', red_dim, &
-       '  (', 100.0_dp*(1.0_dp - real(red_dim,dp)/real(orig_dim,dp)), '% reduction)'
-  num_ev = red_dim
-  allocate(upt%eigen_values(num_ev), upt%eigen_vectors(n_ham, num_ev), &
-           upt%particles(num_ev), stat=err)
-  upt%eigen_values = 0.0d0; upt%eigen_vectors = (0.0d0,0.0d0); upt%particles = 0
-  upt%cg_enabled = .true.
-  select case (trim(solver_choice))
-  case ('LK'); call lapack(upt)   ! lapack calls cg_lift internally
-  case ('JD'); call jd(upt)
-  case ('LO'); call lanczos(upt)
-  end select
-  solve_time = get_sclock() ! --- stop timing (after lift) ---
-
-  write(*,'(a,i0)')     ' Bands found:  ', size(upt%eigen_values)
-  write(*,'(a,f10.3)')  ' Total time:   ', solve_time
-  write(*,'(a,2f10.4)') ' Energy range: ', minval(upt%eigen_values), maxval(upt%eigen_values)
-  call write_eigenvalues('eigenvalues_cg.dat', upt%eigen_values, solve_time, &
-       'CG', orig_dim, red_dim, cut_frac, ref_evals, n_up, n_down)
-  call destroy_matrix(upt%ham)
-  deallocate(upt%eigen_values, upt%eigen_vectors, upt%particles)
-300 continue
-
-  ! ==========================================================================
-  ! MODE 3: ICGN (improved CG with optional Neumann self-energy correction)
+  ! MODE 3: ICGN (improved ICGN with optional Neumann self-energy correction)
   !   neumann_order < 0: no Neumann correction (same as plain ICG)
   !   neumann_order >= 0: Neumann series applied to that order
   !   Clock starts: icgn_prepare receives H (includes self-energy build)
   !   Clock stops:  eigenvectors lifted to original orbital basis
   ! ==========================================================================
   write(*,'(a)') '========================================'
-  write(*,'(a)') ' MODE 3: ICGN (improved CG + optional Neumann self-energy)'
+  write(*,'(a)') ' MODE 3: ICGN (improved ICGN + optional Neumann self-energy)'
   write(*,'(a)') '========================================'
 
-  call UPT_configure_coarse_graining(upt, .false., n_blocks, cg_emin, cg_emax, imbalance)
   call UPT_configure_icgn           (upt, .true.,  n_blocks, icgn_core_emin, icgn_core_emax, &
-     icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local, icgn_selfenergy_order, icgn_E0, imbalance, &
+     icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon_local, icgn_selfenergy_order, icgn_E0, metis_imbalance, &
        icgn_check_conv, icgn_pi_maxiter, icgn_pi_tol)
 
   call set_clock()          ! --- start timing (includes icgn_prepare) ---
