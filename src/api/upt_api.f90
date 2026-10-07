@@ -555,7 +555,7 @@ end subroutine upt_set_coarse_graining
 
 subroutine upt_set_coarse_graining_mode(handler, mode, n_blocks, &
   imbalance, energy_min, energy_max, core_energy_min, core_energy_max, top_buffer, bottom_buffer, &
-    epsilon, neumann_order, expansion_energy, check_neumann_convergence, &
+    epsilon, add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence, &
     power_iteration_max_iterations, power_iteration_tolerance)
   use precision, only : dp
   use uptightAPICommon ! if:mod:use
@@ -572,6 +572,7 @@ subroutine upt_set_coarse_graining_mode(handler, mode, n_blocks, &
   real(dp) :: top_buffer ! if:var:in
   real(dp) :: bottom_buffer ! if:var:in
   real(dp) :: epsilon ! if:var:in
+  integer :: add_core_acquaintances ! if:var:in
   integer :: neumann_order ! if:var:in
   real(dp) :: expansion_energy ! if:var:in
   integer :: check_neumann_convergence ! if:var:in
@@ -581,7 +582,7 @@ subroutine upt_set_coarse_graining_mode(handler, mode, n_blocks, &
   pUPTs = transfer(handler, pUPTs)
   call upt_configure_coarse_graining_mode(pUPTs%pUPT, mode, &
       n_blocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
-      top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
+      top_buffer, bottom_buffer, epsilon, add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
       power_iteration_max_iterations, power_iteration_tolerance)
 end subroutine upt_set_coarse_graining_mode
 

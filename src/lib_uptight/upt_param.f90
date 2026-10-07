@@ -114,6 +114,7 @@ module upt_param
      real(dp) :: icgn_core_emin, icgn_core_emax
     real(dp) :: icgn_top_buffer, icgn_bottom_buffer, icgn_epsilon
      real(dp) :: icgn_imbalance, icgn_cut_fraction
+     integer :: icgn_add_core_acquaintances    ! core-state acquaintance level (0=disabled, 1=level-1)
      integer :: icgn_selfenergy_order          ! Neumann series order (0,1,2,...)
      real(dp) :: icgn_E0                       ! self-energy expansion point
      ! Convergence check: power iteration to estimate ||T||_2 = ||(E0-D)^-1 W||_2
@@ -219,6 +220,7 @@ contains
    upt%icgn_epsilon = 0.0_dp   ! 0 = coupling filter disabled
    upt%icgn_imbalance = 0.03_dp
    upt%icgn_cut_fraction = 0.0_dp
+   upt%icgn_add_core_acquaintances = 0   ! default: do not add core-state acquaintances
    upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)
    upt%icgn_E0 = 0.0_dp
    upt%icgn_check_convergence = .false.

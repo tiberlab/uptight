@@ -425,10 +425,10 @@ contains
 
   subroutine UPT_configure_coarse_graining_mode(upt, mode, &
       nblocks, imbalance, energy_min, energy_max, core_energy_min, core_energy_max, &
-      top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, check_neumann_convergence, &
+      top_buffer, bottom_buffer, epsilon, add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence, &
       pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: mode, nblocks, neumann_order, pi_maxiter
+    integer, intent(in) :: mode, nblocks, add_core_acquaintances, neumann_order, pi_maxiter
     real(dp), intent(in) :: imbalance, energy_min, energy_max, core_energy_min, core_energy_max
     real(dp), intent(in) :: top_buffer, bottom_buffer, epsilon, expansion_energy, pi_tol
     logical, intent(in) :: check_neumann_convergence
@@ -437,14 +437,14 @@ contains
     upt%cg_check_neumann_convergence = check_neumann_convergence
     upt%cg_pi_maxiter = pi_maxiter
     upt%cg_pi_tol = pi_tol
-    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, -1, 0.0_dp, &
+    call icgn_configure(upt, .false., 1, -1.0_dp, 1.0_dp, 0.0_dp, 0.0_dp, epsilon, 0, -1, 0.0_dp, &
         imbalance, .false., pi_maxiter, pi_tol)
     select case (mode)
     case (1)
        call cg_configure(upt, .true., nblocks, energy_min, energy_max, epsilon, imbalance)
     case (2)
        call icgn_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
-           top_buffer, bottom_buffer, epsilon, neumann_order, expansion_energy, imbalance, &
+           top_buffer, bottom_buffer, epsilon, add_core_acquaintances, neumann_order, expansion_energy, imbalance, &
            check_neumann_convergence, pi_maxiter, pi_tol)
     case default
        write(*,*) '(uptight) invalid coarse-graining mode'; stop 1
@@ -505,7 +505,7 @@ contains
     integer, intent(in) :: nblocks, selfenergy_order, pi_maxiter
     real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, E0, imbalance, pi_tol
     call icgn_configure(upt, enabled, nblocks, core_emin, core_emax, top_buffer, bottom_buffer, epsilon, &
-         selfenergy_order, E0, imbalance, check_convergence, pi_maxiter, pi_tol)
+         0, selfenergy_order, E0, imbalance, check_convergence, pi_maxiter, pi_tol)
   end subroutine UPT_configure_icgn
 
   subroutine UPT_get_icgn_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction, &

@@ -259,6 +259,7 @@ extern "C"
 // real(dp), intent(in) :: top_buffer
 // real(dp), intent(in) :: bottom_buffer
 // real(dp), intent(in) :: epsilon
+// integer, intent(in) :: add_core_acquaintances
 // integer, intent(in) :: neumann_order
 // real(dp), intent(in) :: expansion_energy
 // integer, intent(in) :: check_neumann_convergence
@@ -272,9 +273,10 @@ extern "C"
       energy_min, f77_double const& energy_max, f77_double const& 
       core_energy_min, f77_double const& core_energy_max, f77_double const& 
       top_buffer, f77_double const& bottom_buffer, f77_double const& epsilon, 
-      int const& neumann_order, f77_double const& expansion_energy, int const& 
-      check_neumann_convergence, int const& power_iteration_max_iterations, 
-      f77_double const& power_iteration_tolerance);
+      int const& add_core_acquaintances, int const& neumann_order, f77_double 
+      const& expansion_energy, int const& check_neumann_convergence, int const& 
+      power_iteration_max_iterations, f77_double const& 
+      power_iteration_tolerance);
 }
 
 

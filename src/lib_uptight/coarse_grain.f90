@@ -1089,11 +1089,11 @@ contains
   ! ==========================================================================
 
   subroutine icgn_configure(upt, enabled, nblocks, core_emin, core_emax, &
-     top_buffer, bottom_buffer, epsilon, selfenergy_order, E0, imbalance, &
+     top_buffer, bottom_buffer, epsilon, add_core_acquaintances, selfenergy_order, E0, imbalance, &
        check_convergence, pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled, check_convergence
-    integer, intent(in) :: nblocks, selfenergy_order, pi_maxiter
+    integer, intent(in) :: nblocks, add_core_acquaintances, selfenergy_order, pi_maxiter
    real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, E0, imbalance, pi_tol
     upt%icgn_enabled = enabled
     upt%icgn_num_blocks = nblocks
@@ -1102,6 +1102,7 @@ contains
    upt%icgn_top_buffer = top_buffer
    upt%icgn_bottom_buffer = bottom_buffer
     upt%icgn_epsilon = epsilon
+    upt%icgn_add_core_acquaintances = max(0, add_core_acquaintances)
     upt%icgn_selfenergy_order = selfenergy_order
     upt%icgn_E0 = E0
     upt%icgn_imbalance = imbalance
@@ -1162,6 +1163,9 @@ contains
   ! matrices in the block eigenbasis; we reuse them to extract H_PQ and H_QQ.
   ! ---------------------------------------------------------------------------
   subroutine icgn_prepare(upt, ierr)
+    character(len=*), parameter :: core_acq_warning = &
+         'Including core-state acquaintances higher than level 1 is not yet implemented --> ' // &
+         'Fall back to level-1 acquaintances only.'
     type(OUPT), intent(inout) :: upt
     integer, intent(out) :: ierr
 
@@ -1382,10 +1386,14 @@ contains
        call project_pair(pairs(i), upt%icgn_blocks(ia)%S_full, upt%icgn_blocks(ib)%S_full)
     end do
 
-    ! Acquaintance selection: a non-kept state is added only if it has at least
-    ! one coupling to a core state that survives the common epsilon filter
-    ! (cg_coupling_survives), i.e. is non-zero after filtering.
-    do i = 1, npair
+    ! Acquaintance selection is optional. Level 1 is the currently implemented
+    ! core-state acquaintance level; higher requested levels fall back to it.
+    if (upt%icgn_add_core_acquaintances > 1) then
+       call cg_log_important(upt, core_acq_warning)
+       write(*,'(a)') core_acq_warning
+    end if
+    if (upt%icgn_add_core_acquaintances > 0) then
+       do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
        do j = 1, upt%icgn_blocks(ia)%nrow
           if (is_core(ia, j)) then
@@ -1410,6 +1418,7 @@ contains
           end if
        end do
     end do
+       end if
     call destroy_pairs(pairs)
 
     ! ---- Apply keep_mask to nret, q, eval, retained_idx --------------------
