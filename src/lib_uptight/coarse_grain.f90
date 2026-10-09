@@ -75,6 +75,9 @@ module coarse_grain
      ! t = H_AB * Q_B accumulated directly from the global CSR Hamiltonian.
      ! Used by the ICGN projection path to avoid materializing dense H_AB.
      complex(dp), dimension(:,:), pointer :: t => null()
+     ! g = full (all block states) projected coupling S_a^H H_ab S_b, kept only on
+     ! the acquaintance path so the Neumann correction need not project again.
+     complex(dp), dimension(:,:), pointer :: g => null()
   end type ICGNPair
 
   public :: icgn_configure, icgn_prepare, icgn_clear, icgn_active, icgn_lift
@@ -1074,6 +1077,7 @@ contains
        if(associated(pairs(i)%v)) deallocate(pairs(i)%v)
        if(associated(pairs(i)%h)) deallocate(pairs(i)%h)
        if(associated(pairs(i)%t)) deallocate(pairs(i)%t)
+       if(associated(pairs(i)%g)) deallocate(pairs(i)%g)
     end do
     deallocate(pairs)
     ! write(*,'(A)') '[ICGN-TRACE] destroy_pairs DONE'
@@ -1216,7 +1220,8 @@ contains
 
     integer :: ia, ib, slot, nred, nnz
     integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:), pair_map(:,:)
-    complex(dp), allocatable :: g_full(:,:)
+    ! g_full points either to pairs(i)%g (kept projection) or to a locally computed array
+    complex(dp), pointer :: g_full(:,:)
 
     ! For Neumann self-energy
     integer :: nb, ord, ip, iq, gp_row, gp_col, q_idx, qb_idx
@@ -1676,12 +1681,17 @@ contains
     !$omp& num_threads(nth) schedule(dynamic,1) if(nth > 1)
     do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
-       allocate(g_full(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
-       allocate(tmp_g(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
-       ! The physical block coupling was already collected in pairs(i)%h.
-       call icgn_zgemm('N', pairs(i)%h, upt%icgn_blocks(ib)%S_full, tmp_g)
-       call icgn_zgemm('C', upt%icgn_blocks(ia)%S_full, tmp_g, g_full)
-       deallocate(tmp_g)
+       if (associated(pairs(i)%g)) then
+          ! Acquaintance path: the full projection S_a^H H_ab S_b was kept.
+          g_full => pairs(i)%g
+       else
+          allocate(g_full(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
+          allocate(tmp_g(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
+          ! The physical block coupling was already collected in pairs(i)%h.
+          call icgn_zgemm('N', pairs(i)%h, upt%icgn_blocks(ib)%S_full, tmp_g)
+          call icgn_zgemm('C', upt%icgn_blocks(ia)%S_full, tmp_g, g_full)
+          deallocate(tmp_g)
+       end if
        mypq = pq_off(i)
        ! Extract P(ia)-Q(ib) entries
        do j = 1, upt%icgn_blocks(ia)%nret
@@ -1736,7 +1746,7 @@ contains
           end do
           qq_cnt(i) = myqq - qq_off(i)
        end if
-       deallocate(g_full)
+       if (.not. associated(pairs(i)%g)) deallocate(g_full)
     end do
     !$omp end parallel do
     call icgn_restore_nesting(saved_levels)
@@ -2496,20 +2506,39 @@ contains
                upt%icgn_blocks(b)%S_full, .true.)
 
           ! Slice to retained states using retained_idx.
-          allocate(g_full(size(pairs(i)%v,1), size(pairs(i)%v,2)))
-          g_full = pairs(i)%v
-          deallocate(pairs(i)%v)
-          allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
-          do j = 1, upt%icgn_blocks(b)%nret
-             do k = 1, upt%icgn_blocks(a)%nret
-                pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
-                                          upt%icgn_blocks(b)%retained_idx(j))
-                if (.not. icgn_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
-                    upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
-                    pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
+          if (upt%icgn_selfenergy_order >= 0) then
+             ! Neumann follows: keep the FULL projection in pairs(i)%g (it holds the
+             ! P-Q and Q-Q couplings) so it is not computed a second time.
+             pairs(i)%g => pairs(i)%v
+             nullify(pairs(i)%v)
+             allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+             do j = 1, upt%icgn_blocks(b)%nret
+                do k = 1, upt%icgn_blocks(a)%nret
+                   pairs(i)%v(k,j) = pairs(i)%g(upt%icgn_blocks(a)%retained_idx(k), &
+                                                 upt%icgn_blocks(b)%retained_idx(j))
+                   if (.not. icgn_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
+                       upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
+                       pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
+                end do
              end do
-          end do
-          deallocate(g_full)
+          else
+             allocate(g_full(size(pairs(i)%v,1), size(pairs(i)%v,2)))
+             g_full = pairs(i)%v
+             deallocate(pairs(i)%v)
+             allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+             do j = 1, upt%icgn_blocks(b)%nret
+                do k = 1, upt%icgn_blocks(a)%nret
+                   pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
+                                             upt%icgn_blocks(b)%retained_idx(j))
+                   if (.not. icgn_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
+                       upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
+                       pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
+                end do
+             end do
+             deallocate(g_full)
+          end if
+          ! The physical block H_ab is no longer needed on this path.
+          if (associated(pairs(i)%h)) deallocate(pairs(i)%h)
        end do
        !$omp end parallel do
        call icgn_restore_nesting(saved_levels)
