@@ -1256,6 +1256,10 @@ contains
     integer, allocatable :: supp(:), supp2(:)
     logical, allocatable :: mark(:), mark2(:)
     integer :: nsupp, nsupp2, tt, ee
+    logical :: dummy_qq
+    ! Shared edge graphs for the convergence check and Sigma (built once)
+    integer, allocatable :: p_ptr(:), p_col(:), c_ptr(:), c_row(:), s_ptr(:), s_col(:)
+    complex(dp), allocatable :: p_val(:), c_val(:), s_val(:), s_wres(:)
 
     ierr = 0
     ! write(*,"(A)") "[ICGN-TRACE] prepare ENTER"
@@ -1780,9 +1784,24 @@ contains
     upt%icgn_pi_converged = .true.
     E0_used = upt%icgn_E0
     if (E0_used == 0.0_dp) E0_used = (upt%icgn_core_emin + upt%icgn_core_emax) / 2.0_dp
+
+    ! Edge graphs (contiguous CSR) shared by the convergence check and Sigma:
+    ! built once here and reused, together with the resolvent R(q).
+    t_stage = icgn_wall()
+    allocate(res_q(nstates_total))
+    do i = 1, nstates_total
+       res_q(i) = 1.0_dp / (E0_used - evals_q(i))
+    end do
+    dummy_qq = .not. allocated(qq_i)
+    if (dummy_qq) allocate(qq_i(1), qq_j(1), qq_v(1))   ! Q-Q lists exist only if needed
+    call icgn_build_edge_csr(npq, pq_p, pq_q, pq_v, nqq, qq_i, qq_j, qq_v, nred, nstates_total, res_q, &
+         nqq > 0 .and. (upt%icgn_check_convergence .or. upt%icgn_selfenergy_order >= 1), &
+         p_ptr, p_col, p_val, c_ptr, c_row, c_val, s_ptr, s_col, s_val, s_wres)
+    if (dummy_qq) deallocate(qq_i, qq_j, qq_v)
+    call icgn_report_time('build edge CSR (shared by conv. check + Sigma)', t_stage)
+    t_stage = icgn_wall()
     if (upt%icgn_check_convergence .and. nqq > 0) then
-       call icgn_power_iteration(evals_q, nstates_total, &
-            qq_i, qq_j, qq_v, nqq, E0_used, &
+       call icgn_power_iteration_csr(evals_q, nstates_total, s_ptr, s_col, s_val, E0_used, &
             upt%icgn_pi_maxiter, upt%icgn_pi_tol, &
             upt%icgn_sigma_T2, upt%icgn_pi_converged)
        if (.not. upt%icgn_pi_converged) then
@@ -1806,6 +1825,7 @@ contains
        end if
     end if
 
+    if (upt%icgn_check_convergence .and. nqq > 0) call icgn_report_time('power iteration (parallel)', t_stage)
     call icgn_report_time('free S_full/pairs + convergence check', t_mark)
     ! ---- Compute Sigma and add to H_dense ----------------------------------
     allocate(Sigma(nred, nred))
@@ -1814,105 +1834,16 @@ contains
     E0_used = upt%icgn_E0
     if (E0_used == 0.0_dp) E0_used = (upt%icgn_core_emin + upt%icgn_core_emax) / 2.0_dp
 
-    ! Sparse Neumann/Sigma:  Sigma = sum_{ord=0..N} H_PQ R (W R)^ord H_QP.
-    ! The P-Q edges are grouped per P row (rp_*) and per Q state (cq_*), the Q-Q
-    ! edges per source state (qs_*).  Every row ip of Sigma is independent, so the
-    ! rows are distributed over threads; each thread propagates a SPARSE amplitude
-    ! (support list) instead of scanning all edges for every row.  Cost is
-    ! proportional to the paths actually followed, not nred * (number of edges).
-    ! (Summation order inside a Sigma element differs from the old full scan
-    ! only at rounding level; the result does not depend on the thread count.)
+    ! Sigma = sum_{ord=0..N} H_PQ R (W R)^ord H_QP on the shared edge graphs
+    ! (built above, also used by the convergence check): row-blocked, threaded,
+    ! upper triangle + Hermitian mirror.  Summation order differs from the old
+    ! per-row scan only at rounding level; the result does not depend on the
+    ! number of threads.
     t_stage = icgn_wall()
-    allocate(res_q(nstates_total))
-    do i = 1, nstates_total
-       res_q(i) = 1.0_dp / (E0_used - evals_q(i))
-    end do
-    call icgn_group_by(pq_p, npq, nred, rp_ptr, rp_ord)
-    call icgn_group_by(pq_q, npq, nstates_total, cq_ptr, cq_ord)
-    if (upt%icgn_selfenergy_order >= 1 .and. nqq > 0) then
-       call icgn_group_by(qq_i, nqq, nstates_total, qs_ptr, qs_ord)
-    else
-       allocate(qs_ptr(nstates_total+1), qs_ord(1)); qs_ptr = 1
-    end if
-
-    nth = min(icgn_thread_budget(), max(1, nred))
-    call icgn_flatten_nesting(saved_levels)
-    !$omp parallel default(shared) num_threads(nth) if(nth > 1) &
-    !$omp& private(ip, ord, i, ee, tt, q_idx, qb_idx, amp_val, gp_col, contrib, amax, &
-    !$omp&         amp_vec, next_vec, supp, supp2, mark, mark2, nsupp, nsupp2)
-    allocate(amp_vec(nstates_total), next_vec(nstates_total))
-    allocate(supp(nstates_total), supp2(nstates_total), mark(nstates_total), mark2(nstates_total))
-    amp_vec = cmplx(0.0_dp, 0.0_dp, kind=dp); next_vec = cmplx(0.0_dp, 0.0_dp, kind=dp)
-    mark = .false.; mark2 = .false.
-    !$omp do schedule(dynamic,8)
-    do ip = 1, nred
-       ! Order-0 propagation: amp(q) = g_{ip,q} * resolvent(q)
-       nsupp = 0
-       do ee = rp_ptr(ip), rp_ptr(ip+1)-1
-          i = rp_ord(ee); q_idx = pq_q(i)
-          amp_vec(q_idx) = amp_vec(q_idx) + pq_v(i) * res_q(q_idx)
-          if (.not. mark(q_idx)) then
-             mark(q_idx) = .true.; nsupp = nsupp + 1; supp(nsupp) = q_idx
-          end if
-       end do
-
-       do ord = 0, upt%icgn_selfenergy_order
-          if (ord > 0) then
-             ! amp <- (W R) amp, restricted to the active support
-             nsupp2 = 0
-             do tt = 1, nsupp
-                q_idx = supp(tt)
-                amp_val = amp_vec(q_idx)
-                if (abs(amp_val) < 1.0e-14_dp) cycle
-                do ee = qs_ptr(q_idx), qs_ptr(q_idx+1)-1
-                   i = qs_ord(ee); qb_idx = qq_j(i)
-                   next_vec(qb_idx) = next_vec(qb_idx) + amp_val * qq_v(i) * res_q(qb_idx)
-                   if (.not. mark2(qb_idx)) then
-                      mark2(qb_idx) = .true.; nsupp2 = nsupp2 + 1; supp2(nsupp2) = qb_idx
-                   end if
-                end do
-             end do
-             ! clear the old amplitude, move next -> amp
-             do tt = 1, nsupp
-                amp_vec(supp(tt)) = cmplx(0.0_dp, 0.0_dp, kind=dp); mark(supp(tt)) = .false.
-             end do
-             amax = 0.0_dp
-             do tt = 1, nsupp2
-                q_idx = supp2(tt)
-                amp_vec(q_idx) = next_vec(q_idx); next_vec(q_idx) = cmplx(0.0_dp, 0.0_dp, kind=dp)
-                mark(q_idx) = .true.; mark2(q_idx) = .false.
-                supp(tt) = q_idx
-                amax = max(amax, abs(amp_vec(q_idx)))
-             end do
-             nsupp = nsupp2
-             if (amax < 1.0e-14_dp) exit
-          end if
-
-          ! Close chain: every P' connected to a Q state with nonzero amplitude
-          do tt = 1, nsupp
-             q_idx = supp(tt)
-             amp_val = amp_vec(q_idx)
-             if (abs(amp_val) < 1.0e-14_dp) cycle
-             do ee = cq_ptr(q_idx), cq_ptr(q_idx+1)-1
-                i = cq_ord(ee)
-                gp_col = pq_p(i)
-                contrib = amp_val * conjg(pq_v(i))
-                Sigma(ip, gp_col) = Sigma(ip, gp_col) + contrib
-             end do
-          end do
-       end do
-
-       ! reset the sparse scratch for the next row
-       do tt = 1, nsupp
-          amp_vec(supp(tt)) = cmplx(0.0_dp, 0.0_dp, kind=dp); mark(supp(tt)) = .false.
-       end do
-    end do
-    !$omp end do
-    deallocate(amp_vec, next_vec, supp, supp2, mark, mark2)
-    !$omp end parallel
-    call icgn_restore_nesting(saved_levels)
-    deallocate(res_q, rp_ptr, rp_ord, cq_ptr, cq_ord, qs_ptr, qs_ord)
-    call icgn_report_time('Sigma (sparse, parallel)', t_stage)
+    if (npq > 0) call icgn_sigma_blocked(nred, nstates_total, upt%icgn_selfenergy_order, 16, &
+         p_ptr, p_col, p_val, c_ptr, c_row, c_val, s_ptr, s_col, s_wres, Sigma)
+    deallocate(res_q, p_ptr, p_col, p_val, c_ptr, c_row, c_val, s_ptr, s_col, s_val, s_wres)
+    call icgn_report_time('Sigma (row-blocked, threaded)', t_stage)
     if (icgn_timing_on()) then
        write(*,'(a,i0,a,i0,a,i0,a,i0,a,es10.3)') '[ICGN-TIME] stats: nred=', nred, ' nstates_total=', &
             nstates_total, ' npq=', npq, ' nqq=', nqq, ' max|Sigma|=', maxval(abs(Sigma))
@@ -2766,6 +2697,323 @@ contains
        v(qi_arr(e)) = cmplx(rr - 0.5_dp, ri - 0.5_dp, kind=dp)
     end do
   end subroutine random_number_cx
+
+  ! ---------------------------------------------------------------------------
+  ! Edge graphs for the Neumann/Sigma stage, built ONCE and shared by the
+  ! convergence check and the Sigma kernel (contiguous CSR-ordered arrays, so
+  ! the kernels stream through memory instead of gathering through index maps).
+  !   P-grouped : for every P row p, its Q neighbours q and  g(p,q)*R(q)
+  !   Q-grouped : for every Q state q, the P rows p (ascending) and conj(g(p,q))
+  !   S (W)     : for every source Q state q, its targets q', raw coupling w and
+  !               w*R(q')  (only if build_w)
+  ! ---------------------------------------------------------------------------
+  subroutine icgn_build_edge_csr(npq, pq_p, pq_q, pq_v, nqq, qq_i, qq_j, qq_v, &
+       nred, nstates, res_q, build_w, &
+       p_ptr, p_col, p_val, c_ptr, c_row, c_val, s_ptr, s_col, s_val, s_wres)
+    integer, intent(in) :: npq, nqq, nred, nstates
+    integer, intent(in) :: pq_p(:), pq_q(:), qq_i(:), qq_j(:)
+    complex(dp), intent(in) :: pq_v(:), qq_v(:)
+    real(dp), intent(in) :: res_q(:)
+    logical, intent(in) :: build_w
+    integer, allocatable, intent(out) :: p_ptr(:), p_col(:), c_ptr(:), c_row(:), s_ptr(:), s_col(:)
+    complex(dp), allocatable, intent(out) :: p_val(:), c_val(:), s_val(:), s_wres(:)
+    integer, allocatable :: ord(:), fill(:)
+    integer :: e, i, p, q
+
+    ! ---- P-grouped (stable: entries of a row keep their original order) ----
+    call icgn_group_by(pq_p, npq, nred, p_ptr, ord)
+    allocate(p_col(max(1,npq)), p_val(max(1,npq)))
+    do e = 1, npq
+       i = ord(e)
+       p_col(e) = pq_q(i)
+       p_val(e) = pq_v(i) * res_q(pq_q(i))
+    end do
+
+    ! ---- Q-grouped, rows p ascending inside each q (needed for the triangle cut) ----
+    allocate(c_ptr(nstates+1), c_row(max(1,npq)), c_val(max(1,npq)), fill(nstates))
+    c_ptr = 0
+    do e = 1, npq
+       c_ptr(pq_q(e)+1) = c_ptr(pq_q(e)+1) + 1
+    end do
+    c_ptr(1) = 1
+    do q = 1, nstates
+       c_ptr(q+1) = c_ptr(q+1) + c_ptr(q)
+    end do
+    fill = c_ptr(1:nstates)
+    do p = 1, nred
+       do e = p_ptr(p), p_ptr(p+1)-1
+          i = ord(e); q = pq_q(i)
+          c_row(fill(q)) = p
+          c_val(fill(q)) = conjg(pq_v(i))
+          fill(q) = fill(q) + 1
+       end do
+    end do
+    deallocate(ord, fill)
+
+    ! ---- W grouped by source state ----
+    if (build_w) then
+       call icgn_group_by(qq_i, nqq, nstates, s_ptr, ord)
+       allocate(s_col(max(1,nqq)), s_val(max(1,nqq)), s_wres(max(1,nqq)))
+       !$omp parallel do default(shared) private(e, i) schedule(static)
+       do e = 1, nqq
+          i = ord(e)
+          s_col(e)  = qq_j(i)
+          s_val(e)  = qq_v(i)
+          s_wres(e) = qq_v(i) * res_q(qq_j(i))
+       end do
+       !$omp end parallel do
+       deallocate(ord)
+    else
+       allocate(s_ptr(nstates+1), s_col(1), s_val(1), s_wres(1))
+       s_ptr = 1; s_col = 1; s_val = (0.0_dp, 0.0_dp); s_wres = (0.0_dp, 0.0_dp)
+    end if
+  end subroutine icgn_build_edge_csr
+
+  ! ---------------------------------------------------------------------------
+  ! Sigma = sum_{ord=0..order} H_PQ R (W R)^ord H_QP, row-blocked and threaded.
+  !
+  ! The rows of Sigma are processed in blocks of rb rows at once: the amplitudes
+  ! of the rb rows are stored side by side (A(r,q), r contiguous), so every
+  ! coupling read from memory is used rb times.  The sparse support of the
+  ! amplitudes is tracked (union over the block), so the work stays proportional
+  ! to the paths actually followed.  Only the upper triangle (gp >= first row of
+  ! the block) is accumulated; the lower triangle is filled from Hermiticity.
+  ! Thread-private scratch only; every block owns its rows of Sigma.
+  ! ---------------------------------------------------------------------------
+  subroutine icgn_sigma_blocked(nred, nstates, order, rb_req, &
+       p_ptr, p_col, p_val, c_ptr, c_row, c_val, s_ptr, s_col, s_wres, Sigma)
+    integer, intent(in) :: nred, nstates, order, rb_req
+    integer, intent(in) :: p_ptr(:), p_col(:), c_ptr(:), c_row(:), s_ptr(:), s_col(:)
+    complex(dp), intent(in) :: p_val(:), c_val(:), s_wres(:)
+    complex(dp), intent(inout) :: Sigma(:,:)
+    real(dp), parameter :: thr2 = 1.0e-28_dp          ! (1e-14)^2
+    real(dp), parameter :: scratch_bytes = 2.56e8_dp   ! per-thread budget for A and Nx
+    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
+    integer :: rb, nblk, nth, saved_levels
+    integer :: ib, ip0, nr, r, ord, tt, ee, q, qb, nsupp, nsupp2, lo, hi, mid, gp, i
+    real(dp) :: amax2, m2
+    logical :: anynz
+    complex(dp), allocatable :: A(:,:), Nx(:,:), a_loc(:)
+    integer, allocatable :: supp(:), supp2(:)
+    logical, allocatable :: mark(:), mark2(:)
+
+    if (nred <= 0) return
+    rb = max(1, min(rb_req, nred, int(scratch_bytes / (32.0_dp * real(max(1,nstates), dp)))))
+    nblk = (nred + rb - 1) / rb
+    nth = min(icgn_thread_budget(), max(1, nblk))
+    call icgn_flatten_nesting(saved_levels)
+    !$omp parallel default(shared) num_threads(nth) if(nth > 1) &
+    !$omp& private(ib, ip0, nr, r, ord, tt, ee, q, qb, nsupp, nsupp2, lo, hi, mid, gp, i, &
+    !$omp&         amax2, m2, anynz, A, Nx, a_loc, supp, supp2, mark, mark2)
+    allocate(A(rb, nstates), Nx(rb, nstates), a_loc(rb))
+    allocate(supp(nstates), supp2(nstates), mark(nstates), mark2(nstates))
+    A = czero; Nx = czero; mark = .false.; mark2 = .false.
+    !$omp do schedule(dynamic,1)
+    do ib = 1, nblk
+       ip0 = (ib-1)*rb + 1
+       nr  = min(rb, nred - ip0 + 1)
+
+       ! Order-0 amplitudes of the rows of this block: A(r,q) = g(ip,q) * R(q)
+       nsupp = 0
+       do r = 1, nr
+          do ee = p_ptr(ip0+r-1), p_ptr(ip0+r)-1
+             q = p_col(ee)
+             A(r,q) = A(r,q) + p_val(ee)
+             if (.not. mark(q)) then
+                mark(q) = .true.; nsupp = nsupp + 1; supp(nsupp) = q
+             end if
+          end do
+       end do
+
+       do ord = 0, order
+          if (ord > 0) then
+             ! A <- (W R) A over the active support
+             nsupp2 = 0
+             do tt = 1, nsupp
+                q = supp(tt)
+                anynz = .false.
+                do r = 1, nr
+                   m2 = real(A(r,q), dp)**2 + aimag(A(r,q))**2
+                   if (m2 < thr2) then
+                      a_loc(r) = czero
+                   else
+                      a_loc(r) = A(r,q); anynz = .true.
+                   end if
+                end do
+                if (.not. anynz) cycle
+                do ee = s_ptr(q), s_ptr(q+1)-1
+                   qb = s_col(ee)
+                   do r = 1, nr
+                      Nx(r,qb) = Nx(r,qb) + a_loc(r) * s_wres(ee)
+                   end do
+                   if (.not. mark2(qb)) then
+                      mark2(qb) = .true.; nsupp2 = nsupp2 + 1; supp2(nsupp2) = qb
+                   end if
+                end do
+             end do
+             ! clear the old amplitude, move Nx -> A
+             do tt = 1, nsupp
+                q = supp(tt)
+                do r = 1, nr
+                   A(r,q) = czero
+                end do
+                mark(q) = .false.
+             end do
+             amax2 = 0.0_dp
+             do tt = 1, nsupp2
+                q = supp2(tt)
+                do r = 1, nr
+                   A(r,q) = Nx(r,q); Nx(r,q) = czero
+                   amax2 = max(amax2, real(A(r,q), dp)**2 + aimag(A(r,q))**2)
+                end do
+                mark(q) = .true.; mark2(q) = .false.
+                supp(tt) = q
+             end do
+             nsupp = nsupp2
+             if (amax2 < thr2) exit
+          end if
+
+          ! Close the chain: Sigma(ip,gp) += A(ip,q) * conj(g(gp,q)), gp >= ip0 only
+          do tt = 1, nsupp
+             q = supp(tt)
+             anynz = .false.
+             do r = 1, nr
+                m2 = real(A(r,q), dp)**2 + aimag(A(r,q))**2
+                if (m2 < thr2) then
+                   a_loc(r) = czero
+                else
+                   a_loc(r) = A(r,q); anynz = .true.
+                end if
+             end do
+             if (.not. anynz) cycle
+             lo = c_ptr(q); hi = c_ptr(q+1)
+             do while (lo < hi)                 ! first entry with c_row >= ip0
+                mid = (lo + hi) / 2
+                if (c_row(mid) < ip0) then
+                   lo = mid + 1
+                else
+                   hi = mid
+                end if
+             end do
+             do ee = lo, c_ptr(q+1)-1
+                gp = c_row(ee)
+                do r = 1, nr
+                   Sigma(ip0+r-1, gp) = Sigma(ip0+r-1, gp) + a_loc(r) * c_val(ee)
+                end do
+             end do
+          end do
+       end do
+
+       ! reset the scratch for the next block
+       do tt = 1, nsupp
+          q = supp(tt)
+          do r = 1, nr
+             A(r,q) = czero
+          end do
+          mark(q) = .false.
+       end do
+    end do
+    !$omp end do
+    deallocate(A, Nx, a_loc, supp, supp2, mark, mark2)
+    !$omp end parallel
+    call icgn_restore_nesting(saved_levels)
+
+    ! Lower triangle from Hermiticity: Sigma(i,gp) = conj(Sigma(gp,i)), i > gp
+    nth = min(icgn_thread_budget(), max(1, nred))
+    !$omp parallel do default(shared) private(i, gp) num_threads(nth) schedule(static) if(nth > 1)
+    do gp = 1, nred
+       do i = gp+1, nred
+          Sigma(i, gp) = conjg(Sigma(gp, i))
+       end do
+    end do
+    !$omp end parallel do
+  end subroutine icgn_sigma_blocked
+
+  ! Power iteration for ||T||_2, T = (E0-D)^-1 W, on the shared S graph.
+  ! Same method as icgn_power_iteration but both W and W^dagger products are
+  ! row-parallel matvecs on the CSR-by-source arrays (W is stored in both
+  ! directions with conjugate values, so W^dagger(r,c) = conj(w(r,c)) too).
+  subroutine icgn_power_iteration_csr(evals_q, nstates, s_ptr, s_col, s_val, E0, maxiter, tol, &
+       sigma_out, converged_out)
+    real(dp),    intent(in)  :: evals_q(:)
+    integer,     intent(in)  :: nstates, s_ptr(:), s_col(:), maxiter
+    complex(dp), intent(in)  :: s_val(:)
+    real(dp),    intent(in)  :: E0, tol
+    real(dp),    intent(out) :: sigma_out
+    logical,     intent(out) :: converged_out
+    integer  :: k, j, ee, nth
+    real(dp) :: nrm, sigma_est, diff2, rr, ri
+    complex(dp) :: acc
+    complex(dp), allocatable :: v(:), u(:), w(:), v_next(:)
+    real(dp), allocatable :: res(:)
+
+    sigma_out = 0.0_dp; converged_out = .true.
+    allocate(v(nstates), u(nstates), w(nstates), v_next(nstates), res(nstates))
+    do j = 1, nstates
+       res(j) = 1.0_dp / (E0 - evals_q(j))
+    end do
+    ! random start vector on the states that have at least one Q-Q edge
+    v = (0.0_dp, 0.0_dp)
+    do j = 1, nstates
+       if (s_ptr(j+1) > s_ptr(j)) then
+          call random_number(rr); call random_number(ri)
+          v(j) = cmplx(rr - 0.5_dp, ri - 0.5_dp, kind=dp)
+       end if
+    end do
+    nrm = sqrt(sum(real(v,dp)**2 + aimag(v)**2))
+    if (nrm < 1.0e-14_dp) then
+       deallocate(v, u, w, v_next, res); return
+    end if
+    v = v / nrm
+    converged_out = .false.
+    sigma_est = 0.0_dp
+    nth = icgn_thread_budget()
+
+    do k = 1, maxiter
+       ! u = (E0-D)^-1 W v      (row j: sum_i conj(w_ji) v_i = sum_i w_ij v_i)
+       !$omp parallel do default(shared) private(j, ee, acc) num_threads(nth) &
+       !$omp& schedule(dynamic,256) if(nth > 1)
+       do j = 1, nstates
+          acc = (0.0_dp, 0.0_dp)
+          do ee = s_ptr(j), s_ptr(j+1)-1
+             acc = acc + conjg(s_val(ee)) * v(s_col(ee))
+          end do
+          u(j) = acc * res(j)
+       end do
+       !$omp end parallel do
+       sigma_est = sqrt(sum(real(u,dp)**2 + aimag(u)**2))
+
+       ! w = (E0-D)^-1 u ; v_next = W^dagger w  (row i: sum_j conj(w_ij) w_j)
+       do j = 1, nstates
+          w(j) = u(j) * res(j)
+       end do
+       !$omp parallel do default(shared) private(j, ee, acc) num_threads(nth) &
+       !$omp& schedule(dynamic,256) if(nth > 1)
+       do j = 1, nstates
+          acc = (0.0_dp, 0.0_dp)
+          do ee = s_ptr(j), s_ptr(j+1)-1
+             acc = acc + conjg(s_val(ee)) * w(s_col(ee))
+          end do
+          v_next(j) = acc
+       end do
+       !$omp end parallel do
+
+       nrm = sqrt(sum(real(v_next,dp)**2 + aimag(v_next)**2))
+       if (nrm < 1.0e-14_dp) then
+          sigma_out = 0.0_dp; converged_out = .true.
+          deallocate(v, u, w, v_next, res); return
+       end if
+       v_next = v_next / nrm
+       diff2 = sum(real(v_next - v, dp)**2 + aimag(v_next - v)**2)
+       v = v_next
+       if (sqrt(diff2) < tol) then
+          converged_out = .true.
+          exit
+       end if
+    end do
+    sigma_out = sigma_est
+    deallocate(v, u, w, v_next, res)
+  end subroutine icgn_power_iteration_csr
 
   ! Helper: grow integer array
   subroutine grow_int_array(arr, new_size)
