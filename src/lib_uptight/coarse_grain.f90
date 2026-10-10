@@ -1248,7 +1248,7 @@ contains
     integer, allocatable :: blk_of(:), ierr_blk(:)
     integer, allocatable :: pq_off(:), pq_cnt(:), qq_off(:), qq_cnt(:)
     logical :: need_qq
-    real(dp) :: t_all, t_stage, amax
+    real(dp) :: t_all, t_stage, amax, t_mark
     complex(dp), allocatable :: tmp_g(:,:)
     ! Sparse Sigma work arrays
     real(dp), allocatable :: res_q(:)
@@ -1399,6 +1399,7 @@ contains
     end do
     nth = icgn_thread_budget()
     if (nb < nth) nth = 1
+    nth = icgn_outer_threads(nb, nth)
     t_all = icgn_wall(); t_stage = t_all
     call icgn_flatten_nesting(saved_levels)
     !$omp parallel do default(shared) private(i) num_threads(nth) schedule(dynamic,1) if(nth > 1)
@@ -1461,6 +1462,7 @@ contains
        call icgn_collect_pairs(upt, atom_of, label, row_of, pairs, npair, ierr)
        if (ierr /= 0) return
        call icgn_report_time('collect pair couplings H_ab', t_stage)
+       if (icgn_timing_on()) call icgn_report_boundary(pairs, npair)
     else
        allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2))); npair = 0
     end if
@@ -1470,6 +1472,7 @@ contains
        ! build_icgn_reduced_hamiltonian only slices v, and the Neumann correction
        ! reuses h, so nothing is recollected or reprojected later.
        nth = min(icgn_thread_budget(), max(1, npair))
+       nth = icgn_outer_threads(npair, nth)
        t_stage = icgn_wall()
        call icgn_flatten_nesting(saved_levels)
        !$omp parallel do default(shared) private(i, ia, ib) num_threads(nth) schedule(dynamic,1) if(nth > 1)
@@ -1520,6 +1523,7 @@ contains
     ! The projected pairs (v, h) are kept: build_icgn_reduced_hamiltonian slices v
     ! (reuse_full) and the Neumann correction reuses h.  Freed later.
 
+    t_mark = icgn_wall()
     ! ---- Apply keep_mask to nret, q, eval, retained_idx --------------------
     total_ret = 0
     do i = 1, nb
@@ -1559,6 +1563,7 @@ contains
        end do
     end do
 
+    call icgn_report_time('apply keep_mask (q/eval/retained_idx)', t_mark)
     ! ---- Build reduced Hamiltonian (keeping pairs for Sigma) ----------------
     t_stage = icgn_wall()
     call build_icgn_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, &
@@ -1574,6 +1579,7 @@ contains
     ! We need H_PQ: from the *unsliced* g_full before retained_idx slicing.
     ! Strategy: re-project directly from S_full to extract P-Q and Q-Q.
 
+    t_mark = icgn_wall()
     nred = total_ret
     allocate(H_dense(nred, nred))
     H_dense = cmplx(0.0_dp, 0.0_dp, kind=dp)
@@ -1615,25 +1621,7 @@ contains
        end do
     end do
 
-    ! Build P-Q edge list: (global_red_row_p, flat_q_idx, coupling g(p,q))
-    ! These come from pairs before slicing. Re-project with S_full.
-    ! For each inter-block physical CSR entry (r,c) where r in P, c in Q:
-    cnt_pq = 0
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          ia = label(atom_of(r)); ib = label(atom_of(c))
-          if (ia == ib) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          ! We count all P-Q edges across the full g matrix
-          cnt_pq = cnt_pq + upt%icgn_blocks(ia)%nret * &
-               (upt%icgn_blocks(ib)%nrow - upt%icgn_blocks(ib)%nret)
-          cnt_pq = cnt_pq + upt%icgn_blocks(ib)%nret * &
-               (upt%icgn_blocks(ia)%nrow - upt%icgn_blocks(ia)%nret)
-       end do
-    end do
-    ! Upper bound — just pre-allocate generously using npair info
-    ! Exact P-Q: for each pair, nret_a * (nrow_b - nret_b) + nret_b * (nrow_a - nret_a)
+    ! Exact P-Q count per pair: nret_a * (nrow_b - nret_b) + nret_b * (nrow_a - nret_a)
     cnt_pq = 0
     do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
@@ -1646,6 +1634,7 @@ contains
     ! the projection step. Since we already freed g_full inside
     ! build_icgn_reduced_hamiltonian, we need to re-project.
     ! Re-project inter-block couplings to get the full g matrices.
+    call icgn_report_time('Neumann setup (H_dense fill, index tables)', t_mark)
     allocate(pq_p(max(1,cnt_pq)), pq_q(max(1,cnt_pq)))
     allocate(pq_v(max(1,cnt_pq)))
     npq = 0
@@ -1775,6 +1764,7 @@ contains
        end do
     end if
     deallocate(pq_off, pq_cnt, qq_off, qq_cnt)
+    t_mark = icgn_wall()
 
     ! Free S_full now that projections are done
     do i = 1, nb
@@ -1816,6 +1806,7 @@ contains
        end if
     end if
 
+    call icgn_report_time('free S_full/pairs + convergence check', t_mark)
     ! ---- Compute Sigma and add to H_dense ----------------------------------
     allocate(Sigma(nred, nred))
     Sigma = cmplx(0.0_dp, 0.0_dp, kind=dp)
@@ -1922,6 +1913,11 @@ contains
     call icgn_restore_nesting(saved_levels)
     deallocate(res_q, rp_ptr, rp_ord, cq_ptr, cq_ord, qs_ptr, qs_ord)
     call icgn_report_time('Sigma (sparse, parallel)', t_stage)
+    if (icgn_timing_on()) then
+       write(*,'(a,i0,a,i0,a,i0,a,i0,a,es10.3)') '[ICGN-TIME] stats: nred=', nred, ' nstates_total=', &
+            nstates_total, ' npq=', npq, ' nqq=', nqq, ' max|Sigma|=', maxval(abs(Sigma))
+    end if
+    t_mark = icgn_wall()
     deallocate(pq_p, pq_q, pq_v)
     if (upt%icgn_selfenergy_order >= 1 .or. upt%icgn_check_convergence) then
        if (allocated(qq_i)) deallocate(qq_i, qq_j, qq_v)
@@ -1941,6 +1937,8 @@ contains
     end do
     !$omp end parallel do
     deallocate(Sigma)
+    call icgn_report_time('free edge lists + H_dense+=Sigma, hermitize', t_mark)
+    t_mark = icgn_wall()
 
     ! Rebuild icgn_ham from H_dense
     call destroy_matrix(upt%icgn_ham)
@@ -1963,6 +1961,7 @@ contains
     end do
     upt%icgn_ham%nnz = k
     deallocate(H_dense)
+    call icgn_report_time('rebuild icgn_ham from dense (serial)', t_mark)
 
     end if  ! icgn_selfenergy_order >= 0 (Neumann correction)
 
@@ -2221,6 +2220,59 @@ contains
     write(*,'(a)') '  (icgn) Choose OMP_NUM_THREADS (or --cpus-per-task) <= the CPUs available to each MPI rank.'
   end subroutine icgn_warn_threads
 
+  ! True when env UPT_CG_TIMING is set (any non-empty value).
+  function icgn_timing_on() result(on)
+    logical :: on
+    character(len=8) :: s
+    integer :: ln, ios
+    call get_environment_variable('UPT_CG_TIMING', s, length=ln, status=ios)
+    on = (ln > 0 .and. (ios == 0 .or. ios == -1))
+  end function icgn_timing_on
+
+  ! Number of OUTER threads for a loop over nwork independent items.
+  ! default_nth is the automatic choice of the caller.  Env UPT_CG_OUTER:
+  !   0 -> no outer parallelism (items one after another; threaded BLAS/LAPACK
+  !        inside uses the whole thread budget)
+  !   1 -> always parallel over items (BLAS single-threaded inside)
+  !   unset/other -> default_nth
+  function icgn_outer_threads(nwork, default_nth) result(nth)
+    integer, intent(in) :: nwork, default_nth
+    integer :: nth
+    character(len=8) :: s
+    integer :: ln, ios
+    nth = default_nth
+    call get_environment_variable('UPT_CG_OUTER', s, length=ln, status=ios)
+    if (ios == 0 .and. ln > 0) then
+       if (s(1:1) == '0') then
+          nth = 1
+       else if (s(1:1) == '1') then
+          nth = min(icgn_thread_budget(), max(1, nwork))
+       end if
+    end if
+    nth = max(1, nth)
+  end function icgn_outer_threads
+
+  ! How sparse are the block-block couplings?  Counts the rows/columns of each
+  ! H_ab that contain at least one nonzero (timing diagnostics only).
+  subroutine icgn_report_boundary(pairs, npair)
+    type(ICGNPair), intent(in) :: pairs(:)
+    integer, intent(in) :: npair
+    integer :: i, nr, nc, max_nr, max_nc
+    integer(8) :: sum_nr, sum_nc, sum_ra, sum_cb
+    sum_nr = 0; sum_nc = 0; sum_ra = 0; sum_cb = 0; max_nr = 0; max_nc = 0
+    do i = 1, npair
+       if (.not. associated(pairs(i)%h)) cycle
+       nr = count(any(pairs(i)%h /= (0.0_dp, 0.0_dp), dim=2))
+       nc = count(any(pairs(i)%h /= (0.0_dp, 0.0_dp), dim=1))
+       sum_nr = sum_nr + nr; sum_nc = sum_nc + nc
+       sum_ra = sum_ra + size(pairs(i)%h, 1); sum_cb = sum_cb + size(pairs(i)%h, 2)
+       max_nr = max(max_nr, nr); max_nc = max(max_nc, nc)
+    end do
+    write(*,'(a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0)') '[ICGN-TIME] boundary: npair=', npair, &
+         ' nonzero_rows=', sum_nr, '/', sum_ra, ' nonzero_cols=', sum_nc, '/', sum_cb, &
+         ' max_rows_per_pair=', max_nr, ' max_cols_per_pair=', max_nc
+  end subroutine icgn_report_boundary
+
   ! Wall-clock timing (portable, works with or without OpenMP).
   function icgn_wall() result(t)
     real(dp) :: t
@@ -2256,6 +2308,8 @@ contains
     !$ if (req > avail .and. .not. warned .and. .not. omp_in_parallel()) then
     !$    warned = .true.
     !$    call icgn_warn_threads(req, avail)
+    !$    ! also cut the thread count seen by threaded BLAS/LAPACK (MKL follows it)
+    !$    call omp_set_num_threads(avail)
     !$ end if
     call get_environment_variable('UPT_CG_THREADS', s, length=ln, status=ios)
     if (ios == 0 .and. ln > 0) then
