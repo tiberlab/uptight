@@ -539,7 +539,7 @@ end subroutine upt_createhamiltonian
 !!* Configure optional ICGN coarse graining before creating the Hamiltonian.
 subroutine upt_set_coarse_graining(handler, n_blocks, metis_imbalance, &
   core_energy_min, core_energy_max, top_buffer, bottom_buffer, epsilon, &
-  add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence, &
+  add_core_outers, neumann_order, expansion_energy, check_neumann_convergence, &
   power_iteration_max_iterations, power_iteration_tolerance)
   use precision, only : dp
   use uptightAPICommon ! if:mod:use
@@ -553,7 +553,7 @@ subroutine upt_set_coarse_graining(handler, n_blocks, metis_imbalance, &
   real(dp) :: top_buffer ! if:var:in
   real(dp) :: bottom_buffer ! if:var:in
   real(dp) :: epsilon ! if:var:in
-  integer :: add_core_acquaintances ! if:var:in
+  integer :: add_core_outers ! if:var:in
   integer :: neumann_order ! if:var:in
   real(dp) :: expansion_energy ! if:var:in
   integer :: check_neumann_convergence ! if:var:in
@@ -563,7 +563,7 @@ subroutine upt_set_coarse_graining(handler, n_blocks, metis_imbalance, &
   pUPTs = transfer(handler, pUPTs)
   call upt_configure_coarse_graining(pUPTs%pUPT, n_blocks, metis_imbalance, &
       core_energy_min, core_energy_max, top_buffer, bottom_buffer, epsilon, &
-      add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
+      add_core_outers, neumann_order, expansion_energy, check_neumann_convergence /= 0, &
       power_iteration_max_iterations, power_iteration_tolerance)
 end subroutine upt_set_coarse_graining
 

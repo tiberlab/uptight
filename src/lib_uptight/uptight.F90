@@ -346,7 +346,7 @@ contains
     call sparse_ham(upt)
 
     ! ---- Optional ICGN coarse-graining ---------------------------------
-    ! ICGN with add_core_acquaintances=0 and neumann_order<0 is the plain ICGN
+    ! ICGN with add_core_outers=0 and neumann_order<0 is the plain ICGN
     ! special case; there is no separate ICGN execution path anymore.
     if (upt%icgn_enabled) then
        if (upt%verbose > 0) write(*,*) '(uptight) ICGN preparation started'
@@ -412,10 +412,10 @@ contains
 
   subroutine UPT_configure_coarse_graining(upt, nblocks, metis_imbalance, &
       core_energy_min, core_energy_max, top_buffer, bottom_buffer, epsilon, &
-      add_core_acquaintances, neumann_order, expansion_energy, check_neumann_convergence, &
+      add_core_outers, neumann_order, expansion_energy, check_neumann_convergence, &
       pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: nblocks, add_core_acquaintances, neumann_order, pi_maxiter
+    integer, intent(in) :: nblocks, add_core_outers, neumann_order, pi_maxiter
     real(dp), intent(in) :: metis_imbalance, core_energy_min, core_energy_max
     real(dp), intent(in) :: top_buffer, bottom_buffer, epsilon, expansion_energy, pi_tol
     logical, intent(in) :: check_neumann_convergence
@@ -424,7 +424,7 @@ contains
     upt%icgn_pi_maxiter = pi_maxiter
     upt%icgn_pi_tol = pi_tol
     call icgn_configure(upt, .true., nblocks, core_energy_min, core_energy_max, &
-        top_buffer, bottom_buffer, epsilon, add_core_acquaintances, neumann_order, expansion_energy, metis_imbalance, &
+        top_buffer, bottom_buffer, epsilon, add_core_outers, neumann_order, expansion_energy, metis_imbalance, &
         check_neumann_convergence, pi_maxiter, pi_tol)
   end subroutine UPT_configure_coarse_graining
 

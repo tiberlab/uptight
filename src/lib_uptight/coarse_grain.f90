@@ -76,7 +76,7 @@ module coarse_grain
      ! Used by the ICGN projection path to avoid materializing dense H_AB.
      complex(dp), dimension(:,:), pointer :: t => null()
      ! g = full (all block states) projected coupling S_a^H H_ab S_b, kept only on
-     ! the acquaintance path so the Neumann correction need not project again.
+     ! the outer path so the Neumann correction need not project again.
      complex(dp), dimension(:,:), pointer :: g => null()
   end type ICGNPair
 
@@ -160,21 +160,28 @@ contains
          ! associated(icgn_original_u%Mi)
   end subroutine icgn_set_original
 
-  ! Common coupling filter shared by ICGN and ICGN. A coupling V between two
-  ! block eigenstates with energies ea, eb survives only if
-  !   |V|^2 > epsilon * |ea - eb|        (strict: equality is filtered out)
-  ! with epsilon >= 0. This is the product form of |V|^2/|ea - eb| > epsilon,
-  ! so no division by a (nearly) vanishing energy difference occurs: for
-  ! degenerate states the right-hand side is 0 and any non-zero coupling
-  ! survives, without overflow or NaN. For epsilon = 0 the test reduces to
-  ! |V|^2 > 0, i.e. only exact zeros are dropped.
-  pure logical function icgn_coupling_survives(v, ea, eb, epsilon)
+  ! Common coupling filter shared by ICG/ICGN. A coupling V between two
+  ! block eigenstates with energies ea, eb:
+  !   - never filtered when BOTH energies lie in the core+buffer window
+  !     [win_emin, win_emax] (only exact zeros are dropped);
+  !   - otherwise survives only if
+  !       |V|^2 > epsilon * |ea - eb|        (strict: equality is filtered out)
+  ! with epsilon >= 0. Product form avoids division by a vanishing energy
+  ! difference; for degenerate outer states RHS is 0 so any non-zero coupling
+  ! survives. epsilon = 0 reduces to |V|^2 > 0 outside the window.
+  pure logical function icgn_coupling_survives(v, ea, eb, epsilon, win_emin, win_emax)
     complex(dp), intent(in) :: v
-    real(dp), intent(in) :: ea, eb, epsilon
+    real(dp), intent(in) :: ea, eb, epsilon, win_emin, win_emax
     real(dp) :: v2, de
     v2 = real(v,dp)**2 + aimag(v)**2
     icgn_coupling_survives = .false.
     if (.not. (v2 > 0.0_dp)) return            ! exact zero (or NaN): no coupling
+    ! Core+buffer window: never filter non-zero couplings between in-window states.
+    if (ea >= win_emin .and. ea <= win_emax .and. &
+        eb >= win_emin .and. eb <= win_emax) then
+       icgn_coupling_survives = .true.
+       return
+    end if
     de = abs(ea - eb)
     if (de <= 0.0_dp) then
        icgn_coupling_survives = .true.           ! degenerate: |V|^2 > 0 = epsilon*0
@@ -827,15 +834,17 @@ contains
        a = pairs(i)%a; b = pairs(i)%b
        call project_accumulated_pair_cg(pairs(i), upt%icgn_blocks(a)%q)
 
-       ! ICGN keeps all retained states, but sparsifies the projected couplings
+       ! ICGN keeps all retained states, but sparsifies projected couplings
        ! with the common filter (see icgn_coupling_survives):
-       !   |V_ij|^2 > epsilon * |E_i-E_j|   (strict)
-       ! Couplings failing it are set to exact zero; the states themselves
-       ! remain in the reduced Hamiltonian. epsilon = 0 only removes exact zeros.
+       !   in-window (core+buffer) pairs are never filtered (except exact zeros);
+       !   otherwise |V_ij|^2 > epsilon * |E_i-E_j| (strict).
+       ! Failed couplings are zeroed; the states themselves remain.
        do j = 1, size(pairs(i)%v,1)
           do k = 1, size(pairs(i)%v,2)
              if (.not. icgn_coupling_survives(pairs(i)%v(j,k), upt%icgn_blocks(a)%eval(j), &
-                 upt%icgn_blocks(b)%eval(k), upt%icgn_epsilon)) then
+                 upt%icgn_blocks(b)%eval(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
                 pairs(i)%v(j,k) = (0.0_dp,0.0_dp)
              end if
           end do
@@ -1132,11 +1141,11 @@ contains
   ! ==========================================================================
 
   subroutine icgn_configure(upt, enabled, nblocks, core_emin, core_emax, &
-     top_buffer, bottom_buffer, epsilon, add_core_acquaintances, selfenergy_order, E0, metis_imbalance, &
+     top_buffer, bottom_buffer, epsilon, add_core_outers, selfenergy_order, E0, metis_imbalance, &
        check_convergence, pi_maxiter, pi_tol)
     type(OUPT), intent(inout) :: upt
     logical, intent(in) :: enabled, check_convergence
-    integer, intent(in) :: nblocks, add_core_acquaintances, selfenergy_order, pi_maxiter
+    integer, intent(in) :: nblocks, add_core_outers, selfenergy_order, pi_maxiter
    real(dp), intent(in) :: core_emin, core_emax, top_buffer, bottom_buffer, epsilon, E0, metis_imbalance, pi_tol
     upt%icgn_enabled = enabled
     upt%icgn_num_blocks = nblocks
@@ -1145,7 +1154,7 @@ contains
    upt%icgn_top_buffer = top_buffer
    upt%icgn_bottom_buffer = bottom_buffer
     upt%icgn_epsilon = epsilon
-    upt%icgn_add_core_acquaintances = max(0, add_core_acquaintances)
+    upt%icgn_add_core_outers = max(0, add_core_outers)
     upt%icgn_selfenergy_order = selfenergy_order
     upt%icgn_E0 = E0
     upt%icgn_metis_imbalance = metis_imbalance
@@ -1222,8 +1231,8 @@ contains
   ! ---------------------------------------------------------------------------
   subroutine icgn_prepare(upt, ierr)
     character(len=*), parameter :: core_acq_warning = &
-         'Including core-state acquaintances higher than level 1 is not yet implemented --> ' // &
-         'Fall back to level-1 acquaintances only.'
+         'Including core-state outers higher than level 1 is not yet implemented --> ' // &
+         'Fall back to level-1 outers only.'
     type(OUPT), intent(inout) :: upt
     integer, intent(out) :: ierr
 
@@ -1457,7 +1466,7 @@ contains
     end do
     deallocate(ierr_blk, blk_of)
 
-    ! ---- Improved keep-mask: core + buffer + acquaintance -------------------
+    ! ---- Improved keep-mask: core + buffer + outer -------------------
     allocate(is_core(nb, maxval(counts)), keep_mask(nb, maxval(counts)))
     is_core = .false.; keep_mask = .false.
 
@@ -1483,11 +1492,11 @@ contains
        end do
     end do
 
-    ! Level-1 acquaintance: collect physical block couplings, then project
-    ! each pair once at matrix level.  The zero-acquaintance/no-Neumann case
+    ! Level-1 outer: collect physical block couplings, then project
+    ! each pair once at matrix level.  The zero-outer/no-Neumann case
     ! defers pair construction until q is available and uses the ICGN-style
     ! sparse projection path instead of materializing dense physical H_ab.
-    if (upt%icgn_add_core_acquaintances > 0 .or. upt%icgn_selfenergy_order >= 0) then
+    if (upt%icgn_add_core_outers > 0 .or. upt%icgn_selfenergy_order >= 0) then
        allocate(pairs(max(1, upt%ham%nnz)))
        t_stage = icgn_wall()
        call icgn_collect_pairs(upt, atom_of, label, row_of, pairs, npair, ierr)
@@ -1497,7 +1506,7 @@ contains
     else
        allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2))); npair = 0
     end if
-    if (upt%icgn_add_core_acquaintances > 0) then
+    if (upt%icgn_add_core_outers > 0) then
        ! Pair projections are independent (each touches only pairs(i)).  The full
        ! projected coupling pairs(i)%v and the physical block pairs(i)%h are kept:
        ! build_icgn_reduced_hamiltonian only slices v, and the Neumann correction
@@ -1513,17 +1522,17 @@ contains
        end do
        !$omp end parallel do
        call icgn_restore_nesting(saved_levels)
-       call icgn_report_time('project acquaintance pairs', t_stage)
+       call icgn_report_time('project outer pairs', t_stage)
     end if
 
-    ! Acquaintance selection is optional. Level 1 is the currently implemented
-    ! core-state acquaintance level; higher requested levels fall back to it.
+    ! Outer selection is optional. Level 1 is the currently implemented
+    ! core-state outer level; higher requested levels fall back to it.
     t_stage = icgn_wall()
-    if (upt%icgn_add_core_acquaintances > 1) then
+    if (upt%icgn_add_core_outers > 1) then
        call icgn_log_important(upt, core_acq_warning)
        write(*,'(a)') core_acq_warning
     end if
-    if (upt%icgn_add_core_acquaintances > 0) then
+    if (upt%icgn_add_core_outers > 0) then
        do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
        do j = 1, upt%icgn_blocks(ia)%nrow
@@ -1531,7 +1540,9 @@ contains
              do k = 1, upt%icgn_blocks(ib)%nrow
                 if (.not. keep_mask(ib, k)) then
                    if (icgn_coupling_survives(pairs(i)%v(j,k), upt%icgn_blocks(ia)%evals_full(j), &
-                       upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) &
+                       upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) &
                        keep_mask(ib, k) = .true.
                 end if
              end do
@@ -1542,7 +1553,9 @@ contains
              do j = 1, upt%icgn_blocks(ia)%nrow
                 if (.not. keep_mask(ia, j)) then
                    if (icgn_coupling_survives(pairs(i)%v(j,k), upt%icgn_blocks(ib)%evals_full(k), &
-                       upt%icgn_blocks(ia)%evals_full(j), upt%icgn_epsilon)) &
+                       upt%icgn_blocks(ia)%evals_full(j), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) &
                        keep_mask(ia, j) = .true.
                 end if
              end do
@@ -1550,7 +1563,7 @@ contains
        end do
     end do
        end if
-    call icgn_report_time('acquaintance selection (keep_mask, serial)', t_stage)
+    call icgn_report_time('outer selection (keep_mask, serial)', t_stage)
     ! The projected pairs (v, h) are kept: build_icgn_reduced_hamiltonian slices v
     ! (reuse_full) and the Neumann correction reuses h.  Freed later.
 
@@ -1598,7 +1611,7 @@ contains
     ! ---- Build reduced Hamiltonian (keeping pairs for Sigma) ----------------
     t_stage = icgn_wall()
     call build_icgn_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, &
-         upt%icgn_add_core_acquaintances > 0, ierr)
+         upt%icgn_add_core_outers > 0, ierr)
     if (ierr /= 0) return
     call icgn_report_time('build reduced H (pair projection)', t_stage)
 
@@ -1745,7 +1758,7 @@ contains
     do i = 1, npair
        ia = pairs(i)%a; ib = pairs(i)%b
        if (associated(pairs(i)%g)) then
-          ! Acquaintance path: the full projection S_a^H H_ab S_b was kept.
+          ! Outer path: the full projection S_a^H H_ab S_b was kept.
           g_full => pairs(i)%g
        else
           allocate(g_full(upt%icgn_blocks(ia)%nrow, upt%icgn_blocks(ib)%nrow))
@@ -1763,7 +1776,9 @@ contains
              if (abs(g_full(upt%icgn_blocks(ia)%retained_idx(j), k)) < 1.0e-14_dp) cycle
              if (.not. icgn_coupling_survives(g_full(upt%icgn_blocks(ia)%retained_idx(j), k), &
                  upt%icgn_blocks(ia)%evals_full(upt%icgn_blocks(ia)%retained_idx(j)), &
-                 upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) cycle
+                 upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) cycle
              mypq = mypq + 1
              pq_p(mypq) = roff_blk(ia) + j - 1
              pq_q(mypq) = ret_offset(ib) + k
@@ -1778,7 +1793,9 @@ contains
              if (.not. icgn_coupling_survives(g_full(k, upt%icgn_blocks(ib)%retained_idx(j)), &
                  upt%icgn_blocks(ia)%evals_full(k), &
                  upt%icgn_blocks(ib)%evals_full(upt%icgn_blocks(ib)%retained_idx(j)), &
-                 upt%icgn_epsilon)) cycle
+                 upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) cycle
              mypq = mypq + 1
              pq_p(mypq) = roff_blk(ib) + j - 1
              pq_q(mypq) = ret_offset(ia) + k
@@ -1795,7 +1812,9 @@ contains
                 if (local_ret_idx(ib, k) /= 0) cycle ! k in P, skip
                 if (abs(g_full(j, k)) < 1.0e-14_dp) cycle
                 if (.not. icgn_coupling_survives(g_full(j, k), upt%icgn_blocks(ia)%evals_full(j), &
-                    upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) cycle
+                    upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) cycle
                 myqq = myqq + 1
                 qq_i(myqq) = ret_offset(ia) + j
                 qq_j(myqq) = ret_offset(ib) + k
@@ -2462,7 +2481,7 @@ contains
        nra = upt%icgn_blocks(ia)%nrow; nrb = upt%icgn_blocks(ib)%nrow
        own_g = .false.
        if (associated(pairs(i)%g)) then
-          g => pairs(i)%g                      ! full projection kept (acquaintance path)
+          g => pairs(i)%g                      ! full projection kept (outer path)
        else
           allocate(g(nra, nrb)); own_g = .true.
           call icgn_project_sparse(pairs(i)%h, upt%icgn_blocks(ia)%S_full, &
@@ -2479,7 +2498,9 @@ contains
              if (abs(v) < thr) then
                 qp(i)%gab(jq, kq) = czero
              else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(ra), &
-                  upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) then
+                  upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
                 qp(i)%gab(jq, kq) = czero
              else
                 qp(i)%gab(jq, kq) = v; nzp = nzp + 1
@@ -2496,7 +2517,9 @@ contains
              if (abs(v) < thr) then
                 qp(i)%gba(jq, kq) = czero
              else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(k), &
-                  upt%icgn_blocks(ib)%evals_full(rb), upt%icgn_epsilon)) then
+                  upt%icgn_blocks(ib)%evals_full(rb), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
                 qp(i)%gba(jq, kq) = czero
              else
                 qp(i)%gba(jq, kq) = conjg(v); nzp = nzp + 1
@@ -2514,7 +2537,9 @@ contains
                 if (abs(v) < thr) then
                    qp(i)%wab(jq, kq) = czero
                 else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(ra), &
-                     upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon)) then
+                     upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
                    qp(i)%wab(jq, kq) = czero
                 else
                    qp(i)%wab(jq, kq) = v; nzq = nzq + 2
@@ -2971,7 +2996,7 @@ contains
     type(ICGNPair), allocatable, intent(inout) :: pairs(:)
     integer, intent(inout) :: npair
     ! .true.: pairs already hold the full projected coupling v (and h) from
-    ! icgn_prepare (acquaintance path); only slicing to retained states is left.
+    ! icgn_prepare (outer path); only slicing to retained states is left.
     logical, intent(in) :: reuse_full
     integer, intent(out) :: ierr
     integer :: i, j, k, r, c, a, b, ia, ib, nnz, pos, slot, nred, nth, saved_levels
@@ -2984,7 +3009,7 @@ contains
     allocate(roff(upt%icgn_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icgn_num_blocks; roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret; end do
 
-    if (upt%icgn_add_core_acquaintances == 0 .and. upt%icgn_selfenergy_order < 0) then
+    if (upt%icgn_add_core_outers == 0 .and. upt%icgn_selfenergy_order < 0) then
        ! Fast path: accumulate T = H_AB * Q_B directly from the global CSR,
        ! exactly like ICGN.  No dense physical H_AB is needed because Neumann
        ! corrections are disabled and the pairs are used only to build H_PP.
@@ -3058,7 +3083,9 @@ contains
              do k = 1, upt%icgn_blocks(b)%nret
                 if (.not. icgn_coupling_survives(pairs(i)%v(j,k), &
                     upt%icgn_blocks(a)%eval(j), upt%icgn_blocks(b)%eval(k), &
-                    upt%icgn_epsilon)) pairs(i)%v(j,k) = (0.0_dp, 0.0_dp)
+                    upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) pairs(i)%v(j,k) = (0.0_dp, 0.0_dp)
              end do
           end do
        end do
@@ -3066,8 +3093,8 @@ contains
        call icgn_restore_nesting(saved_levels)
        call icgn_report_time('  fast path: accumulate + project (parallel)', t_stage)
        deallocate(e_slot, e_row, e_k, e_ord, p_start, p_fill)
-    else if (upt%icgn_add_core_acquaintances == 0) then
-       ! Zero-acquaintance path with Neumann enabled: keep the full physical
+    else if (upt%icgn_add_core_outers == 0) then
+       ! Zero-outer path with Neumann enabled: keep the full physical
        ! pair matrices because the correction needs P-Q and Q-Q couplings.
        nth = min(icgn_thread_budget(), max(1, npair))
        call icgn_flatten_nesting(saved_levels)
@@ -3080,7 +3107,9 @@ contains
              do k = 1, upt%icgn_blocks(b)%nret
                 if (.not. icgn_coupling_survives(pairs(i)%v(j,k), &
                     upt%icgn_blocks(a)%eval(j), upt%icgn_blocks(b)%eval(k), &
-                    upt%icgn_epsilon)) pairs(i)%v(j,k) = (0.0_dp, 0.0_dp)
+                    upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) pairs(i)%v(j,k) = (0.0_dp, 0.0_dp)
              end do
           end do
        end do
@@ -3118,7 +3147,9 @@ contains
                    pairs(i)%v(k,j) = pairs(i)%g(upt%icgn_blocks(a)%retained_idx(k), &
                                                  upt%icgn_blocks(b)%retained_idx(j))
                    if (.not. icgn_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
-                       upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
+                       upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) &
                        pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
                 end do
              end do
@@ -3132,7 +3163,9 @@ contains
                    pairs(i)%v(k,j) = g_full(upt%icgn_blocks(a)%retained_idx(k), &
                                              upt%icgn_blocks(b)%retained_idx(j))
                    if (.not. icgn_coupling_survives(pairs(i)%v(k,j), upt%icgn_blocks(a)%eval(k), &
-                       upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon)) &
+                       upt%icgn_blocks(b)%eval(j), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) &
                        pairs(i)%v(k,j) = (0.0_dp, 0.0_dp)
                 end do
              end do

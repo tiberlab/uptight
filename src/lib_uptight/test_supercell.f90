@@ -1,7 +1,7 @@
 ! Test driver for 4 solve modes:
 !   (1) Standard full diagonalization
 !   (2) Original coarse-graining (Liu et al. 2022)
-!   (3) Improved coarse-graining (core + buffer + level-1 acquaintance)
+!   (3) Improved coarse-graining (core + buffer + level-1 outer)
 !   (4) Improved ICGN + Neumann self-energy correction (ICGN)
 !
 ! TIMING: The sparse Hamiltonian is built once and reused.  For each mode
