@@ -1034,11 +1034,8 @@ contains
     ! First H_AB * Q_B, then Q_A^H * (H_AB * Q_B).
     ! The expensive arithmetic is now done at block level instead of once per
     ! physical Hamiltonian entry.
-    allocate(tmp(size(qa,1), size(qb,2)))
-    call icgn_zgemm('N', p%h, qb, tmp)
     allocate(p%v(size(qa,2), size(qb,2)))
-    call icgn_zgemm('C', qa, tmp, p%v)
-    deallocate(tmp)
+    call icgn_project_sparse(p%h, qa, qb, p%v)
     if (.not. present(keep_h) .or. .not. keep_h) deallocate(p%h)
   end subroutine project_pair
 
@@ -2310,6 +2307,52 @@ contains
     end if
   end function icgn_neumann_blocked
 
+  ! out = qa^H * h * qb, exploiting that the physical block coupling h has only a
+  ! few nonzero rows and columns (the atoms next to the interface): only those
+  ! rows of qa/h and columns of h/qb enter, so the dense n^3 products shrink to
+  ! (#nonzero rows) x (#nonzero columns) sized ones.  Same result up to rounding.
+  subroutine icgn_project_sparse(h, qa, qb, out)
+    complex(dp), intent(in) :: h(:,:), qa(:,:), qb(:,:)
+    complex(dp), intent(inout) :: out(:,:)
+    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp), czero = (0.0_dp, 0.0_dp)
+    integer :: nra, nrb, i, j, nr, nc
+    integer, allocatable :: rz(:), cz(:)
+    logical, allocatable :: rmask(:), cmask(:)
+    complex(dp), allocatable :: hs(:,:), qas(:,:), qbs(:,:), tmp(:,:)
+
+    nra = size(h,1); nrb = size(h,2)
+    allocate(rmask(nra), cmask(nrb))
+    rmask = .false.; cmask = .false.
+    do j = 1, nrb
+       do i = 1, nra
+          if (h(i,j) /= czero) then
+             rmask(i) = .true.; cmask(j) = .true.
+          end if
+       end do
+    end do
+    nr = count(rmask); nc = count(cmask)
+    if (nr == 0 .or. nc == 0) then
+       out = czero
+       return
+    end if
+    allocate(rz(nr), cz(nc))
+    nr = 0
+    do i = 1, nra
+       if (rmask(i)) then; nr = nr + 1; rz(nr) = i; end if
+    end do
+    nc = 0
+    do j = 1, nrb
+       if (cmask(j)) then; nc = nc + 1; cz(nc) = j; end if
+    end do
+    allocate(hs(nr, nc), qas(nr, size(qa,2)), qbs(nc, size(qb,2)), tmp(nr, size(qb,2)))
+    hs  = h(rz, cz)
+    qas = qa(rz, :)
+    qbs = qb(cz, :)
+    tmp = czero
+    call icgn_zgemm_gen('N', 'N', cone, hs, qbs, czero, tmp)      ! (nr x nc)(nc x nB)
+    call icgn_zgemm_gen('C', 'N', cone, qas, tmp, czero, out)     ! (nA x nr)(nr x nB)
+  end subroutine icgn_project_sparse
+
   ! C = alpha*op(A)*op(B) + beta*C with BLAS zgemm (op = 'N','T','C').
   subroutine icgn_zgemm_gen(opa, opb, alpha, A, B, beta, C)
     character(len=1), intent(in) :: opa, opb
@@ -2421,10 +2464,9 @@ contains
        if (associated(pairs(i)%g)) then
           g => pairs(i)%g                      ! full projection kept (acquaintance path)
        else
-          allocate(g(nra, nrb), tmp(nra, nrb)); own_g = .true.
-          call icgn_zgemm('N', pairs(i)%h, upt%icgn_blocks(ib)%S_full, tmp)
-          call icgn_zgemm('C', upt%icgn_blocks(ia)%S_full, tmp, g)
-          deallocate(tmp)
+          allocate(g(nra, nrb)); own_g = .true.
+          call icgn_project_sparse(pairs(i)%h, upt%icgn_blocks(ia)%S_full, &
+               upt%icgn_blocks(ib)%S_full, g)
        end if
 
        ! G(P_A, Q_B)
@@ -2748,6 +2790,8 @@ contains
           exit
        end if
     end do
+    if (icgn_timing_on()) write(*,'(a,i0,a,l1)') '[ICGN-TIME] power iteration sweeps: ', &
+         min(k, maxiter), ' converged=', converged_out
     sigma_out = sigma_est
     deallocate(v, u, w, v_next, res, qoff)
   end subroutine icgn_power_iteration_blk
