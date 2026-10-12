@@ -717,7 +717,44 @@ contains
     deallocate(work,rwork,iwork); ierr=info
   end subroutine dense_eigh
 
-  ! Block diagonalization always uses LAPACK (ZHEEVD via dense_eigh).
+  ! Partial Hermitian eigenproblem on energy window (VL, VU] via ZHEEVR (MRRR).
+  ! ABSTOL = 0 selects the relative-accuracy path (EPS*|T|), matching the
+  ! high-accuracy regime of ZHEEVD for the eigenvalues that are requested.
+  ! On failure the caller should fall back to dense_eigh.
+  ! On success: m eigenvalues in w(1:m), eigenvectors in z(:,1:m).
+  subroutine dense_eigh_window(a, vl, vu, w, z, m, ierr)
+    complex(dp), intent(inout) :: a(:,:)
+    real(dp), intent(in) :: vl, vu
+    real(dp), intent(out) :: w(:)
+    complex(dp), intent(out) :: z(:,:)
+    integer, intent(out) :: m, ierr
+    integer :: n, info, lwork, lrwork, liwork
+    complex(dp) :: workq(1)
+    real(dp) :: rworkq(1)
+    integer :: iworkq(1)
+    complex(dp), allocatable :: work(:)
+    real(dp), allocatable :: rwork(:)
+    integer, allocatable :: iwork(:), isuppz(:)
+    real(dp), parameter :: abstol = 0.0_dp
+    n = size(a, 1)
+    m = 0; ierr = 0; w = 0.0_dp; z = (0.0_dp, 0.0_dp)
+    if (n == 0) return
+    if (.not. (vu > vl)) then; ierr = 11; return; end if
+    allocate(isuppz(2 * max(1, n)))
+    call zheevr('V', 'V', 'U', n, a, n, vl, vu, 1, n, abstol, m, w, z, n, &
+         isuppz, workq, -1, rworkq, -1, iworkq, -1, info)
+    if (info /= 0) then; deallocate(isuppz); ierr = 10; return; end if
+    lwork  = max(1, int(real(workq(1), kind=dp)))
+    lrwork = max(1, int(rworkq(1)))
+    liwork = max(1, iworkq(1))
+    allocate(work(lwork), rwork(lrwork), iwork(liwork))
+    call zheevr('V', 'V', 'U', n, a, n, vl, vu, 1, n, abstol, m, w, z, n, &
+         isuppz, work, lwork, rwork, lrwork, iwork, liwork, info)
+    deallocate(work, rwork, iwork, isuppz)
+    ierr = info
+  end subroutine dense_eigh_window
+
+  ! Full spectrum (ZHEEVD). Used when outer / Neumann need discarded states.
   subroutine coarse_eigh(a, w, ierr)
     complex(dp), intent(inout) :: a(:,:)
     real(dp), intent(out) :: w(:)
@@ -2915,9 +2952,11 @@ contains
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: ib, local(:), blk_of(:)
     integer, intent(out) :: ierr
-    integer :: nn, k, r, c, jr
-    complex(dp), allocatable :: h(:,:)
+    integer :: nn, k, r, c, jr, m, j
+    complex(dp), allocatable :: h(:,:), z(:,:)
     real(dp), allocatable :: w(:)
+    real(dp) :: vl, vu, margin
+    logical :: fast_path
     ierr = 0; nn = upt%icgn_blocks(ib)%nrow
     if (nn == 0) then; upt%icgn_blocks(ib)%nret = 0; return; end if
     allocate(h(nn,nn), w(nn)); h = (0.0_dp, 0.0_dp)
@@ -2931,12 +2970,64 @@ contains
           if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
        end do
     end do
-   call coarse_eigh(h, w, ierr)
-    if (ierr /= 0) return
-    allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
-    upt%icgn_blocks(ib)%evals_full = w
-    upt%icgn_blocks(ib)%S_full     = h
-    deallocate(h, w)
+
+    ! Fast path (no outer, no Neumann): only core+buffer states are kept later,
+    ! so request that window from ZHEEVR. Outer / Neumann still need the full
+    ! spectrum (discarded states enter P-Q and Q-Q couplings).
+    fast_path = (upt%icgn_add_core_outers == 0 .and. upt%icgn_selfenergy_order < 0)
+    if (fast_path) then
+       vl = upt%icgn_core_emin - upt%icgn_bottom_buffer
+       vu = upt%icgn_core_emax + upt%icgn_top_buffer
+       ! ZHEEVR returns eigenvalues in the half-open interval (VL, VU]; expand
+       ! slightly so states exactly on the closed keep_mask bounds are included.
+       margin = max(1.0e-10_dp, 1.0e-12_dp * max(1.0_dp, abs(vl), abs(vu)))
+       vl = vl - margin
+       vu = vu + margin
+       allocate(z(nn, nn))
+       call dense_eigh_window(h, vl, vu, w, z, m, ierr)
+       if (ierr /= 0) then
+          ! Robust fallback: full ZHEEVD then same keep_mask filter as before.
+          h = (0.0_dp, 0.0_dp)
+          do jr = 1, nn
+             r = upt%icgn_blocks(ib)%rows(jr)
+             do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+                c = upt%ham%Mj(k)
+                if (blk_of(c) /= ib) cycle
+                if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+                h(local(r), local(c)) = upt%ham%M(k)
+                if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
+             end do
+          end do
+          call coarse_eigh(h, w, ierr)
+          if (ierr /= 0) then
+             deallocate(h, w, z); return
+          end if
+          allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
+          upt%icgn_blocks(ib)%evals_full = w
+          upt%icgn_blocks(ib)%S_full     = h
+          deallocate(h, w, z)
+          return
+       end if
+       ! Store only the m window states as columns 1:m; remaining evals sit
+       ! outside the keep window so the existing keep_mask logic is unchanged.
+       allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
+       upt%icgn_blocks(ib)%evals_full = vu + 1.0_dp
+       upt%icgn_blocks(ib)%S_full     = (0.0_dp, 0.0_dp)
+       do j = 1, m
+          upt%icgn_blocks(ib)%evals_full(j) = w(j)
+          upt%icgn_blocks(ib)%S_full(:, j)  = z(:, j)
+       end do
+       deallocate(h, w, z)
+    else
+       call coarse_eigh(h, w, ierr)
+       if (ierr /= 0) then
+          deallocate(h, w); return
+       end if
+       allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
+       upt%icgn_blocks(ib)%evals_full = w
+       upt%icgn_blocks(ib)%S_full     = h
+       deallocate(h, w)
+    end if
   end subroutine icgn_diagonalize_block
 
   ! pair_slot variant for icgn: allocates v(nrow_a, nrow_b) using icgn_blocks.
