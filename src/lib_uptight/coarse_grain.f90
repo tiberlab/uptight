@@ -754,10 +754,11 @@ contains
     type(OUPT), intent(inout) :: upt
     integer, intent(out) :: ierr
 
-    integer :: n, na, nb_atoms, i, j, k, p, status, nedge, maxedge
+    integer :: n, na, i, j, k, p, status, nedge, maxedge
     integer :: r, c, br, bc, npair, total_ret, pos
     integer, allocatable :: atom_of(:), local_of(:), label(:), row_of(:)
     integer, allocatable :: counts(:), cursor(:), offsets(:), bsize(:)
+    integer, allocatable :: blk_of(:), ierr_blk(:)
     integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
     real(dp), allocatable :: edge_weight(:)
     real(dp) :: max_weight, all_weight, cut_weight
@@ -765,55 +766,18 @@ contains
 
     logical, allocatable :: is_core(:,:), keep_mask(:,:)
 
-    integer :: ia, ib, slot, nred, nnz
-    integer, allocatable :: roff(:), rowcount(:), next(:), win_a(:), win_b(:), pair_map(:,:)
-    ! g_full points either to pairs(i)%g (kept projection) or to a locally computed array
-    complex(dp), pointer :: g_full(:,:)
-
-    ! For Neumann self-energy
-    integer :: nb, ord, ip, iq, gp_row, gp_col, q_idx, qb_idx
-    integer, allocatable :: block_of_state(:), local_of_state(:), ret_offset(:)
-    real(dp), allocatable :: evals_q(:)
+    integer :: ia, ib, nred, nb, npq, nqq
+    integer :: nth, saved_levels
+    integer, allocatable :: roff_blk(:), local_ret_idx(:,:)
     type(ICGNSigRow), allocatable :: sig(:)
-    real(dp) :: max_sigma
-    complex(dp), allocatable :: amp_vec(:), next_vec(:)
-    real(dp) :: E0_used, resolvent_val
-    complex(dp) :: amp_val, contrib
-    ! pq_list: list of (global_p_in_red, global_q_flat, coupling_value)
-    integer, allocatable :: pq_p(:), pq_q(:)
-    complex(dp), allocatable :: pq_v(:)
-    ! qq_list: Q-Q coupling edges in block eigenbasis
-    integer, allocatable :: qq_i(:), qq_j(:)
-    complex(dp), allocatable :: qq_v(:)
-    integer :: npq, nqq, cnt_pq, cnt_qq
-    integer :: nstates_total
-    ! block→reduced-row offset
-    integer, allocatable :: roff_blk(:)
-    ! local state index → retained index (0 if discarded)
-    integer, allocatable :: local_ret_idx(:,:)
-    ! OpenMP work arrays (block diagonalization / pair projection)
-    integer :: nth, saved_levels, mypq, myqq
-    integer, allocatable :: blk_of(:), ierr_blk(:)
-    integer, allocatable :: pq_off(:), pq_cnt(:), qq_off(:), qq_cnt(:)
+    real(dp) :: max_sigma, E0_used, t_all, t_stage, t_mark
     logical :: need_qq
-    real(dp) :: t_all, t_stage, amax, t_mark
-    complex(dp), allocatable :: tmp_g(:,:)
-    ! Sparse Sigma work arrays
-    real(dp), allocatable :: res_q(:)
-    integer, allocatable :: rp_ptr(:), rp_ord(:), cq_ptr(:), cq_ord(:), qs_ptr(:), qs_ord(:)
-    integer, allocatable :: supp(:), supp2(:)
-    logical, allocatable :: mark(:), mark2(:)
-    integer :: nsupp, nsupp2, tt, ee
-    logical :: dummy_qq
     ! Block-sparse Neumann correction (P-Q / Q-Q blocks + Sigma via ICGNSigRow)
     type(ICGNQBlock), allocatable :: bq(:)
     type(ICGNQPair), allocatable :: qp(:)
     integer, allocatable :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
     logical, allocatable :: nbr_isA(:)
     integer(8) :: npq_nz, nqq_nz
-    ! Shared edge graphs for the convergence check and Sigma (built once)
-    integer, allocatable :: p_ptr(:), p_col(:), c_ptr(:), c_row(:), s_ptr(:), s_col(:)
-    complex(dp), allocatable :: p_val(:), c_val(:), s_val(:), s_wres(:)
 
     ierr = 0
     ! write(*,"(A)") "[ICGN-TRACE] prepare ENTER"
@@ -1023,7 +987,15 @@ contains
        allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2)))
        t_stage = icgn_wall()
        call icgn_collect_pairs(upt, atom_of, label, row_of, pairs, npair, ierr)
-       if (ierr /= 0) return
+       if (ierr /= 0) then
+          call destroy_pairs(pairs)
+          do i = 1, upt%icgn_num_blocks
+             if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
+             if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
+             nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
+          end do
+          return
+       end if
        call icgn_report_time('collect pair couplings H_ab', t_stage)
        if (icgn_timing_on()) call icgn_report_boundary(pairs, npair)
     else
@@ -1098,7 +1070,14 @@ contains
        total_ret = total_ret + upt%icgn_blocks(i)%nret
     end do
     if (total_ret == 0) then
-       ierr = 9; write(*,*) '(icgn) no states retained'; return
+       ierr = 9; write(*,*) '(icgn) no states retained'
+       call destroy_pairs(pairs)
+       do i = 1, nb
+          if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
+          if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
+          nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
+       end do
+       return
     end if
     upt%icgn_original_dim = n
     upt%icgn_reduced_dim  = total_ret
@@ -1135,64 +1114,38 @@ contains
     t_stage = icgn_wall()
     call build_icgn_reduced_hamiltonian(upt, atom_of, label, row_of, pairs, npair, &
          upt%icgn_add_core_outers > 0, ierr)
-    if (ierr /= 0) return
+    if (ierr /= 0) then
+       call destroy_pairs(pairs)
+       do i = 1, nb
+          if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
+          if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
+          nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
+       end do
+       return
+    end if
     call icgn_report_time('build reduced H (pair projection)', t_stage)
 
     ! ====================================================================
     ! Self-energy correction via Neumann series (skipped when neumann_order < 0)
     ! ====================================================================
     if (upt%icgn_selfenergy_order >= 0) then
-    ! pairs(s)%v is now (nret_a x nret_b): H_PP sliced couplings.
-    ! We need H_PQ: from the *unsliced* g_full before retained_idx slicing.
-    ! Strategy: re-project directly from S_full to extract P-Q and Q-Q.
+       ! H_PP already in upt%icgn_ham (full sorted CSR). Build Sigma in block-sparse
+       ! form and merge; no dense nred×nred intermediate.
+       t_mark = icgn_wall()
+       nred = total_ret
 
-    t_mark = icgn_wall()
-    nred = total_ret
-    ! H_PP already lives in upt%icgn_ham as a full sorted CSR; no dense copy.
+       allocate(roff_blk(nb+1)); roff_blk(1) = 1
+       do i = 1, nb; roff_blk(i+1) = roff_blk(i) + upt%icgn_blocks(i)%nret; end do
 
-    ! Build roff: global reduced-row offset per block
-    allocate(roff_blk(nb+1)); roff_blk(1) = 1
-    do i = 1, nb; roff_blk(i+1) = roff_blk(i) + upt%icgn_blocks(i)%nret; end do
-
-    ! Build local_ret_idx(block, local_state) → retained index in block (0=discarded)
-    allocate(local_ret_idx(nb, maxval([(upt%icgn_blocks(i)%nrow, i=1,nb)])))
-    local_ret_idx = 0
-    do i = 1, nb
-       do j = 1, upt%icgn_blocks(i)%nret
-          local_ret_idx(i, upt%icgn_blocks(i)%retained_idx(j)) = j
+       allocate(local_ret_idx(nb, maxval([(upt%icgn_blocks(i)%nrow, i=1,nb)])))
+       local_ret_idx = 0
+       do i = 1, nb
+          do j = 1, upt%icgn_blocks(i)%nret
+             local_ret_idx(i, upt%icgn_blocks(i)%retained_idx(j)) = j
+          end do
        end do
-    end do
+       call icgn_report_time('Neumann setup (index tables)', t_mark)
 
-    ! Count total block states for flat Q-space indexing
-    nstates_total = sum([(upt%icgn_blocks(i)%nrow, i=1,nb)])
-    allocate(block_of_state(nstates_total), local_of_state(nstates_total), &
-         evals_q(nstates_total), ret_offset(nb))
-    pos = 0
-    do i = 1, nb
-       ret_offset(i) = pos
-       do j = 1, upt%icgn_blocks(i)%nrow
-          pos = pos + 1
-          block_of_state(pos) = i
-          local_of_state(pos) = j
-          evals_q(pos) = upt%icgn_blocks(i)%evals_full(j)
-       end do
-    end do
-
-    ! Exact P-Q count per pair: nret_a * (nrow_b - nret_b) + nret_b * (nrow_a - nret_a)
-    cnt_pq = 0
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       cnt_pq = cnt_pq + upt%icgn_blocks(ia)%nret * &
-            (upt%icgn_blocks(ib)%nrow - upt%icgn_blocks(ib)%nret)
-       cnt_pq = cnt_pq + upt%icgn_blocks(ib)%nret * &
-            (upt%icgn_blocks(ia)%nrow - upt%icgn_blocks(ia)%nret)
-    end do
-    ! pairs%v now holds the *sliced* P-P block. We need the g_full from
-    ! the projection step. Since we already freed g_full inside
-    ! build_icgn_reduced_hamiltonian, we need to re-project.
-    ! Re-project inter-block couplings to get the full g matrices.
-    call icgn_report_time('Neumann setup (index tables)', t_mark)
-       ! ---- Block-sparse Neumann correction (P-Q/Q-Q blocks + Sigma via ICGNSigRow) ----
        E0_used = upt%icgn_E0
        ! Only fall back when E0 lies outside the open core window.
        ! E0 = 0 is a valid choice whenever 0 is inside (core_min, core_max).
@@ -1208,15 +1161,13 @@ contains
        npq = int(npq_nz); nqq = int(nqq_nz)
        call icgn_report_time('Neumann: block P-Q/Q-Q blocks', t_stage)
        t_mark = icgn_wall()
-       ! Free S_full now that the couplings are projected
+
        do i = 1, nb
           if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
           if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
           nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
        end do
        call destroy_pairs(pairs)
-       ! dummies so the common clean-up below stays valid
-       allocate(pq_p(1), pq_q(1), pq_v(1)); pq_p = 1; pq_q = 1; pq_v = (0.0_dp, 0.0_dp)
 
        upt%icgn_sigma_T2     = -1.0_dp
        upt%icgn_pi_converged = .true.
@@ -1237,31 +1188,25 @@ contains
        call icgn_report_time('Sigma (block-sparse zgemm)', t_stage)
        call icgn_free_neumann_blocks(bq, qp, npair)
        deallocate(nbr_ptr, nbr_blk, nbr_pair, nbr_rev, nbr_isA)
-    max_sigma = 0.0_dp
-    do i = 1, nb
-       do j = 1, sig(i)%n
-          if (associated(sig(i)%mat(j)%m)) &
-               max_sigma = max(max_sigma, maxval(abs(sig(i)%mat(j)%m)))
+
+       max_sigma = 0.0_dp
+       do i = 1, nb
+          do j = 1, sig(i)%n
+             if (associated(sig(i)%mat(j)%m)) &
+                  max_sigma = max(max_sigma, maxval(abs(sig(i)%mat(j)%m)))
+          end do
        end do
-    end do
-    if (icgn_timing_on()) then
-       write(*,'(a,i0,a,i0,a,i0,a,i0,a,es10.3)') '[ICGN-TIME] stats: nred=', nred, ' nstates_total=', &
-            nstates_total, ' npq=', npq, ' nqq=', nqq, ' max|Sigma|=', max_sigma
-    end if
-    t_mark = icgn_wall()
-    deallocate(pq_p, pq_q, pq_v)
-    if (upt%icgn_selfenergy_order >= 1 .or. upt%icgn_check_convergence) then
-       if (allocated(qq_i)) deallocate(qq_i, qq_j, qq_v)
-    end if
-    deallocate(block_of_state, local_of_state, evals_q, ret_offset)
-    deallocate(local_ret_idx)
+       if (icgn_timing_on()) then
+          write(*,'(a,i0,a,i0,a,i0,a,es10.3)') '[ICGN-TIME] stats: nred=', nred, &
+               ' npq=', npq, ' nqq=', nqq, ' max|Sigma|=', max_sigma
+       end if
+       t_mark = icgn_wall()
+       deallocate(local_ret_idx)
 
-    ! Merge block-sparse Sigma into the existing H_PP CSR (no dense nred×nred).
-    call icgn_csr_add_sigma(upt%icgn_ham, roff_blk, sig, nred)
-    call icgn_free_sigrows(sig)
-    deallocate(roff_blk)
-    call icgn_report_time('merge Sigma into CSR (block-sparse)', t_mark)
-
+       call icgn_csr_add_sigma(upt%icgn_ham, roff_blk, sig, nred)
+       call icgn_free_sigrows(sig)
+       deallocate(roff_blk)
+       call icgn_report_time('merge Sigma into CSR (block-sparse)', t_mark)
     end if  ! icgn_selfenergy_order >= 0 (Neumann correction)
 
     call icgn_report_time('TOTAL from block diagonalization to end of Neumann/Sigma', t_all)
@@ -1670,17 +1615,23 @@ contains
     complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
     real(dp), parameter :: thr = 1.0e-14_dp
     integer :: nb, b, i, j, k, ia, ib, jq, kq, ra, rb, e, np_a, np_b, nq_a, nq_b
-    integer :: nth, saved_levels, nra, nrb
+    integer :: nth, saved_levels, nra, nrb, n_near
     integer, allocatable :: cnt(:), fillp(:), eA(:), eB(:)
     complex(dp) :: v
     complex(dp), pointer :: g(:,:)
     complex(dp), allocatable :: tmp(:,:)
     logical :: own_g
     integer(8) :: nzp, nzq
+    real(dp) :: gap, gap_min
+    character(len=160) :: msg
 
     nb = upt%icgn_num_blocks
     ! ---- per-block Q data ----
+    ! Discarded eigenvalues lie outside the core window, so E0 (inside the open
+    ! core) cannot match them exactly; still warn if |E0-E| is tiny (numerical).
     allocate(bq(nb))
+    n_near = 0
+    gap_min = huge(1.0_dp)
     do b = 1, nb
        bq(b)%np = upt%icgn_blocks(b)%nret
        bq(b)%nq = upt%icgn_blocks(b)%nrow - upt%icgn_blocks(b)%nret
@@ -1690,10 +1641,21 @@ contains
           if (local_ret_idx(b, k) == 0) then
              kq = kq + 1
              bq(b)%qidx(kq) = k
-             bq(b)%res(kq) = 1.0_dp / (E0 - upt%icgn_blocks(b)%evals_full(k))
+             gap = E0 - upt%icgn_blocks(b)%evals_full(k)
+             if (abs(gap) < 1.0e-12_dp) then
+                n_near = n_near + 1
+                gap_min = min(gap_min, abs(gap))
+             end if
+             bq(b)%res(kq) = 1.0_dp / gap
           end if
        end do
     end do
+    if (n_near > 0) then
+       write(msg,'(a,i0,a,es12.5)') &
+            'Neumann resolvent: |E0-Eq| < 1e-12 for ', n_near, &
+            ' discarded state(s); min|gap|=', gap_min
+       call icgn_log_important(upt, trim(msg))
+    end if
 
     ! ---- adjacency of the block graph (entries of block a: its neighbours) ----
     allocate(nbr_ptr(nb+1), cnt(nb))
@@ -1985,9 +1947,10 @@ contains
     type(CSR), intent(inout) :: ham
     integer, intent(in) :: roff_blk(:), nred
     type(ICGNSigRow), intent(in) :: sig(:)
-    integer :: a, t, a2, i, j, r, c, k, ne, nnew, pos
+    integer :: a, t, a2, i, j, r, c, k, nnew, pos
+    integer(8) :: ne
     integer, allocatable :: ii(:), jj(:), ord(:)
-    complex(dp), allocatable :: vv(:), tmp(:)
+    complex(dp), allocatable :: vv(:)
     integer, allocatable :: rowcount(:), next(:)
     real(dp), parameter :: thr = 1.0e-14_dp
     complex(dp) :: val
@@ -2018,7 +1981,11 @@ contains
           end do
        end do
     end do
-    allocate(ii(ne), jj(ne), vv(ne))
+    if (ne > int(huge(0), kind=8)) then
+       write(*,*) '(icgn) csr_add_sigma: entry count overflows default integer'
+       return
+    end if
+    allocate(ii(max(1, int(ne))), jj(max(1, int(ne))), vv(max(1, int(ne))))
     nnew = 0
     ! Existing H_PP
     do r = 1, ham%nrow
