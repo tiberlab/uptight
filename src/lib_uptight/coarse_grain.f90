@@ -3,61 +3,44 @@
 ! ======================================================================
 ! OVERVIEW (read this first)
 ! ======================================================================
-! This module is a "mid-layer" between the assembly of the orbital
-! Hamiltonian H (sparse_ham, stored in upt%ham as CSR) and the eigensolvers
-! (Lanczos, Jacobi-Davidson, LAPACK, external SLEPc). It replaces H by a much
-! smaller reduced Hamiltonian H_red = Q^H H Q so that the eigensolver has less
-! work to do, then maps the eigenvectors back to the orbital basis.
+! Mid-layer between orbital Hamiltonian assembly (upt%ham, CSR) and the
+! eigensolvers (Lanczos, JD, LAPACK, SLEPc). Builds a smaller reduced
+! operator H_red = Q^H H Q, solves on it, then lifts eigenvectors back.
 !
-! ICGN is the single coarse-graining implementation; neumann_order < 0 gives the plain ICG/ICGN special case:
+! Single implementation: ICGN (controlled by upt%icgn_* parameters).
 !
-!   ICGN   (mode 1) original Liu method. The atoms are partitioned into blocks
-!                 (METIS, or a built-in graph-BFS fallback). Each block
-!                 Hamiltonian is diagonalized; the eigenstates whose energy
-!                 lies in [icgn_emin, icgn_emax] are retained (columns of Q_I).
-!                 Inter-block couplings are projected, T = H_IJ Q_J and
-!                 H_red(I,J) = Q_I^H T, and small entries are dropped with
-!                 the threshold epsilon.
-!   ICG  (mode 2) "improved" ICGN — this mode is now folded into ICGN.
-!                 Set neumann_order < 0 to skip the Neumann correction and
-!                 recover the plain ICG behaviour.
-!   ICGN (mode 2) improved ICGN with optional Neumann-series self-energy
-!                 correction:
-!                 Sigma = H_PQ (E0 - D)^-1 [W (E0 - D)^-1]^order H_QP
-!                 (P = retained states, Q = discarded states) added to the
-!                 reduced Hamiltonian.
-!                 neumann_order < 0 disables the correction (plain ICG);
-!                 neumann_order = 0, 1, 2, ... applies the series to that order.
+!   selfenergy_order < 0  — plain projection (Liu CG / ICG without Sigma):
+!       partition atoms into blocks (METIS, or graph-BFS fallback),
+!       diagonalize each block, keep states in the core+buffer window
+!       [core_emin - bottom_buffer, core_emax + top_buffer], project
+!       inter-block couplings, drop small entries with epsilon.
 !
-! Life cycle of one calculation (driven by uptight.F90):
-!   1. UPT_hamiltonian builds H, then calls icgn_prepare,
-!      which fill upt%icgn_ham / icgn_ham (CSR) and the per-block data
-!      (upt%icgn_blocks / icgn_blocks, type ICGNBlock: rows, eigenvalues,
-!      Q = retained eigenvectors).
-!   2. icgn_set_original remembers the orbital operator, icgn_swap_in makes
-!      upt%ham point at the reduced operator. From now on every solver sees
-!      only the reduced matrix and does not know about coarse-graining.
-!   3. After the solve, icgn_finalize_eigenvectors lifts the eigenvectors back
-!      (physical = Q * reduced, see icgn_lift) and
-!      icgn_swap_out restores the original operator.
+!   selfenergy_order >= 0 — same projection plus Neumann self-energy:
+!       Sigma = H_PQ (E0 - D)^-1 [W (E0 - D)^-1]^order H_QP
+!       (P = retained, Q = discarded), merged into H_red.
+!       order = 0, 1, 2, ... is the series truncation.
 !
-! Parallelism (OpenMP, icgn_prepare only): block diagonalization and the
-! inter-block pair projections run in parallel over blocks / pairs.  Thread
-! budget = omp_get_max_threads() (capped by env UPT_CG_THREADS if set); nesting
-! is flattened inside the regions so threaded BLAS/LAPACK never oversubscribes.
+! Optional core-state outers (add_core_outers > 0): also keep discarded
+! states that couple strongly to core states (level-1 only).
 !
-! Sparse storage convention used everywhere: CSR with Mi = row pointer
-! (size nrow+1), Mj = column index, M = values; sparse_fmt is 'F' (full),
-! 'U' (upper triangle) or 'L' (lower triangle).
+! Life cycle (uptight.F90):
+!   1. After H is built: icgn_set_original, then icgn_prepare fills
+!      upt%icgn_ham / icgn_U and upt%icgn_blocks (rows, eval, q, ...).
+!   2. icgn_swap_in points upt%ham at the reduced operator; solvers see
+!      only that matrix (no CG awareness required).
+!   3. After solve: icgn_finalize_eigenvectors lifts (physical = Q * reduced)
+!      and restores the original operator via icgn_swap_out.
 !
-! Output convention of the REDUCED operator (upt%icgn_ham), identical for every
-! path (outers / Neumann on or off): sparse_fmt = 'F' (both triangles stored),
-! the diagonal entry of every row is always present, and the column indices are
-! strictly ascending inside every row.  The input operator may be 'F', 'U' or
-! 'L' (see stored_entry).  Orbital layout assumed for the input operator (checked
-! against TB_ham.f90): the orbitals of one atom are contiguous, n_spin*n_st(atom)
-! rows per atom, atoms in basis order; the spin position inside an atom is
-! irrelevant here because blocks are built from whole atoms.
+! Parallelism (OpenMP, prepare only): block diagonalization and pair
+! projections over blocks/pairs. Thread budget = omp_get_max_threads()
+! (capped by UPT_CG_THREADS); nesting flattened so BLAS/LAPACK never
+! oversubscribes.
+!
+! CSR convention: Mi row pointers, Mj columns, M values; sparse_fmt
+! 'F'/'U'/'L'. Reduced operator always 'F', diagonal present, columns
+! strictly ascending per row. Input may be F/U/L (see stored_entry).
+! Orbitals of one atom are contiguous (n_spin * n_st(atom)); blocks are
+! whole atoms.
 ! ======================================================================
 module coarse_grain
    use, intrinsic :: iso_c_binding, only : c_int, c_double, c_char
@@ -178,7 +161,7 @@ contains
          ! associated(icgn_original_u%Mi)
   end subroutine icgn_set_original
 
-  ! Common coupling filter shared by ICG/ICGN. A coupling V between two
+  ! Common coupling filter. A coupling V between two
   ! block eigenstates with energies ea, eb:
   !   - never filtered when BOTH energies lie in the core+buffer window
   !     [win_emin, win_emax] (only exact zeros are dropped);
@@ -568,7 +551,7 @@ contains
   !   next(:)    : running insertion position of every reduced row (updated)
   !   keep_zeros : if .true. exact zeros are written too. Default: zeros are
   !                skipped. The caller must size the CSR with the same rule
-  !                (ICGN and ICGN both count only the non-zero entries).
+  !                (caller counts only non-zero entries).
   ! The number of slots written must match what the caller counted, otherwise
   ! the tail of M/Mj of a row is left uninitialized.
   subroutine emit_pair(h,p,oa,ob,fmt,next,keep_zeros)
@@ -580,7 +563,7 @@ contains
     logical,intent(in),optional::keep_zeros
     integer::i,j,k
     logical::skip_zero
-    ! Both ICGN and ICGN count only non-zero entries when sizing the CSR, so
+    ! CSR sizing counts only non-zero entries, so
     ! zeros are skipped by default; with keep_zeros the caller must have
     ! sized the CSR from the dense blocks, otherwise the unfilled slots of
     ! M/Mj stay uninitialized.
@@ -646,16 +629,14 @@ contains
   end subroutine destroy_pairs
 
 
-  ! ===========================================================================
   ! ==========================================================================
-  ! ICGN: improved ICGN with optional Neumann self-energy correction (mode 2)
+  ! ICGN prepare / configure
   !
-  ! Strategy: icgn_prepare partitions atoms → diagonalizes blocks (full S) →
-  ! selects retained states with a core+buffer criterion → projects inter-block
-  ! couplings → builds icgn_ham CSR. When neumann_order >= 0, the Neumann
-  ! self-energy  Sigma = H_PQ * (E0-D)^-1 * [W*(E0-D)^-1]^order * H_QP
-  ! is extracted from 'pairs' and added into the dense form of icgn_ham before
-  ! converting back to CSR. When neumann_order < 0 the correction is skipped.
+  ! icgn_prepare: partition atoms → diagonalize blocks → select retained
+  ! states (core + buffer + optional level-1 outers) → project couplings →
+  ! build icgn_ham CSR. When selfenergy_order >= 0, add Neumann Sigma in
+  ! block-sparse form and merge into the CSR. When selfenergy_order < 0 the
+  ! correction is skipped (plain projection).
   ! ==========================================================================
 
   subroutine icgn_configure(upt, enabled, nblocks, core_emin, core_emax, &
@@ -742,10 +723,9 @@ contains
 
 
   ! ---------------------------------------------------------------------------
-  ! icgn_prepare: same P-space selection as icgn_prepare, but after building the
-  ! reduced Hamiltonian we add a Neumann-series self-energy correction for the
-  ! discarded Q states. 'pairs' holds the full (nrow_a x nrow_b) coupling
-  ! matrices in the block eigenbasis; we reuse them to extract H_PQ and H_QQ.
+  ! icgn_prepare: build the reduced operator and optional Neumann correction.
+  ! pairs hold inter-block couplings (physical h and/or projected v/g) reused
+  ! for H_PP assembly and, when selfenergy_order >= 0, for H_PQ / H_QQ.
   ! ---------------------------------------------------------------------------
   subroutine icgn_prepare(upt, ierr)
     character(len=*), parameter :: core_acq_warning = &
@@ -983,8 +963,7 @@ contains
     ! defers pair construction until q is available and uses the ICGN-style
     ! sparse projection path instead of materializing dense physical H_ab.
     if (upt%icgn_add_core_outers > 0 .or. upt%icgn_selfenergy_order >= 0) then
-       ! Max unique pairs is nb*(nb-1)/2 (pair_map enforces uniqueness).
-       allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2)))
+       ! collect_pairs allocates pairs to the exact number of edged pairs.
        t_stage = icgn_wall()
        call icgn_collect_pairs(upt, atom_of, label, row_of, pairs, npair, ierr)
        if (ierr /= 0) then
@@ -999,7 +978,8 @@ contains
        call icgn_report_time('collect pair couplings H_ab', t_stage)
        if (icgn_timing_on()) call icgn_report_boundary(pairs, npair)
     else
-       allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2))); npair = 0
+       ! Plain path: pairs filled later by sparse fast-path in build.
+       allocate(pairs(0)); npair = 0
     end if
     if (upt%icgn_add_core_outers > 0) then
        ! Pair projections are independent (each touches only pairs(i)).  The full
@@ -1376,20 +1356,129 @@ contains
          czero, C, max(1,size(C,1)))
   end subroutine icgn_zgemm
 
-  ! Collect the dense physical block couplings H_ab (nrow_a x nrow_b) of every
-  ! pair of blocks.  Same pair order and same accumulation order as the old
-  ! serial scan (so the result is identical), but the dense allocation/zeroing
-  ! and scatter run in parallel over pairs: a serial pass only discovers the
-  ! pairs and buckets the CSR entries per pair.
+  ! Heapsort pairs (pa(i), pb(i)) by (a,b) ascending.  Used to unique inter-block
+  ! pairs without a dense nb x nb map.
+  pure subroutine icgn_sort_pairs(pa, pb, n)
+    integer, intent(inout) :: pa(:), pb(:)
+    integer, intent(in) :: n
+    integer :: start, root, child, end_, ta, tb
+    if (n <= 1) return
+    start = n / 2
+    do while (start >= 1)
+       root = start
+       do
+          child = 2 * root
+          if (child > n) exit
+          if (child < n) then
+             if (pa(child) < pa(child+1) .or. &
+                  (pa(child) == pa(child+1) .and. pb(child) < pb(child+1))) child = child + 1
+          end if
+          if (pa(root) < pa(child) .or. &
+               (pa(root) == pa(child) .and. pb(root) < pb(child))) then
+             ta = pa(root); tb = pb(root)
+             pa(root) = pa(child); pb(root) = pb(child)
+             pa(child) = ta; pb(child) = tb
+             root = child
+          else
+             exit
+          end if
+       end do
+       start = start - 1
+    end do
+    end_ = n
+    do while (end_ > 1)
+       ta = pa(end_); tb = pb(end_)
+       pa(end_) = pa(1); pb(end_) = pb(1)
+       pa(1) = ta; pb(1) = tb
+       end_ = end_ - 1
+       root = 1
+       do
+          child = 2 * root
+          if (child > end_) exit
+          if (child < end_) then
+             if (pa(child) < pa(child+1) .or. &
+                  (pa(child) == pa(child+1) .and. pb(child) < pb(child+1))) child = child + 1
+          end if
+          if (pa(root) < pa(child) .or. &
+               (pa(root) == pa(child) .and. pb(root) < pb(child))) then
+             ta = pa(root); tb = pb(root)
+             pa(root) = pa(child); pb(root) = pb(child)
+             pa(child) = ta; pb(child) = tb
+             root = child
+          else
+             exit
+          end if
+       end do
+    end do
+  end subroutine icgn_sort_pairs
+
+  ! Compact sorted (pa,pb) in place; nu = number of unique pairs.
+  pure subroutine icgn_unique_pairs(pa, pb, n, nu)
+    integer, intent(inout) :: pa(:), pb(:)
+    integer, intent(in) :: n
+    integer, intent(out) :: nu
+    integer :: i
+    if (n <= 0) then; nu = 0; return; end if
+    nu = 1
+    do i = 2, n
+       if (pa(i) /= pa(nu) .or. pb(i) /= pb(nu)) then
+          nu = nu + 1
+          pa(nu) = pa(i); pb(nu) = pb(i)
+       end if
+    end do
+  end subroutine icgn_unique_pairs
+
+  ! Binary search for (ia,ib) in sorted unique pair lists.  Returns slot or 0.
+  pure integer function icgn_find_pair(pa, pb, n, ia, ib) result(slot)
+    integer, intent(in) :: pa(:), pb(:), n, ia, ib
+    integer :: lo, hi, mid
+    lo = 1; hi = n; slot = 0
+    do while (lo <= hi)
+       mid = (lo + hi) / 2
+       if (pa(mid) < ia .or. (pa(mid) == ia .and. pb(mid) < ib)) then
+          lo = mid + 1
+       else if (pa(mid) > ia .or. (pa(mid) == ia .and. pb(mid) > ib)) then
+          hi = mid - 1
+       else
+          slot = mid; return
+       end if
+    end do
+  end function icgn_find_pair
+
+  ! Collect dense physical block couplings H_ab for every block pair that has
+  ! at least one inter-block edge.  Allocates pairs to the exact pair count
+  ! (no nb x nb map, no nb*(nb-1)/2).  Candidates collected from CSR, then
+  ! sort+unique; dense h filled in parallel over pairs.
   subroutine icgn_collect_pairs(upt, atom_of, label, local, pairs, npair, ierr)
     type(OUPT), intent(in) :: upt
     integer, intent(in) :: atom_of(:), label(:), local(:)
-    type(ICGNPair), intent(inout) :: pairs(:)
+    type(ICGNPair), allocatable, intent(inout) :: pairs(:)
     integer, intent(out) :: npair, ierr
-    integer :: r, k, c, ia, ib, slot, ne, e, m, i, nth, saved_levels
-    integer, allocatable :: pair_map(:,:), e_slot(:), e_row(:), e_k(:), e_ord(:), p_start(:), p_fill(:)
+    integer :: r, k, c, ia, ib, slot, ne, e, m, i, nth, saved_levels, nc
+    integer, allocatable :: cand_a(:), cand_b(:), e_slot(:), e_row(:), e_k(:), e_ord(:), p_start(:), p_fill(:)
     ierr = 0; npair = 0
-    allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
+    allocate(cand_a(max(1,upt%ham%nnz)), cand_b(max(1,upt%ham%nnz)))
+    nc = 0
+    ! Pass 1: collect every inter-block edge key (duplicates allowed).
+    do r = 1, upt%ham%nrow
+       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+          c = upt%ham%Mj(k)
+          ia = label(atom_of(r)); ib = label(atom_of(c))
+          if (ia == ib) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
+          nc = nc + 1
+          cand_a(nc) = min(ia, ib); cand_b(nc) = max(ia, ib)
+       end do
+    end do
+    call icgn_sort_pairs(cand_a, cand_b, nc)
+    call icgn_unique_pairs(cand_a, cand_b, nc, npair)
+    if (allocated(pairs)) call destroy_pairs(pairs)
+    allocate(pairs(max(1, npair)))
+    do i = 1, npair
+       pairs(i)%a = cand_a(i); pairs(i)%b = cand_b(i)
+    end do
+    ! Pass 2: bucket CSR entries per pair (binary search for slot).
     allocate(e_slot(max(1,upt%ham%nnz)), e_row(max(1,upt%ham%nnz)), e_k(max(1,upt%ham%nnz)))
     ne = 0
     do r = 1, upt%ham%nrow
@@ -1399,19 +1488,14 @@ contains
           if (ia == ib) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
           if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
-          slot = pair_map(min(ia,ib), max(ia,ib))
-          if (slot == 0) then
-             npair = npair + 1
-             if (npair > size(pairs)) then; ierr = 11; return; end if
-             pairs(npair)%a = min(ia,ib); pairs(npair)%b = max(ia,ib)
-             pair_map(min(ia,ib), max(ia,ib)) = npair; slot = npair
-          end if
+          slot = icgn_find_pair(cand_a, cand_b, npair, min(ia,ib), max(ia,ib))
+          if (slot == 0) cycle
           ne = ne + 1
           if (ia < ib) then; e_slot(ne) = slot; else; e_slot(ne) = -slot; end if
           e_row(ne) = r; e_k(ne) = k
        end do
     end do
-    deallocate(pair_map)
+    deallocate(cand_a, cand_b)
     allocate(p_start(npair+1), p_fill(max(1,npair)), e_ord(max(1,ne)))
     p_start = 0
     do e = 1, ne
@@ -1642,7 +1726,7 @@ contains
              kq = kq + 1
              bq(b)%qidx(kq) = k
              gap = E0 - upt%icgn_blocks(b)%evals_full(k)
-             if (abs(gap) < 1.0e-12_dp) then
+             if (abs(gap) < 1.0e-8_dp) then
                 n_near = n_near + 1
                 gap_min = min(gap_min, abs(gap))
              end if
@@ -1652,7 +1736,7 @@ contains
     end do
     if (n_near > 0) then
        write(msg,'(a,i0,a,es12.5)') &
-            'Neumann resolvent: |E0-Eq| < 1e-12 for ', n_near, &
+            'Neumann resolvent: |E0-Eq| < 1e-8 for ', n_near, &
             ' discarded state(s); min|gap|=', gap_min
        call icgn_log_important(upt, trim(msg))
     end if
@@ -2414,7 +2498,7 @@ contains
     deallocate(p%t)
   end subroutine project_accumulated_pair_icgn
 
-  ! Build reduced Hamiltonian for ICGN.
+  ! Build reduced Hamiltonian H_PP (CSR) from retained states and pair couplings.
   subroutine build_icgn_reduced_hamiltonian(upt, atom_of, label, local, pairs, npair, reuse_full, ierr)
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: atom_of(:), label(:)
@@ -2429,22 +2513,37 @@ contains
     integer :: ne, m, e
     integer, allocatable :: e_slot(:), e_row(:), e_k(:), e_ord(:), p_start(:), p_fill(:)
     real(dp) :: t_stage
-    integer, allocatable :: roff(:), rowcount(:), next(:), pair_map(:,:)
+    integer, allocatable :: roff(:), rowcount(:), next(:), cand_a(:), cand_b(:)
     complex(dp), allocatable :: g_full(:,:)
+    integer :: nc
     ierr = 0; nred = upt%icgn_reduced_dim
     allocate(roff(upt%icgn_num_blocks+1)); roff(1) = 1
     do i = 1, upt%icgn_num_blocks; roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret; end do
 
     if (upt%icgn_add_core_outers == 0 .and. upt%icgn_selfenergy_order < 0) then
-       ! Fast path: accumulate T = H_AB * Q_B directly from the global CSR,
-       ! exactly like ICGN.  No dense physical H_AB is needed because Neumann
-       ! corrections are disabled and the pairs are used only to build H_PP.
+       ! Fast path: accumulate T = H_AB * Q_B from global CSR (no dense H_AB).
+       ! Discover unique pairs via sort+unique (no nb x nb map).
        npair = 0
-       allocate(pair_map(upt%icgn_num_blocks, upt%icgn_num_blocks)); pair_map = 0
+       allocate(cand_a(max(1,upt%ham%nnz)), cand_b(max(1,upt%ham%nnz)))
        t_stage = icgn_wall()
-       ! Phase A (serial, integer work only): discover the pairs (same order as
-       ! the old scan) and record every off-block entry as (row r, CSR position k)
-       ! with a signed slot: +slot if label(r) < label(c), -slot otherwise.
+       nc = 0
+       do r = 1, upt%ham%nrow
+          do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+             c = upt%ham%Mj(k); a = label(atom_of(r)); b = label(atom_of(c))
+             if (a == b) cycle
+             if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) cycle
+             if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+             nc = nc + 1
+             cand_a(nc) = min(a,b); cand_b(nc) = max(a,b)
+          end do
+       end do
+       call icgn_sort_pairs(cand_a, cand_b, nc)
+       call icgn_unique_pairs(cand_a, cand_b, nc, npair)
+       if (allocated(pairs)) call destroy_pairs(pairs)
+       allocate(pairs(max(1, npair)))
+       do i = 1, npair
+          pairs(i)%a = cand_a(i); pairs(i)%b = cand_b(i)
+       end do
        allocate(e_slot(max(1,upt%ham%nnz)), e_row(max(1,upt%ham%nnz)), e_k(max(1,upt%ham%nnz)))
        ne = 0
        do r = 1, upt%ham%nrow
@@ -2454,19 +2553,14 @@ contains
              if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) cycle
              if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
              ia = min(a,b); ib = max(a,b)
-             slot = pair_map(ia, ib)
-             if (slot == 0) then
-                npair = npair + 1
-                if (npair > size(pairs)) then; ierr = 11; return; end if
-                pairs(npair)%a = ia; pairs(npair)%b = ib
-                pair_map(ia, ib) = npair; slot = npair
-             end if
+             slot = icgn_find_pair(cand_a, cand_b, npair, ia, ib)
+             if (slot == 0) cycle
              ne = ne + 1
              if (a < b) then; e_slot(ne) = slot; else; e_slot(ne) = -slot; end if
              e_row(ne) = r; e_k(ne) = k
           end do
        end do
-       deallocate(pair_map)
+       deallocate(cand_a, cand_b)
        ! Counting sort of the entries by pair, keeping the scan order inside each
        ! pair so that the accumulation order (hence the result) is unchanged.
        allocate(p_start(npair+1), p_fill(max(1,npair)), e_ord(max(1,ne)))
@@ -2549,9 +2643,7 @@ contains
        call icgn_restore_nesting(saved_levels)
     else
        if (.not. reuse_full) then
-          if (allocated(pairs)) call destroy_pairs(pairs)
-          allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2)))
-          ! Collect physical H_ab first; project each pair once at matrix level.
+          ! collect_pairs allocates pairs to the exact edged-pair count.
           call icgn_collect_pairs(upt, atom_of, label, local, pairs, npair, ierr)
           if (ierr /= 0) return
        end if
@@ -2648,21 +2740,30 @@ contains
     call icgn_report_time('  assemble reduced CSR (serial)', t_stage)
   end subroutine build_icgn_reduced_hamiltonian
 
-  ! Lift ICGN eigenvectors from reduced basis back to physical space.
+  ! Lift eigenvectors from reduced basis back to orbital (physical) space:
+  ! physical(rows_of_block,:) = q_block * reduced(offset : offset+nret-1, :).
+  ! One zgemm per block (same helper used elsewhere in this module).
   subroutine icgn_lift(upt, reduced, physical)
     type(OUPT), intent(in) :: upt
     complex(dp), intent(in) :: reduced(:,:)
     complex(dp), intent(out) :: physical(:,:)
-    integer :: i, j, off
-    physical = (0.0_dp, 0.0_dp); off = 1
+    integer :: i, j, off, nn, nr, nev
+    complex(dp), allocatable :: tmp(:,:)
+    physical = (0.0_dp, 0.0_dp)
+    off = 1
+    nev = size(reduced, 2)
     do i = 1, size(upt%icgn_blocks)
-       if (upt%icgn_blocks(i)%nret > 0) then
-          do j = 1, size(upt%icgn_blocks(i)%rows)
-             physical(upt%icgn_blocks(i)%rows(j),:) = &
-                  matmul(upt%icgn_blocks(i)%q(j,:), reduced(off:off+upt%icgn_blocks(i)%nret-1,:))
+       nr = upt%icgn_blocks(i)%nret
+       if (nr > 0) then
+          nn = upt%icgn_blocks(i)%nrow
+          allocate(tmp(nn, nev))
+          call icgn_zgemm('N', upt%icgn_blocks(i)%q, reduced(off:off+nr-1, :), tmp)
+          do j = 1, nn
+             physical(upt%icgn_blocks(i)%rows(j), :) = tmp(j, :)
           end do
+          deallocate(tmp)
        end if
-       off = off + upt%icgn_blocks(i)%nret
+       off = off + nr
     end do
   end subroutine icgn_lift
 
