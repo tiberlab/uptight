@@ -781,9 +781,13 @@ contains
 
     na = upt%basis%n_basis
     n  = upt%ham%nrow
-    if (na < 1 .or. upt%icgn_num_blocks < 1 .or. upt%icgn_num_blocks > na) then
-       ierr = 2; write(*,*) '(icgn) invalid number of blocks'; return
+    if (na < 1) then
+       ierr = 2; write(*,*) '(icgn) invalid n_atoms'; return
     end if
+    if (upt%icgn_num_blocks < 0) then
+       ierr = 2; write(*,*) '(icgn) num_blocks must be non-negative (0 = auto)'; return
+    end if
+    call icgn_resolve_num_blocks(upt, na, n)
    if (upt%icgn_core_emin >= upt%icgn_core_emax .or. upt%icgn_top_buffer < 0.0_dp .or. &
       upt%icgn_bottom_buffer < 0.0_dp) then
        ierr = 3; write(*,*) '(icgn) invalid core window or buffer'; return
@@ -2122,6 +2126,36 @@ contains
     end if
     nth = max(1, nth)
   end function icgn_thread_budget
+
+  ! Resolve upt%icgn_num_blocks: 0 => auto heuristic; always clamp to [1, na].
+  ! Auto aims for ~target_orb orbitals per block (balance diag cost ~ N^3/B^2
+  ! against parallelism) and prefers B >= thread budget so outer parallel-do
+  ! over blocks can fill the CPUs.
+  subroutine icgn_resolve_num_blocks(upt, na, n_orb)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: na, n_orb
+    integer :: nb, T, requested
+    integer, parameter :: target_orb = 200
+    requested = upt%icgn_num_blocks
+    if (requested == 0) then
+       T = icgn_thread_budget()
+       nb = max(1, (max(1, n_orb) + target_orb - 1) / target_orb)  ! ceil(n_orb/target)
+       nb = max(nb, T)
+       write(*,'(a,i0,a,i0,a,i0,a,i0,a)') &
+            '(icgn) auto num_blocks=', nb, ' (n_orb=', n_orb, &
+            ', n_atoms=', na, ', threads=', T, ')'
+    else
+       nb = requested
+    end if
+    if (nb > na) then
+       write(*,'(a,i0,a,i0,a)') &
+            '(icgn) WARNING: num_blocks=', nb, ' exceeds n_atoms=', na, &
+            ' — falling back to num_blocks = n_atoms'
+       nb = na
+    end if
+    if (nb < 1) nb = 1
+    upt%icgn_num_blocks = nb
+  end subroutine icgn_resolve_num_blocks
 
   ! Allow only ONE active parallel level while our outer loop runs, so that a
   ! threaded BLAS/LAPACK called from inside it runs single-threaded instead of
