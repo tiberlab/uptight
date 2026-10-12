@@ -49,6 +49,15 @@
 ! Sparse storage convention used everywhere: CSR with Mi = row pointer
 ! (size nrow+1), Mj = column index, M = values; sparse_fmt is 'F' (full),
 ! 'U' (upper triangle) or 'L' (lower triangle).
+!
+! Output convention of the REDUCED operator (upt%icgn_ham), identical for every
+! path (outers / Neumann on or off): sparse_fmt = 'F' (both triangles stored),
+! the diagonal entry of every row is always present, and the column indices are
+! strictly ascending inside every row.  The input operator may be 'F', 'U' or
+! 'L' (see stored_entry).  Orbital layout assumed for the input operator (checked
+! against TB_ham.f90): the orbitals of one atom are contiguous, n_spin*n_st(atom)
+! rows per atom, atoms in basis order; the spin position inside an atom is
+! irrelevant here because blocks are built from whole atoms.
 ! ======================================================================
 module coarse_grain
    use, intrinsic :: iso_c_binding, only : c_int, c_double, c_char
@@ -80,7 +89,7 @@ module coarse_grain
      complex(dp), dimension(:,:), pointer :: g => null()
   end type ICGNPair
 
-  ! ---- Block-dense Neumann correction (see icgn_sigma_blockdense) ----------
+  ! ---- Block-sparse Neumann correction (see icgn_sigma_blocksparse) --------
   ! Q-space data of one block: local indices of the discarded (Q) states and the
   ! resolvent R = 1/(E0 - E) of each of them.
   type ICGNQBlock
@@ -102,6 +111,15 @@ module coarse_grain
   type ICGNMat
      complex(dp), pointer :: m(:,:) => null()
   end type ICGNMat
+
+  ! Block-sparse storage of the Neumann self-energy Sigma (P-P space).  Row a of
+  ! blocks holds the blocks Sigma(P_a, P_blk(t)) for blk(t) >= a only; the part
+  ! below the block diagonal follows from Hermiticity (see icgn_csr_add_sigma).
+  type ICGNSigRow
+     integer :: n = 0
+     integer, pointer :: blk(:) => null()
+     type(ICGNMat), pointer :: mat(:) => null()
+  end type ICGNSigRow
 
   public :: icgn_configure, icgn_prepare, icgn_clear, icgn_active, icgn_lift
   public :: icgn_log_progress, icgn_log_important
@@ -333,12 +351,14 @@ contains
     ! in place when the swap happened, and it is not a reliable source for the
     ! original size once the Hamiltonian has been rebuilt.
     nfull = icgn_orbital_dim(upt)
-    if (nfull <= nred) then
-      ! No larger basis to lift into: restore the operator and leave the
-      ! vectors alone rather than lift into something of the wrong size.
-      write(*,'(a,i0,a,i0)') &
-           '(icgn) finalize: no orbital basis recorded (nred=', nred, &
-           ', nfull=', nfull, '), keeping reduced vectors'
+    ! nfull == nred is legitimate (every state retained): the vectors still have
+    ! to be rotated back from the block eigenbasis, so only nfull < nred, or a
+    ! row count that differs from the recorded reduced dimension, is an error.
+    if (nfull < nred .or. nred /= upt%icgn_reduced_dim) then
+      write(*,'(a,i0,a,i0,a,i0,a)') &
+           '(icgn) finalize: inconsistent dimensions (nred=', nred, &
+           ', reduced_dim=', upt%icgn_reduced_dim, ', nfull=', nfull, &
+           '), keeping reduced vectors'
       call icgn_swap_out(upt)
       return
     end if
@@ -526,13 +546,19 @@ contains
     complex(dp), intent(in) :: qa(:,:), qb(:,:)
     logical, intent(in), optional :: keep_h
     complex(dp), allocatable :: tmp(:,:)
+    logical :: keep
+
+    ! Fortran does not short-circuit .or./.and., so an absent optional argument
+    ! must never appear in the same expression as its use.
+    keep = .false.
+    if (present(keep_h)) keep = keep_h
 
     ! First H_AB * Q_B, then Q_A^H * (H_AB * Q_B).
     ! The expensive arithmetic is now done at block level instead of once per
     ! physical Hamiltonian entry.
     allocate(p%v(size(qa,2), size(qb,2)))
     call icgn_project_sparse(p%h, qa, qb, p%v)
-    if (.not. present(keep_h) .or. .not. keep_h) deallocate(p%h)
+    if (.not. keep) deallocate(p%h)
   end subroutine project_pair
 
   ! Write the coupling block p%v of the block pair (a,b) into the reduced CSR h.
@@ -573,6 +599,26 @@ contains
        end do; end do
     end if
   end subroutine emit_pair
+
+  ! Sort column indices of every CSR row into strictly ascending order
+  ! (insertion sort; rows are short).  Required so the reduced operator
+  ! always matches the documented output convention regardless of path.
+  subroutine icgn_sort_csr_rows(h)
+    type(CSR), intent(inout) :: h
+    integer :: r, i, j, key_j
+    complex(dp) :: key_m
+    do r = 1, h%nrow
+       do i = h%Mi(r)+1, h%Mi(r+1)-1
+          key_j = h%Mj(i); key_m = h%M(i)
+          j = i - 1
+          do while (j >= h%Mi(r) .and. h%Mj(j) > key_j)
+             h%Mj(j+1) = h%Mj(j); h%M(j+1) = h%M(j)
+             j = j - 1
+          end do
+          h%Mj(j+1) = key_j; h%M(j+1) = key_m
+       end do
+    end do
+  end subroutine icgn_sort_csr_rows
 
   subroutine destroy_pairs(pairs)
     type(ICGNPair),allocatable,intent(inout)::pairs(:)
@@ -728,7 +774,8 @@ contains
     integer :: nb, ord, ip, iq, gp_row, gp_col, q_idx, qb_idx
     integer, allocatable :: block_of_state(:), local_of_state(:), ret_offset(:)
     real(dp), allocatable :: evals_q(:)
-    complex(dp), allocatable :: H_dense(:,:), Sigma(:,:)
+    type(ICGNSigRow), allocatable :: sig(:)
+    real(dp) :: max_sigma
     complex(dp), allocatable :: amp_vec(:), next_vec(:)
     real(dp) :: E0_used, resolvent_val
     complex(dp) :: amp_val, contrib
@@ -758,7 +805,7 @@ contains
     logical, allocatable :: mark(:), mark2(:)
     integer :: nsupp, nsupp2, tt, ee
     logical :: dummy_qq
-    ! Block-dense Neumann correction
+    ! Block-sparse Neumann correction (P-Q / Q-Q blocks + Sigma via ICGNSigRow)
     type(ICGNQBlock), allocatable :: bq(:)
     type(ICGNQPair), allocatable :: qp(:)
     integer, allocatable :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
@@ -860,7 +907,7 @@ contains
     status = icgn_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
          int(upt%icgn_num_blocks,c_int), int(nint(1000.0_dp*upt%icgn_metis_imbalance),c_int), 42_c_int, part)
     if (status /= 0) then
-       call icgn_log_progress(upt, 'METIS unavailable, using built-in graph-BFS fallback partitioning')
+       call icgn_log_important(upt, 'METIS unavailable or failed; using built-in graph-BFS fallback partitioning')
        call icgn_graph_partition(na, upt%icgn_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
     else
        call icgn_log_progress(upt, 'METIS partitioning done')
@@ -972,7 +1019,8 @@ contains
     ! defers pair construction until q is available and uses the ICGN-style
     ! sparse projection path instead of materializing dense physical H_ab.
     if (upt%icgn_add_core_outers > 0 .or. upt%icgn_selfenergy_order >= 0) then
-       allocate(pairs(max(1, upt%ham%nnz)))
+       ! Max unique pairs is nb*(nb-1)/2 (pair_map enforces uniqueness).
+       allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2)))
        t_stage = icgn_wall()
        call icgn_collect_pairs(upt, atom_of, label, row_of, pairs, npair, ierr)
        if (ierr /= 0) return
@@ -1100,17 +1148,7 @@ contains
 
     t_mark = icgn_wall()
     nred = total_ret
-    allocate(H_dense(nred, nred))
-    H_dense = cmplx(0.0_dp, 0.0_dp, kind=dp)
-
-    ! Fill H_dense from icgn_ham CSR (may be triangular — symmetrize immediately)
-    do r = 1, upt%icgn_ham%nrow
-       do k = upt%icgn_ham%Mi(r), upt%icgn_ham%Mi(r+1)-1
-          c = upt%icgn_ham%Mj(k)
-          H_dense(r, c) = upt%icgn_ham%M(k)
-          H_dense(c, r) = conjg(upt%icgn_ham%M(k))
-       end do
-    end do
+    ! H_PP already lives in upt%icgn_ham as a full sorted CSR; no dense copy.
 
     ! Build roff: global reduced-row offset per block
     allocate(roff_blk(nb+1)); roff_blk(1) = 1
@@ -1153,16 +1191,22 @@ contains
     ! the projection step. Since we already freed g_full inside
     ! build_icgn_reduced_hamiltonian, we need to re-project.
     ! Re-project inter-block couplings to get the full g matrices.
-    call icgn_report_time('Neumann setup (H_dense fill, index tables)', t_mark)
-       ! ---- Block-dense Neumann correction (dense BLAS3 on the block structure) ----
+    call icgn_report_time('Neumann setup (index tables)', t_mark)
+       ! ---- Block-sparse Neumann correction (P-Q/Q-Q blocks + Sigma via ICGNSigRow) ----
        E0_used = upt%icgn_E0
-       if (E0_used == 0.0_dp) E0_used = (upt%icgn_core_emin + upt%icgn_core_emax) / 2.0_dp
+       ! Only fall back when E0 lies outside the open core window.
+       ! E0 = 0 is a valid choice whenever 0 is inside (core_min, core_max).
+       if (E0_used <= upt%icgn_core_emin .or. E0_used >= upt%icgn_core_emax) then
+          E0_used = (upt%icgn_core_emin + upt%icgn_core_emax) / 2.0_dp
+          call icgn_log_important(upt, &
+               'E0 outside (core_min, core_max); using window midpoint instead')
+       end if
        need_qq = (upt%icgn_selfenergy_order >= 1 .or. upt%icgn_check_convergence)
        t_stage = icgn_wall()
        call icgn_build_neumann_blocks(upt, pairs, npair, local_ret_idx, E0_used, need_qq, &
             bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, npq_nz, nqq_nz)
        npq = int(npq_nz); nqq = int(nqq_nz)
-       call icgn_report_time('Neumann: dense P-Q/Q-Q blocks', t_stage)
+       call icgn_report_time('Neumann: block P-Q/Q-Q blocks', t_stage)
        t_mark = icgn_wall()
        ! Free S_full now that the couplings are projected
        do i = 1, nb
@@ -1185,18 +1229,24 @@ contains
        end if
        call icgn_report_time('free S_full/pairs + convergence check', t_mark)
 
-       allocate(Sigma(nred, nred))
-       Sigma = cmplx(0.0_dp, 0.0_dp, kind=dp)
+       allocate(sig(nb))
        t_stage = icgn_wall()
-       if (npq > 0) call icgn_sigma_blockdense(nb, upt%icgn_selfenergy_order, &
-            maxval(upt%icgn_blocks(1:nb)%nrow), roff_blk, bq, qp, &
-            nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, Sigma)
-       call icgn_report_time('Sigma (block-dense zgemm)', t_stage)
+       if (npq > 0) call icgn_sigma_blocksparse(nb, upt%icgn_selfenergy_order, &
+            maxval(upt%icgn_blocks(1:nb)%nrow), bq, qp, &
+            nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, sig)
+       call icgn_report_time('Sigma (block-sparse zgemm)', t_stage)
        call icgn_free_neumann_blocks(bq, qp, npair)
        deallocate(nbr_ptr, nbr_blk, nbr_pair, nbr_rev, nbr_isA)
+    max_sigma = 0.0_dp
+    do i = 1, nb
+       do j = 1, sig(i)%n
+          if (associated(sig(i)%mat(j)%m)) &
+               max_sigma = max(max_sigma, maxval(abs(sig(i)%mat(j)%m)))
+       end do
+    end do
     if (icgn_timing_on()) then
        write(*,'(a,i0,a,i0,a,i0,a,i0,a,es10.3)') '[ICGN-TIME] stats: nred=', nred, ' nstates_total=', &
-            nstates_total, ' npq=', npq, ' nqq=', nqq, ' max|Sigma|=', maxval(abs(Sigma))
+            nstates_total, ' npq=', npq, ' nqq=', nqq, ' max|Sigma|=', max_sigma
     end if
     t_mark = icgn_wall()
     deallocate(pq_p, pq_q, pq_v)
@@ -1204,45 +1254,13 @@ contains
        if (allocated(qq_i)) deallocate(qq_i, qq_j, qq_v)
     end if
     deallocate(block_of_state, local_of_state, evals_q, ret_offset)
-    deallocate(roff_blk, local_ret_idx)
+    deallocate(local_ret_idx)
 
-    ! Add Sigma into H_dense and re-Hermitize
-    H_dense = H_dense + Sigma
-    nth = min(icgn_thread_budget(), max(1, nred))
-    !$omp parallel do default(shared) private(i, j) num_threads(nth) schedule(static) if(nth > 1)
-    do i = 1, nred
-       do j = i+1, nred
-          H_dense(i,j) = (H_dense(i,j) + conjg(H_dense(j,i))) / 2.0_dp
-          H_dense(j,i) = conjg(H_dense(i,j))
-       end do
-    end do
-    !$omp end parallel do
-    deallocate(Sigma)
-    call icgn_report_time('free edge lists + H_dense+=Sigma, hermitize', t_mark)
-    t_mark = icgn_wall()
-
-    ! Rebuild icgn_ham from H_dense
-    call destroy_matrix(upt%icgn_ham)
-    nnz = count(abs(H_dense) > 1.0e-14_dp)
-    ! write(*,'(A,I0,I0,I0)') '[ICGN-TRACE] prepare: create icgn_ham nred/nnz=', nred, nred, nnz
-    call create_matrix(upt%icgn_ham, nred, nred, nnz)
-    ! write(*,'(A)') '[ICGN-TRACE] prepare: create icgn_ham returned'
-    upt%icgn_ham%sparse_fmt = 'F'  ! always full — H_dense is complete after Sigma+Hermitianize
-    upt%icgn_ham%Mi(1) = 1
-    k = 0
-    do i = 1, nred
-       do j = 1, nred
-          if (abs(H_dense(i,j)) > 1.0e-14_dp) then
-             k = k + 1
-             upt%icgn_ham%Mj(k) = j
-             upt%icgn_ham%M(k)  = H_dense(i,j)
-          end if
-       end do
-       upt%icgn_ham%Mi(i+1) = k + 1
-    end do
-    upt%icgn_ham%nnz = k
-    deallocate(H_dense)
-    call icgn_report_time('rebuild icgn_ham from dense (serial)', t_mark)
+    ! Merge block-sparse Sigma into the existing H_PP CSR (no dense nred×nred).
+    call icgn_csr_add_sigma(upt%icgn_ham, roff_blk, sig, nred)
+    call icgn_free_sigrows(sig)
+    deallocate(roff_blk)
+    call icgn_report_time('merge Sigma into CSR (block-sparse)', t_mark)
 
     end if  ! icgn_selfenergy_order >= 0 (Neumann correction)
 
@@ -1815,37 +1833,81 @@ contains
   ! Sigma = sum_{ord=0..order} H_PQ R (W R)^ord H_QP on the block structure.
   ! Parallel over the P blocks a (each owns the block row Sigma(P_a, :)); only
   ! the blocks a2 >= a are accumulated, the rest follows from Hermiticity.
-  subroutine icgn_sigma_blockdense(nb, order, maxdim, roff_blk, bq, qp, &
-       nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, Sigma)
+  ! Locate or create the Sigma block (a, a2) inside sig(a).  a2 >= a.
+  function icgn_sig_slot(sig, a, a2, npa, npa2) result(slot)
+    type(ICGNSigRow), intent(inout) :: sig(:)
+    integer, intent(in) :: a, a2, npa, npa2
+    integer :: slot, t
+    integer, pointer :: blk_new(:)
+    type(ICGNMat), pointer :: mat_new(:)
+    slot = 0
+    do t = 1, sig(a)%n
+       if (sig(a)%blk(t) == a2) then; slot = t; return; end if
+    end do
+    ! grow by one
+    slot = sig(a)%n + 1
+    allocate(blk_new(slot), mat_new(slot))
+    if (sig(a)%n > 0) then
+       blk_new(1:sig(a)%n) = sig(a)%blk(1:sig(a)%n)
+       do t = 1, sig(a)%n
+          mat_new(t)%m => sig(a)%mat(t)%m
+          nullify(sig(a)%mat(t)%m)
+       end do
+       deallocate(sig(a)%blk, sig(a)%mat)
+    end if
+    sig(a)%blk => blk_new; sig(a)%mat => mat_new
+    sig(a)%n = slot
+    sig(a)%blk(slot) = a2
+    allocate(sig(a)%mat(slot)%m(npa, npa2))
+    sig(a)%mat(slot)%m = (0.0_dp, 0.0_dp)
+  end function icgn_sig_slot
+
+  subroutine icgn_free_sigrows(sig)
+    type(ICGNSigRow), allocatable, intent(inout) :: sig(:)
+    integer :: a, t
+    if (.not. allocated(sig)) return
+    do a = 1, size(sig)
+       do t = 1, sig(a)%n
+          if (associated(sig(a)%mat(t)%m)) deallocate(sig(a)%mat(t)%m)
+       end do
+       if (associated(sig(a)%blk)) deallocate(sig(a)%blk)
+       if (associated(sig(a)%mat)) deallocate(sig(a)%mat)
+       sig(a)%n = 0
+    end do
+    deallocate(sig)
+  end subroutine icgn_free_sigrows
+
+  ! Block-sparse Neumann Sigma in P-P space.  Only upper block triangle
+  ! (a2 >= a) is stored; lower follows from Hermiticity at CSR merge time.
+  subroutine icgn_sigma_blocksparse(nb, order, maxdim, bq, qp, &
+       nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, sig)
     integer, intent(in) :: nb, order, maxdim
-    integer, intent(in) :: roff_blk(:), nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
+    integer, intent(in) :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
     logical, intent(in) :: nbr_isA(:)
     type(ICGNQBlock), intent(in) :: bq(:)
     type(ICGNQPair), intent(in) :: qp(:)
-    complex(dp), intent(inout) :: Sigma(:,:)
+    type(ICGNSigRow), intent(inout) :: sig(:)
     complex(dp), parameter :: cone = (1.0_dp, 0.0_dp)
     real(dp), parameter :: thr = 1.0e-14_dp
-    integer :: a, b, b2, a2, e, f, ord, kq, nth, saved_levels, nred, i, gp
-    integer :: r1, r2, c1, c2, npa, nqb, nqb2
+    integer :: a, b, b2, a2, e, f, ord, kq, nth, saved_levels, slot
+    integer :: npa, nqb, nqb2, npa2
     type(ICGNMat), allocatable :: Acur(:), Anext(:)
     complex(dp), pointer :: Gm(:,:), Wm(:,:)
     character(len=1) :: opw
     real(dp) :: amax
     logical :: any_cur
 
-    nred = size(Sigma, 1)
     nth = min(icgn_thread_budget(), max(1, nb))
     nth = icgn_outer_threads(nb, nth, maxdim)
     call icgn_flatten_nesting(saved_levels)
     !$omp parallel default(shared) num_threads(nth) if(nth > 1) &
-    !$omp& private(a, b, b2, a2, e, f, ord, kq, r1, r2, c1, c2, npa, nqb, nqb2, Gm, Wm, opw, amax, &
-    !$omp&         any_cur, Acur, Anext)
+    !$omp& private(a, b, b2, a2, e, f, ord, kq, npa, nqb, nqb2, npa2, Gm, Wm, opw, amax, &
+    !$omp&         any_cur, Acur, Anext, slot)
     allocate(Acur(nb), Anext(nb))
     !$omp do schedule(dynamic,1)
     do a = 1, nb
        npa = bq(a)%np
        if (npa == 0) cycle
-       r1 = roff_blk(a); r2 = r1 + npa - 1
        ! order 0:  A_0(a,b) = G(P_a,Q_b) R_b
        do e = nbr_ptr(a), nbr_ptr(a+1)-1
           b = nbr_blk(e); nqb = bq(b)%nq
@@ -1890,16 +1952,17 @@ contains
              if (.not. any_cur .or. amax < thr) exit
           end if
 
-          ! close the chain:  Sigma(P_a, P_a2) += A(a,b) G(P_a2, Q_b)^H,  a2 >= a
+          ! close the chain into block-sparse Sigma(P_a, P_a2), a2 >= a
           do b = 1, nb
              if (.not. associated(Acur(b)%m)) cycle
              do f = nbr_ptr(b), nbr_ptr(b+1)-1
                 a2 = nbr_blk(f)
                 if (a2 < a) cycle
-                if (bq(a2)%np == 0) cycle
+                npa2 = bq(a2)%np
+                if (npa2 == 0) cycle
                 Gm => icgn_qg(qp, nbr_pair, nbr_isA, nbr_rev(f))     ! G(P_a2, Q_b)
-                c1 = roff_blk(a2); c2 = c1 + bq(a2)%np - 1
-                call icgn_zgemm_gen('N', 'C', cone, Acur(b)%m, Gm, cone, Sigma(r1:r2, c1:c2))
+                slot = icgn_sig_slot(sig, a, a2, npa, npa2)
+                call icgn_zgemm_gen('N', 'C', cone, Acur(b)%m, Gm, cone, sig(a)%mat(slot)%m)
              end do
           end do
        end do
@@ -1913,17 +1976,133 @@ contains
     deallocate(Acur, Anext)
     !$omp end parallel
     call icgn_restore_nesting(saved_levels)
+  end subroutine icgn_sigma_blocksparse
 
-    ! lower triangle from Hermiticity
-    nth = min(icgn_thread_budget(), max(1, nred))
-    !$omp parallel do default(shared) private(i, gp) num_threads(nth) schedule(static) if(nth > 1)
-    do gp = 1, nred
-       do i = gp+1, nred
-          Sigma(i, gp) = conjg(Sigma(gp, i))
+  ! Merge H_PP CSR with block-sparse Sigma into a new full CSR (sorted columns).
+  ! Lower triangle of Sigma is filled by Hermiticity; diagonal blocks are
+  ! Hermitianized in place.
+  subroutine icgn_csr_add_sigma(ham, roff_blk, sig, nred)
+    type(CSR), intent(inout) :: ham
+    integer, intent(in) :: roff_blk(:), nred
+    type(ICGNSigRow), intent(in) :: sig(:)
+    integer :: a, t, a2, i, j, r, c, k, ne, nnew, pos
+    integer, allocatable :: ii(:), jj(:), ord(:)
+    complex(dp), allocatable :: vv(:), tmp(:)
+    integer, allocatable :: rowcount(:), next(:)
+    real(dp), parameter :: thr = 1.0e-14_dp
+    complex(dp) :: val
+
+    ! Upper bound of CSR entries after merge.  Diagonal blocks are Hermitianized
+    ! before the threshold test, so count after combining (i,j)/(j,i).
+    ne = ham%nnz
+    do a = 1, size(sig)
+       do t = 1, sig(a)%n
+          a2 = sig(a)%blk(t)
+          do i = 1, size(sig(a)%mat(t)%m, 1)
+             do j = 1, size(sig(a)%mat(t)%m, 2)
+                if (a2 == a) then
+                   if (j < i) cycle
+                   if (j > i) then
+                      val = (sig(a)%mat(t)%m(i,j) + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
+                      if (abs(val) <= thr) cycle
+                      ne = ne + 2
+                   else
+                      if (abs(sig(a)%mat(t)%m(i,j)) <= thr) cycle
+                      ne = ne + 1
+                   end if
+                else
+                   if (abs(sig(a)%mat(t)%m(i,j)) <= thr) cycle
+                   ne = ne + 2
+                end if
+             end do
+          end do
        end do
     end do
-    !$omp end parallel do
-  end subroutine icgn_sigma_blockdense
+    allocate(ii(ne), jj(ne), vv(ne))
+    nnew = 0
+    ! Existing H_PP
+    do r = 1, ham%nrow
+       do k = ham%Mi(r), ham%Mi(r+1)-1
+          nnew = nnew + 1
+          ii(nnew) = r; jj(nnew) = ham%Mj(k); vv(nnew) = ham%M(k)
+       end do
+    end do
+    ! Sigma blocks
+    do a = 1, size(sig)
+       do t = 1, sig(a)%n
+          a2 = sig(a)%blk(t)
+          do i = 1, size(sig(a)%mat(t)%m, 1)
+             do j = 1, size(sig(a)%mat(t)%m, 2)
+                val = sig(a)%mat(t)%m(i,j)
+                if (a2 == a) then
+                   ! Hermitianize diagonal block on the fly (keep upper + diag)
+                   if (j < i) cycle
+                   if (j > i) val = (val + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
+                   if (abs(val) <= thr) cycle
+                   nnew = nnew + 1
+                   ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a)+j-1; vv(nnew) = val
+                   if (j > i) then
+                      nnew = nnew + 1
+                      ii(nnew) = roff_blk(a)+j-1; jj(nnew) = roff_blk(a)+i-1; vv(nnew) = conjg(val)
+                   end if
+                else
+                   if (abs(val) <= thr) cycle
+                   nnew = nnew + 1
+                   ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a2)+j-1; vv(nnew) = val
+                   nnew = nnew + 1
+                   ii(nnew) = roff_blk(a2)+j-1; jj(nnew) = roff_blk(a)+i-1; vv(nnew) = conjg(val)
+                end if
+             end do
+          end do
+       end do
+    end do
+
+    ! Counting sort by row, then insertion-sort by col within each row and merge.
+    allocate(rowcount(nred), next(nred), ord(max(1,nnew)))
+    rowcount = 0
+    do k = 1, nnew
+       rowcount(ii(k)) = rowcount(ii(k)) + 1
+    end do
+    next(1) = 1
+    do r = 1, nred-1
+       next(r+1) = next(r) + rowcount(r)
+    end do
+    do k = 1, nnew
+       r = ii(k); ord(next(r)) = k; next(r) = next(r) + 1
+    end do
+    ! next(r) now past-the-end; start of row r is next(r)-rowcount(r)
+    call destroy_matrix(ham)
+    call create_matrix(ham, nred, nred, max(1, nnew))
+    ham%sparse_fmt = 'F'
+    ham%Mi(1) = 1
+    pos = 0
+    do r = 1, nred
+       i = next(r) - rowcount(r)          ! first index in ord for this row
+       j = next(r) - 1                    ! last index
+       ! insertion sort ord(i:j) by column
+       do k = i+1, j
+          a = ord(k); t = k - 1
+          do while (t >= i .and. jj(ord(t)) > jj(a))
+             ord(t+1) = ord(t); t = t - 1
+          end do
+          ord(t+1) = a
+       end do
+       ! emit merged entries
+       do k = i, j
+          a = ord(k)
+          if (pos >= ham%Mi(r) .and. ham%Mj(pos) == jj(a)) then
+             ham%M(pos) = ham%M(pos) + vv(a)
+          else
+             pos = pos + 1
+             ham%Mj(pos) = jj(a)
+             ham%M(pos)  = vv(a)
+          end if
+       end do
+       ham%Mi(r+1) = pos + 1
+    end do
+    ham%nnz = pos
+    deallocate(ii, jj, vv, ord, rowcount, next)
+  end subroutine icgn_csr_add_sigma
 
   ! out_X = [R] * sum_Y (W_{Y,X})^T in_Y   (the operator W^T = conj(W) of the power iteration)
   subroutine icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, vin, vout, apply_res)
@@ -2376,11 +2555,17 @@ contains
     else if (upt%icgn_add_core_outers == 0) then
        ! Zero-outer path with Neumann enabled: keep the full physical
        ! pair matrices because the correction needs P-Q and Q-Q couplings.
+       ! Blocks with nret==0 have no retained basis (q unallocated); emit an
+       ! empty v so the later CSR count/assembly is safe.
        nth = min(icgn_thread_budget(), max(1, npair))
        call icgn_flatten_nesting(saved_levels)
        !$omp parallel do default(shared) private(i, a, b, j, k) num_threads(nth) schedule(dynamic,1) if(nth > 1)
        do i = 1, npair
           a = pairs(i)%a; b = pairs(i)%b
+          if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) then
+             allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+             cycle
+          end if
           call project_pair(pairs(i), upt%icgn_blocks(a)%q, &
                upt%icgn_blocks(b)%q, .true.)
           do j = 1, upt%icgn_blocks(a)%nret
@@ -2398,7 +2583,7 @@ contains
     else
        if (.not. reuse_full) then
           if (allocated(pairs)) call destroy_pairs(pairs)
-          allocate(pairs(max(1, upt%ham%nnz)))
+          allocate(pairs(max(1, upt%icgn_num_blocks*(upt%icgn_num_blocks-1)/2)))
           ! Collect physical H_ab first; project each pair once at matrix level.
           call icgn_collect_pairs(upt, atom_of, label, local, pairs, npair, ierr)
           if (ierr /= 0) return
@@ -2459,22 +2644,22 @@ contains
     end if
 
     t_stage = icgn_wall()
-    ! Build CSR.  Count exactly the entries that emit_pair will write:
-    ! zero-valued reduced couplings are omitted to keep the sparse matrix small.
+    ! Build CSR in the canonical reduced format (always 'F', diagonal present,
+    ! columns strictly ascending per row). Count both triangles for every
+    ! non-zero coupling; zeros are omitted.
     allocate(rowcount(nred), next(nred)); rowcount = 1
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
        do j = 1, size(pairs(i)%v,1)
           do k = 1, size(pairs(i)%v,2)
              if (abs(pairs(i)%v(j,k)) == 0.0_dp) cycle
-             if (upt%ham%sparse_fmt /= 'L') rowcount(roff(a)+j-1) = rowcount(roff(a)+j-1) + 1
-             if (upt%ham%sparse_fmt == 'F' .or. upt%ham%sparse_fmt == 'L') &
-                  rowcount(roff(b)+k-1) = rowcount(roff(b)+k-1) + 1
+             rowcount(roff(a)+j-1) = rowcount(roff(a)+j-1) + 1
+             rowcount(roff(b)+k-1) = rowcount(roff(b)+k-1) + 1
           end do
        end do
     end do
     nnz = sum(rowcount); call create_matrix(upt%icgn_ham, nred, nred, nnz)
-    upt%icgn_ham%sparse_fmt = upt%ham%sparse_fmt; upt%icgn_ham%Mi(1) = 1
+    upt%icgn_ham%sparse_fmt = 'F'; upt%icgn_ham%Mi(1) = 1
     do i = 1, nred; upt%icgn_ham%Mi(i+1) = upt%icgn_ham%Mi(i) + rowcount(i); end do
     next = upt%icgn_ham%Mi(1:nred)
     do a = 1, upt%icgn_num_blocks
@@ -2487,9 +2672,11 @@ contains
     end do
     do i = 1, npair
        a = pairs(i)%a; b = pairs(i)%b
-       call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), upt%ham%sparse_fmt, next)
+       call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), 'F', next)
     end do
     upt%icgn_ham%nnz = nnz
+    ! Ensure column indices are strictly ascending inside every row.
+    call icgn_sort_csr_rows(upt%icgn_ham)
     deallocate(roff, rowcount, next)
     call icgn_report_time('  assemble reduced CSR (serial)', t_stage)
   end subroutine build_icgn_reduced_hamiltonian
