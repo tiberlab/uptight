@@ -1,4 +1,5 @@
 ! Coarse-grained tight-binding projection after Liu et al. (2022).
+! Implemented by various AIs, coordinated by Anh-Luan Phan (Sep+Oct 2026)
 !
 ! ======================================================================
 ! OVERVIEW (read this first)
@@ -144,6 +145,17 @@ module coarse_grain
 
 contains
 
+
+! ===========================================================================
+! SECTION A — Lifecycle & public API
+! Swap/restore, configure, query, clear, prepare, lift.
+! Solvers only see H via swap_in; they never know about coarse-graining.
+! ===========================================================================
+
+! Swap/restore, configure, query, clear, prepare, lift.
+! Solvers only see H via swap_in; they never know about coarse-graining.
+! ===========================================================================
+
   ! Called by the orchestrator right after the orbital operator has been built
   ! and before the reduced one is prepared.
   !
@@ -166,61 +178,6 @@ contains
     ! write(*,'(A,L1,A,L1)') '[ICGN-TRACE] set_original snapshot U M/Mi=', associated(icgn_original_u%M), '/', &
          ! associated(icgn_original_u%Mi)
   end subroutine icgn_set_original
-
-  ! Common coupling filter. A coupling V between two
-  ! block eigenstates with energies ea, eb:
-  !   - never filtered when BOTH energies lie in the core+buffer window
-  !     [win_emin, win_emax] (only exact zeros are dropped);
-  !   - otherwise survives only if
-  !       |V|^2 > epsilon * |ea - eb|        (strict: equality is filtered out)
-  ! with epsilon >= 0. Product form avoids division by a vanishing energy
-  ! difference; for degenerate outer states RHS is 0 so any non-zero coupling
-  ! survives. epsilon = 0 reduces to |V|^2 > 0 outside the window.
-  pure logical function icgn_coupling_survives(v, ea, eb, epsilon, win_emin, win_emax)
-    complex(dp), intent(in) :: v
-    real(dp), intent(in) :: ea, eb, epsilon, win_emin, win_emax
-    real(dp) :: v2, de
-    v2 = real(v,dp)**2 + aimag(v)**2
-    icgn_coupling_survives = .false.
-    if (.not. (v2 > 0.0_dp)) return            ! exact zero (or NaN): no coupling
-    ! Core+buffer window: never filter non-zero couplings between in-window states.
-    if (ea >= win_emin .and. ea <= win_emax .and. &
-        eb >= win_emin .and. eb <= win_emax) then
-       icgn_coupling_survives = .true.
-       return
-    end if
-    de = abs(ea - eb)
-    if (de <= 0.0_dp) then
-       icgn_coupling_survives = .true.           ! degenerate: |V|^2 > 0 = epsilon*0
-    else
-       icgn_coupling_survives = (v2 > max(epsilon, 0.0_dp)*de)
-    end if
-  end function icgn_coupling_survives
-
-
-  subroutine icgn_get_active(upt, active_ham, active_u, active)
-      type(OUPT), intent(in), target :: upt
-    type(CSR), pointer, intent(out) :: active_ham, active_u
-    logical, intent(out) :: active
-    active = .false.
-    nullify(active_ham, active_u)
-    if (icgn_active(upt)) then
-       active_ham => upt%icgn_ham
-       active_u => upt%icgn_U
-       active = .true.
-    end if
-  end subroutine icgn_get_active
-
-  subroutine icgn_lift_active(upt, reduced, physical)
-    type(OUPT), intent(in) :: upt
-    complex(dp), intent(in) :: reduced(:,:)
-    complex(dp), intent(out) :: physical(:,:)
-    if (icgn_active(upt)) then
-       call icgn_lift(upt, reduced, physical)
-    else
-       physical = reduced
-    end if
-  end subroutine icgn_lift_active
 
   !----------------------------------------------------------------------------!
   ! Single entry point for using a reduced operator from outside uptight.
@@ -394,7 +351,6 @@ contains
     end if
   end function icgn_orbital_dim
 
-
   ! Drops every pointer into the reduced operator. Must be called before the
   ! operator is destroyed, otherwise icgn_original_ham/icgn_original_u and the
   ! swap bookkeeping keep pointing at freed memory.
@@ -447,216 +403,6 @@ contains
     upt%icgn_cut_fraction = 0.0_dp
   end subroutine icgn_destroy_operator
 
-
-
-
-  subroutine dense_eigh(a, w, ierr)
-    complex(dp), intent(inout) :: a(:,:)
-    real(dp), intent(out) :: w(:)
-    integer, intent(out) :: ierr
-    integer :: n, info, lwork, lrwork, liwork
-    complex(dp) :: workq(1)
-    real(dp) :: rworkq(1)
-    integer :: iworkq(1)
-    complex(dp), allocatable :: work(:)
-    real(dp), allocatable :: rwork(:)
-    integer, allocatable :: iwork(:)
-    n=size(w)
-    if (n == 0) then; ierr=0; return; end if
-    call zheevd('V','U',n,a,n,w,workq,-1,rworkq,-1,iworkq,-1,info)
-    if (info /= 0) then; ierr=10; return; end if
-    lwork=max(1,int(real(workq(1)))); lrwork=max(1,int(rworkq(1))); liwork=max(1,iworkq(1))
-    allocate(work(lwork),rwork(lrwork),iwork(liwork))
-    call zheevd('V','U',n,a,n,w,work,lwork,rwork,lrwork,iwork,liwork,info)
-    deallocate(work,rwork,iwork); ierr=info
-  end subroutine dense_eigh
-
-  ! Partial Hermitian eigenproblem on energy window (VL, VU] via ZHEEVR (MRRR).
-  ! ABSTOL = 0 selects the relative-accuracy path (EPS*|T|), matching the
-  ! high-accuracy regime of ZHEEVD for the eigenvalues that are requested.
-  ! On failure the caller should fall back to dense_eigh.
-  ! On success: m eigenvalues in w(1:m), eigenvectors in z(:,1:m).
-  subroutine dense_eigh_window(a, vl, vu, w, z, m, ierr)
-    complex(dp), intent(inout) :: a(:,:)
-    real(dp), intent(in) :: vl, vu
-    real(dp), intent(out) :: w(:)
-    complex(dp), intent(out) :: z(:,:)
-    integer, intent(out) :: m, ierr
-    integer :: n, info, lwork, lrwork, liwork
-    complex(dp) :: workq(1)
-    real(dp) :: rworkq(1)
-    integer :: iworkq(1)
-    complex(dp), allocatable :: work(:)
-    real(dp), allocatable :: rwork(:)
-    integer, allocatable :: iwork(:), isuppz(:)
-    real(dp), parameter :: abstol = 0.0_dp
-    n = size(a, 1)
-    m = 0; ierr = 0; w = 0.0_dp; z = (0.0_dp, 0.0_dp)
-    if (n == 0) return
-    if (.not. (vu > vl)) then; ierr = 11; return; end if
-    allocate(isuppz(2 * max(1, n)))
-    call zheevr('V', 'V', 'U', n, a, n, vl, vu, 1, n, abstol, m, w, z, n, &
-         isuppz, workq, -1, rworkq, -1, iworkq, -1, info)
-    if (info /= 0) then; deallocate(isuppz); ierr = 10; return; end if
-    lwork  = max(1, int(real(workq(1), kind=dp)))
-    lrwork = max(1, int(rworkq(1)))
-    liwork = max(1, iworkq(1))
-    allocate(work(lwork), rwork(lrwork), iwork(liwork))
-    call zheevr('V', 'V', 'U', n, a, n, vl, vu, 1, n, abstol, m, w, z, n, &
-         isuppz, work, lwork, rwork, lrwork, iwork, liwork, info)
-    deallocate(work, rwork, iwork, isuppz)
-    ierr = info
-  end subroutine dense_eigh_window
-
-  ! Full spectrum (ZHEEVD). Used when outer / Neumann need discarded states.
-  subroutine coarse_eigh(a, w, ierr)
-    complex(dp), intent(inout) :: a(:,:)
-    real(dp), intent(out) :: w(:)
-    integer, intent(out) :: ierr
-    call dense_eigh(a, w, ierr)
-  end subroutine coarse_eigh
-
-  logical function stored_entry(fmt, r, c)
-    character(1), intent(in) :: fmt
-    integer, intent(in) :: r, c
-    select case (fmt)
-    case ('U', 'u')
-       stored_entry = (r <= c)
-    case ('L', 'l')
-       stored_entry = (r >= c)
-    case default
-       ! The Hamiltonian builder may emit a complete matrix even when the
-       ! sparse format is labelled F.  Process one triangle here; the
-       ! projected matrix is completed by its Hermitian conjugate below.
-       stored_entry = (r <= c)
-    end select
-  end function stored_entry
-
-
-
-
-
-
-  subroutine project_pair(p, qa, qb, keep_h)
-    type(ICGNPair), intent(inout) :: p
-    complex(dp), intent(in) :: qa(:,:), qb(:,:)
-    logical, intent(in), optional :: keep_h
-    complex(dp), allocatable :: tmp(:,:)
-    logical :: keep
-
-    ! Fortran does not short-circuit .or./.and., so an absent optional argument
-    ! must never appear in the same expression as its use.
-    keep = .false.
-    if (present(keep_h)) keep = keep_h
-
-    ! First H_AB * Q_B, then Q_A^H * (H_AB * Q_B).
-    ! The expensive arithmetic is now done at block level instead of once per
-    ! physical Hamiltonian entry.
-    allocate(p%v(size(qa,2), size(qb,2)))
-    call icgn_project_sparse(p%h, qa, qb, p%v)
-    if (.not. keep) deallocate(p%h)
-  end subroutine project_pair
-
-  ! Write the coupling block p%v of the block pair (a,b) into the reduced CSR h.
-  !   oa, ob     : offsets of the retained states of blocks a and b in the reduced basis
-  !   fmt        : 'F' writes the block and its Hermitian conjugate, 'U' only
-  !                the block (upper), 'L' only the conjugate (lower)
-  !   next(:)    : running insertion position of every reduced row (updated)
-  !   keep_zeros : if .true. exact zeros are written too. Default: zeros are
-  !                skipped. The caller must size the CSR with the same rule
-  !                (caller counts only non-zero entries).
-  ! The number of slots written must match what the caller counted, otherwise
-  ! the tail of M/Mj of a row is left uninitialized.
-  subroutine emit_pair(h,p,oa,ob,fmt,next,keep_zeros)
-    type(CSR),intent(inout)::h
-    type(ICGNPair),intent(in)::p
-    integer,intent(in)::oa,ob
-    character(1),intent(in)::fmt
-    integer,intent(inout)::next(:)
-    logical,intent(in),optional::keep_zeros
-    integer::i,j,k
-    logical::skip_zero
-    ! CSR sizing counts only non-zero entries, so
-    ! zeros are skipped by default; with keep_zeros the caller must have
-    ! sized the CSR from the dense blocks, otherwise the unfilled slots of
-    ! M/Mj stay uninitialized.
-    skip_zero = .true.
-    if (present(keep_zeros)) skip_zero = .not. keep_zeros
-    if(fmt/='L') then
-       do i=1,size(p%v,1); do j=1,size(p%v,2)
-          if (skip_zero .and. abs(p%v(i,j)) == 0.0_dp) cycle
-          k=next(oa+i-1); h%Mj(k)=ob+j-1; h%M(k)=p%v(i,j); next(oa+i-1)=k+1
-       end do; end do
-    end if
-    if(fmt=='F' .or. fmt=='L') then
-       do j=1,size(p%v,2); do i=1,size(p%v,1)
-          if (skip_zero .and. abs(p%v(i,j)) == 0.0_dp) cycle
-          k=next(ob+j-1); h%Mj(k)=oa+i-1; h%M(k)=conjg(p%v(i,j)); next(ob+j-1)=k+1
-       end do; end do
-    end if
-  end subroutine emit_pair
-
-  ! Sort column indices of every CSR row into strictly ascending order
-  ! (insertion sort; rows are short).  Required so the reduced operator
-  ! always matches the documented output convention regardless of path.
-  subroutine icgn_sort_csr_rows(h)
-    type(CSR), intent(inout) :: h
-    integer :: r, i, j, key_j
-    complex(dp) :: key_m
-    do r = 1, h%nrow
-       do i = h%Mi(r)+1, h%Mi(r+1)-1
-          key_j = h%Mj(i); key_m = h%M(i)
-          j = i - 1
-          do while (j >= h%Mi(r) .and. h%Mj(j) > key_j)
-             h%Mj(j+1) = h%Mj(j); h%M(j+1) = h%M(j)
-             j = j - 1
-          end do
-          h%Mj(j+1) = key_j; h%M(j+1) = key_m
-       end do
-    end do
-  end subroutine icgn_sort_csr_rows
-
-  subroutine destroy_pairs(pairs)
-    type(ICGNPair),allocatable,intent(inout)::pairs(:)
-    integer::i,nv,nh,nt
-    if(.not.allocated(pairs)) then
-       ! write(*,'(A)') '[ICGN-TRACE] destroy_pairs: not allocated'
-       return
-    end if
-    nv=0; nh=0; nt=0
-    do i=1,size(pairs)
-       if(associated(pairs(i)%v)) nv=nv+1
-       if(associated(pairs(i)%h)) nh=nh+1
-       if(associated(pairs(i)%t)) nt=nt+1
-    end do
-    ! write(*,'(A,I0,A,I0,A,I0,A,I0)') '[ICGN-TRACE] destroy_pairs count=', size(pairs), &
-         ! ' v=', nv, ' h=', nh, ' t=', nt
-    do i=1,size(pairs)
-       if(associated(pairs(i)%v)) deallocate(pairs(i)%v)
-       if(associated(pairs(i)%h)) deallocate(pairs(i)%h)
-       if(associated(pairs(i)%t)) deallocate(pairs(i)%t)
-       if(associated(pairs(i)%g)) deallocate(pairs(i)%g)
-    end do
-    deallocate(pairs)
-    ! write(*,'(A)') '[ICGN-TRACE] destroy_pairs DONE'
-  end subroutine destroy_pairs
-
-  ! Free full-block eigensystems left on upt%icgn_blocks after a failed prepare
-  ! stage (diagonalize / collect / build).  Safe to call when blocks are absent.
-  subroutine icgn_free_block_eigensystems(upt)
-    type(OUPT), intent(inout) :: upt
-    integer :: i
-    if (.not. associated(upt%icgn_blocks)) return
-    do i = 1, size(upt%icgn_blocks)
-       if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
-       if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
-       nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
-    end do
-  end subroutine icgn_free_block_eigensystems
-
-
-  ! ==========================================================================
-  ! ICGN prepare / configure
   !
   ! icgn_prepare: partition atoms → diagonalize blocks → select retained
   ! states (core + buffer + optional level-1 outers) → project couplings →
@@ -711,6 +457,30 @@ contains
     pi_converged = upt%icgn_pi_converged
   end subroutine icgn_get_info
 
+  subroutine icgn_get_active(upt, active_ham, active_u, active)
+      type(OUPT), intent(in), target :: upt
+    type(CSR), pointer, intent(out) :: active_ham, active_u
+    logical, intent(out) :: active
+    active = .false.
+    nullify(active_ham, active_u)
+    if (icgn_active(upt)) then
+       active_ham => upt%icgn_ham
+       active_u => upt%icgn_U
+       active = .true.
+    end if
+  end subroutine icgn_get_active
+
+  subroutine icgn_lift_active(upt, reduced, physical)
+    type(OUPT), intent(in) :: upt
+    complex(dp), intent(in) :: reduced(:,:)
+    complex(dp), intent(out) :: physical(:,:)
+    if (icgn_active(upt)) then
+       call icgn_lift(upt, reduced, physical)
+    else
+       physical = reduced
+    end if
+  end subroutine icgn_lift_active
+
   subroutine icgn_clear(upt)
     type(OUPT), intent(inout) :: upt
     integer :: i
@@ -747,7 +517,6 @@ contains
     ! write(*,'(A)') '[ICGN-TRACE] clear EXIT'
   end subroutine icgn_clear
 
-
   ! ---------------------------------------------------------------------------
   ! icgn_prepare: build the reduced operator and optional Neumann correction.
   ! pairs hold inter-block couplings (physical h and/or projected v/g) reused
@@ -762,7 +531,7 @@ contains
 
     integer :: n, na, i, j, k, p, status, nedge, maxedge
     integer :: r, c, br, bc, npair, total_ret, pos
-    integer, allocatable :: atom_of(:), local_of(:), label(:), row_of(:)
+    integer, allocatable :: atom_of(:), label(:), row_of(:)
     integer, allocatable :: counts(:), cursor(:), offsets(:), bsize(:)
     integer, allocatable :: blk_of(:), ierr_blk(:)
     integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
@@ -818,7 +587,7 @@ contains
 
     ! ---- Build atom→orbital mapping (identical to icgn_prepare) ------------
     ! write(*,'(A,I0,A,I0)') '[ICGN-TRACE] prepare before mapping allocate n=', n, ' na=', na
-    allocate(atom_of(n), local_of(n), offsets(na+1), bsize(na))
+    allocate(atom_of(n), offsets(na+1), bsize(na))
     ! write(*,'(A)') '[ICGN-TRACE] prepare after mapping allocate'
     pos = 1
     ! write(*,'(A)') '[ICGN-TRACE] prepare before mapping loop'
@@ -826,7 +595,7 @@ contains
        offsets(i) = pos
        bsize(i)   = upt%n_spin * upt%basis%n_st(i)
        do j = 1, bsize(i)
-          atom_of(pos) = i; local_of(pos) = j; pos = pos + 1
+          atom_of(pos) = i; pos = pos + 1
        end do
     end do
     ! write(*,'(A,I0)') '[ICGN-TRACE] prepare after mapping loop pos=', pos
@@ -1231,139 +1000,412 @@ contains
          ! associated(upt%icgn_U%Mi), ' nrow=', upt%icgn_U%nrow, ' nnz=', upt%icgn_U%nnz
     ! write(*,'(A,L1,A,L1)') '[ICGN-TRACE] prepare final original snapshot ham M/Mi=', associated(icgn_original_ham%M), '/', &
          ! associated(icgn_original_ham%Mi)
-    deallocate(atom_of, local_of, offsets, bsize, label, row_of)
+    deallocate(atom_of, offsets, bsize, label, row_of)
     deallocate(counts, edge_weight, xadj, adjncy, adjwgt, vwgt, part, cursor)
     ! write(*,'(A)') '[ICGN-TRACE] prepare EXIT cleanup done'
 
   end subroutine icgn_prepare
 
-   ! Statistics/progress message: printed only when ICGN_LOG_STATS is .true.
-   ! (disabled by default so that a normal run is not flooded with ICGN details).
-   subroutine icgn_log_progress(upt, message)
-      type(OUPT), intent(in) :: upt
-      character(*), intent(in) :: message
-      if (ICGN_LOG_STATS) call icgn_log_important(upt, message)
-   end subroutine icgn_log_progress
-
-   ! Message that is always forwarded to the host application log (through the
-   ! C++ callback upt_log_message): summaries, fall-backs, diagnostics.
-   subroutine icgn_log_important(upt, message)
-      type(OUPT), intent(in) :: upt
-      character(*), intent(in) :: message
-      character(kind=c_char), allocatable :: c_message(:)
-      integer :: i, message_length
-
-      message_length = len_trim(message)
-      allocate(c_message(max(1, message_length)))
-      do i = 1, message_length
-          c_message(i) = message(i:i)
-      end do
-      call upt_log_message(c_message, int(message_length, c_int))
-      deallocate(c_message)
-   end subroutine icgn_log_important
-
-   subroutine icgn_log_block(upt, mode, block_number, block_dimension, phase)
-      type(OUPT), intent(in) :: upt
-      character(*), intent(in) :: mode, phase
-      integer, intent(in) :: block_number, block_dimension
-      character(len=256) :: message
-      write(message,'(a,a,a,i0,a,i0)') 'mode=', trim(mode), ', block=', block_number, &
-             ', dimension=', block_dimension
-      message = trim(message)//', phase='//trim(phase)
-      call icgn_log_progress(upt, message)
-   end subroutine icgn_log_block
-
-   subroutine icgn_log_timing(upt, phase, seconds)
-      type(OUPT), intent(in) :: upt
-      character(*), intent(in) :: phase
-      real(dp), intent(in) :: seconds
-      integer(kind=8) :: total_seconds, hours, minutes, secs
-      character(len=256) :: message
-
-      total_seconds = int(max(0.0_dp, seconds), kind=8)
-      hours = total_seconds / 3600_8
-      minutes = mod(total_seconds, 3600_8) / 60_8
-      secs = mod(total_seconds, 60_8)
-      write(message,'(a,a,a,i0,a,i2.2,a,i2.2,a)') 'mode=icgn timing: ', trim(phase), &
-           ' = ', hours, 'h ', minutes, 'm ', secs, 's'
-      call icgn_log_progress(upt, trim(message))
-   end subroutine icgn_log_timing
-
-   ! One-shot summary of a finished preparation: original -> reduced dimension,
-   ! number of blocks, cut fraction and (ICGN) Neumann-series norm estimate.
-   ! This is the only ICGN statistic shown by default.
-   subroutine icgn_log_info(upt, mode, original_dim, reduced_dim, &
-     nblocks, cut_fraction, sigma_t2, pi_converged, has_norm)
+  ! Lift eigenvectors from reduced basis back to orbital (physical) space:
+  ! physical(rows_of_block,:) = q_block * reduced(offset : offset+nret-1, :).
+  ! One zgemm per block (same helper used elsewhere in this module).
+  subroutine icgn_lift(upt, reduced, physical)
     type(OUPT), intent(in) :: upt
-    character(*), intent(in) :: mode
-    integer, intent(in) :: original_dim, reduced_dim, nblocks
-    real(dp), intent(in) :: cut_fraction, sigma_t2
-    logical, intent(in) :: pi_converged, has_norm
-      character(len=512) :: line
+    complex(dp), intent(in) :: reduced(:,:)
+    complex(dp), intent(out) :: physical(:,:)
+    integer :: i, j, off, nn, nr, nev
+    complex(dp), allocatable :: tmp(:,:)
+    physical = (0.0_dp, 0.0_dp)
+    off = 1
+    nev = size(reduced, 2)
+    do i = 1, size(upt%icgn_blocks)
+       nr = upt%icgn_blocks(i)%nret
+       if (nr > 0) then
+          nn = upt%icgn_blocks(i)%nrow
+          allocate(tmp(nn, nev))
+          call icgn_zgemm('N', upt%icgn_blocks(i)%q, reduced(off:off+nr-1, :), tmp)
+          do j = 1, nn
+             physical(upt%icgn_blocks(i)%rows(j), :) = tmp(j, :)
+          end do
+          deallocate(tmp)
+       end if
+       off = off + nr
+    end do
+  end subroutine icgn_lift
 
-      write(line,'(a,a,a,i0,a,i0,a,i0,a,f8.4)') 'mode=', trim(mode), &
-        ', dimension=', original_dim, ' -> ', reduced_dim, ', blocks=', nblocks, &
-        ', retained fraction=', real(reduced_dim,dp)/max(1.0_dp,real(original_dim,dp))
-      call icgn_log_important(upt, trim(line))
-      write(line,'(a,f8.4)') 'cut fraction=', cut_fraction
-      call icgn_log_important(upt, trim(line))
-   if (has_norm) then
-         write(line,'(a,f12.6,a,l1)') 'Neumann norm=', sigma_t2, &
-         ', power iteration converged=', pi_converged
-         call icgn_log_important(upt, trim(line))
+
+! ===========================================================================
+! SECTION B — Prepare helpers (partition, diagonalize, pairs, H_red)
+! ===========================================================================
+
+  ! Resolve upt%icgn_num_blocks: 0 => auto heuristic; always clamp to [1, na].
+  ! Auto aims for ~target_orb orbitals per block (balance diag cost ~ N^3/B^2
+  ! against parallelism) and prefers B >= thread budget so outer parallel-do
+  ! over blocks can fill the CPUs.
+  subroutine icgn_resolve_num_blocks(upt, na, n_orb)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: na, n_orb
+    integer :: nb, T, requested
+    integer, parameter :: target_orb = 200
+    requested = upt%icgn_num_blocks
+    if (requested == 0) then
+       T = icgn_thread_budget()
+       nb = max(1, (max(1, n_orb) + target_orb - 1) / target_orb)  ! ceil(n_orb/target)
+       nb = max(nb, T)
+       write(*,'(a,i0,a,i0,a,i0,a,i0,a)') &
+            '(icgn) auto num_blocks=', nb, ' (n_orb=', n_orb, &
+            ', n_atoms=', na, ', threads=', T, ')'
+    else
+       nb = requested
     end if
-  end subroutine icgn_log_info
+    if (nb > na) then
+       write(*,'(a,i0,a,i0,a)') &
+            '(icgn) WARNING: num_blocks=', nb, ' exceeds n_atoms=', na, &
+            ' — falling back to num_blocks = n_atoms'
+       nb = na
+    end if
+    if (nb < 1) nb = 1
+    upt%icgn_num_blocks = nb
+  end subroutine icgn_resolve_num_blocks
 
-  ! ---------------------------------------------------------------------------
-  ! OpenMP helpers for the ICGN preparation stages.
+  ! Helper: grow integer array
+
+  ! ============================================================================
+  ! icgn_graph_partition: connectivity-aware fallback partition when METIS is
+  ! unavailable.
   !
-  ! Thread budget = omp_get_max_threads() (already divided by the number of MPI
-  ! processes in uptight.F90; under SLURM it follows OMP_NUM_THREADS /
-  ! --cpus-per-task / the cpuset).  The optional environment variable
-  ! UPT_CG_THREADS can only LOWER it (UPT_CG_THREADS=1 disables the outer
-  ! parallelism, i.e. recovers the old serial-outer behaviour).  Inside an
-  ! already-parallel region the budget is 1.  Without OpenMP it is always 1.
-  ! ---------------------------------------------------------------------------
-  ! Stable counting sort: groups the indices 1..n by key(i) in 1..nkeys.
-  ! Entries of group g are ord(ptr(g):ptr(g+1)-1), in ascending index order.
-  subroutine icgn_group_by(key, n, nkeys, ptr, ord)
-    integer, intent(in) :: key(:), n, nkeys
-    integer, allocatable, intent(out) :: ptr(:), ord(:)
-    integer, allocatable :: fill(:)
-    integer :: i, g
-    allocate(ptr(nkeys+1), ord(max(1,n)), fill(nkeys))
-    ptr = 0
-    do i = 1, n
-       ptr(key(i)+1) = ptr(key(i)+1) + 1
-    end do
-    ptr(1) = 1
-    do g = 1, nkeys
-       ptr(g+1) = ptr(g+1) + ptr(g)
-    end do
-    fill = ptr(1:nkeys)
-    do i = 1, n
-       g = key(i); ord(fill(g)) = i; fill(g) = fill(g) + 1
-    end do
-    deallocate(fill)
-  end subroutine icgn_group_by
+  ! Algorithm: weighted greedy graph growing (BFS-seeded, priority-queue-free),
+  ! with dynamic target rebalancing and best-fit neighbour selection.
+  ! Guarantees:
+  !   (1) Every atom in a block is reachable from the block seed via bonds —
+  !       so no block is a disjoint set of atoms (a block may still consist of
+  !       several BFS components if the seed's own component runs out before
+  !       reaching the target weight; each such component is itself internally
+  !       connected).
+  !   (2) All orbitals of an atom go to the same block (works at the atom level,
+  !       so the orbital → block mapping is done after by the caller).
+  !   (3) Balance: after each block is closed, the target weight for remaining
+  !       blocks is recomputed from the remaining unassigned weight, so any
+  !       overshoot/undershoot in one block is spread over the rest instead of
+  !       accumulating into the last block.
+  !
+  ! Inputs:
+  !   na         — number of atoms
+  !   nblocks    — desired number of blocks
+  !   vwgt(na)   — vertex weight of each atom (= number of orbitals, bsize(i))
+  !   xadj(na+1) — CSR row pointers of atom adjacency graph (0-based)
+  !   adjncy(*)  — CSR column indices (0-based atom indices)
+  !   adjwgt(*)  — CSR edge weights (integer, Hamiltonian coupling strength)
+  !
+  ! Output:
+  !   part(na)   — block index (0-based, in [0, nblocks-1]) for each atom
+  ! ============================================================================
+  subroutine icgn_graph_partition(na, nblocks, vwgt, xadj, adjncy, adjwgt, part)
+    use, intrinsic :: iso_c_binding, only : c_int
+    integer,            intent(in)  :: na, nblocks
+    integer(c_int),     intent(in)  :: vwgt(na)
+    integer(c_int),     intent(in)  :: xadj(na+1), adjncy(*), adjwgt(*)
+    integer(c_int),     intent(out) :: part(na)
 
-  ! C = op(A) * B with BLAS zgemm (opa = 'N' or 'C').  Much faster than the
-  ! Fortran intrinsic matmul and thread-safe (runs single-threaded inside our
-  ! OpenMP regions because nesting is flattened, threaded when called serially).
-  subroutine icgn_zgemm(opa, A, B, C)
-    character(len=1), intent(in) :: opa
-    complex(dp), intent(in) :: A(:,:), B(:,:)
-    complex(dp), intent(inout) :: C(:,:)
-    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp), czero = (0.0_dp, 0.0_dp)
-    integer :: m, n, kk
-    external :: zgemm
-    m = size(C,1); n = size(C,2)
-    if (m == 0 .or. n == 0) return
-    if (opa == 'N') then; kk = size(A,2); else; kk = size(A,1); end if
-    if (kk == 0) then; C = czero; return; end if
-    call zgemm(opa, 'N', m, n, kk, cone, A, max(1,size(A,1)), B, max(1,size(B,1)), &
-         czero, C, max(1,size(C,1)))
-  end subroutine icgn_zgemm
+    ! --- local ---
+    integer :: i, j, atom, nb_atom, blk, seed
+    integer :: target_wt, cur_wt, total_wt, remaining_wt, remaining_blocks
+    integer :: qhead, qtail, qsize
+    integer, allocatable :: queue(:)     ! BFS queue (atom indices, 1-based)
+    logical, allocatable :: visited(:)  ! atom already assigned?
+    integer :: best_deg, deg, adj_start, adj_end
+    integer :: n_unvisited
+    integer :: best_fit_atom, best_fit_wt, best_fit_gap
+    logical :: found_fit
+
+    ! ----- compute total weight -----
+    total_wt = 0
+    do i = 1, na
+       total_wt = total_wt + int(vwgt(i))
+    end do
+
+    allocate(visited(na), queue(na))
+    visited = .false.
+    part    = int(nblocks - 1, c_int)   ! default: last block (catches unvisited atoms)
+
+    remaining_wt     = total_wt
+    remaining_blocks = nblocks
+    n_unvisited      = na
+
+    do blk = 0, nblocks - 2    ! assign blocks 0 .. nblocks-2; last gets remainder
+
+       if (n_unvisited == 0) exit
+
+       ! ---- recompute target dynamically from what's left, so overshoot/
+       ! undershoot in earlier blocks doesn't accumulate into later ones ----
+       target_wt = (remaining_wt + remaining_blocks - 1) / remaining_blocks   ! ceiling
+
+       cur_wt = 0
+       qhead  = 1
+       qtail  = 0
+       qsize  = 0
+
+       ! ---- grow the block, possibly across several connected components ----
+       do while (cur_wt < target_wt .and. n_unvisited > 0)
+
+          ! ---- need a new BFS seed (either first seed of this block, or a
+          ! new component because the previous one ran dry) ----
+          if (qhead > qtail) then
+             seed     = -1
+             best_deg = -1
+             do i = 1, na
+                if (visited(i)) cycle
+                deg = int(xadj(i+1) - xadj(i))   ! number of inter-atom bonds
+                if (deg > best_deg) then
+                   best_deg = deg
+                   seed     = i
+                end if
+             end do
+             if (seed == -1) exit    ! no unvisited atoms left (shouldn't happen, n_unvisited>0)
+
+             visited(seed) = .true.
+             part(seed)    = int(blk, c_int)
+             cur_wt        = cur_wt + int(vwgt(seed))
+             n_unvisited   = n_unvisited - 1
+             qtail         = qtail + 1
+             queue(qtail)  = seed
+             if (cur_wt >= target_wt) exit
+          end if
+
+          atom = queue(qhead); qhead = qhead + 1
+
+          adj_start = int(xadj(atom)) + 1    ! convert 0-based xadj to 1-based
+          adj_end   = int(xadj(atom+1))
+
+          ! Repeatedly pick the best-fit unvisited neighbour of this atom:
+          ! prefer the one whose weight fills up to target_wt without
+          ! exceeding it (minimises overshoot); if every remaining neighbour
+          ! would overshoot, take the smallest one (minimises the overshoot
+          ! amount rather than picking arbitrarily / by edge weight alone).
+          ! Cost: O(degree^2) per atom — degree is small for tight-binding.
+          do while (cur_wt < target_wt)
+             found_fit     = .false.
+             best_fit_atom = -1
+             best_fit_wt   = -1
+             best_fit_gap  = huge(0)   ! smallest (target - cur - w) >= 0 seen so far
+             do j = adj_start, adj_end
+                i = int(adjncy(j)) + 1    ! 0-based → 1-based
+                if (.not. visited(i)) then
+                   block
+                     integer :: wv, gap
+                     wv = int(vwgt(i))
+                     gap = target_wt - cur_wt - wv
+                     if (gap >= 0) then
+                        ! fits without overshoot: keep the tightest fit
+                        if (.not. found_fit .or. gap < best_fit_gap) then
+                           found_fit     = .true.
+                           best_fit_gap  = gap
+                           best_fit_atom = i
+                           best_fit_wt   = wv
+                        end if
+                     else if (.not. found_fit) then
+                        ! would overshoot: among these, keep the smallest atom
+                        ! (minimises how far over target_wt we go)
+                        if (best_fit_atom == -1 .or. wv < best_fit_wt) then
+                           best_fit_atom = i
+                           best_fit_wt   = wv
+                        end if
+                     end if
+                   end block
+                end if
+             end do
+             if (best_fit_atom == -1) exit     ! no more unvisited neighbours of this atom
+
+             nb_atom          = best_fit_atom
+             visited(nb_atom) = .true.
+             part(nb_atom)    = int(blk, c_int)
+             cur_wt           = cur_wt + int(vwgt(nb_atom))
+             n_unvisited      = n_unvisited - 1
+             qtail            = qtail + 1
+             queue(qtail)     = nb_atom
+          end do
+
+       end do  ! grow block (possibly multi-component)
+
+       remaining_wt     = remaining_wt - cur_wt
+       remaining_blocks = remaining_blocks - 1
+
+    end do  ! blk loop
+
+    ! ---- any unvisited atom (leftover / disconnected remainder) → last block ----
+    ! (part already initialised to nblocks-1)
+
+    deallocate(visited, queue)
+  end subroutine icgn_graph_partition
+
+  ! Diagonalize block ib of icgn_blocks.  Thread-safe for distinct ib: it reads
+  ! upt%ham and writes only upt%icgn_blocks(ib).  local(r) = position of row r
+  ! inside its own block, blk_of(r) = block that owns row r (both cover all rows).
+  subroutine icgn_diagonalize_block(upt, ib, local, blk_of, ierr)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: ib, local(:), blk_of(:)
+    integer, intent(out) :: ierr
+    integer :: nn, k, r, c, jr, m, j
+    complex(dp), allocatable :: h(:,:), z(:,:)
+    real(dp), allocatable :: w(:)
+    real(dp) :: vl, vu, margin
+    logical :: fast_path
+    ierr = 0; nn = upt%icgn_blocks(ib)%nrow
+    if (nn == 0) then; upt%icgn_blocks(ib)%nret = 0; return; end if
+    allocate(h(nn,nn), w(nn)); h = (0.0_dp, 0.0_dp)
+    do jr = 1, nn
+       r = upt%icgn_blocks(ib)%rows(jr)
+       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+          c = upt%ham%Mj(k)
+          if (blk_of(c) /= ib) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          h(local(r), local(c)) = upt%ham%M(k)
+          if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
+       end do
+    end do
+
+    ! Fast path (no outer, no Neumann): only core+buffer states are kept later,
+    ! so request that window from ZHEEVR. Outer / Neumann still need the full
+    ! spectrum (discarded states enter P-Q and Q-Q couplings).
+    fast_path = (upt%icgn_add_core_outers == 0 .and. upt%icgn_selfenergy_order < 0)
+    if (fast_path) then
+       vl = upt%icgn_core_emin - upt%icgn_bottom_buffer
+       vu = upt%icgn_core_emax + upt%icgn_top_buffer
+       ! ZHEEVR returns eigenvalues in the half-open interval (VL, VU]; expand
+       ! slightly so states exactly on the closed keep_mask bounds are included.
+       margin = max(1.0e-10_dp, 1.0e-12_dp * max(1.0_dp, abs(vl), abs(vu)))
+       vl = vl - margin
+       vu = vu + margin
+       allocate(z(nn, nn))
+       call dense_eigh_window(h, vl, vu, w, z, m, ierr)
+       if (ierr /= 0) then
+          ! Robust fallback: full ZHEEVD then same keep_mask filter as before.
+          h = (0.0_dp, 0.0_dp)
+          do jr = 1, nn
+             r = upt%icgn_blocks(ib)%rows(jr)
+             do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+                c = upt%ham%Mj(k)
+                if (blk_of(c) /= ib) cycle
+                if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+                h(local(r), local(c)) = upt%ham%M(k)
+                if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
+             end do
+          end do
+          call coarse_eigh(h, w, ierr)
+          if (ierr /= 0) then
+             deallocate(h, w, z); return
+          end if
+          allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
+          upt%icgn_blocks(ib)%evals_full = w
+          upt%icgn_blocks(ib)%S_full     = h
+          deallocate(h, w, z)
+          return
+       end if
+       ! Store only the m window states as columns 1:m; remaining evals sit
+       ! outside the keep window so the existing keep_mask logic is unchanged.
+       allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
+       upt%icgn_blocks(ib)%evals_full = vu + 1.0_dp
+       upt%icgn_blocks(ib)%S_full     = (0.0_dp, 0.0_dp)
+       do j = 1, m
+          upt%icgn_blocks(ib)%evals_full(j) = w(j)
+          upt%icgn_blocks(ib)%S_full(:, j)  = z(:, j)
+       end do
+       deallocate(h, w, z)
+    else
+       call coarse_eigh(h, w, ierr)
+       if (ierr /= 0) then
+          deallocate(h, w); return
+       end if
+       allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
+       upt%icgn_blocks(ib)%evals_full = w
+       upt%icgn_blocks(ib)%S_full     = h
+       deallocate(h, w)
+    end if
+  end subroutine icgn_diagonalize_block
+
+  ! Collect dense physical block couplings H_ab for every block pair that has
+  ! at least one inter-block edge.  Allocates pairs to the exact pair count
+  ! (no nb x nb map, no nb*(nb-1)/2).  Candidates collected from CSR, then
+  ! sort+unique; dense h filled in parallel over pairs.
+  subroutine icgn_collect_pairs(upt, atom_of, label, local, pairs, npair, ierr)
+    type(OUPT), intent(in) :: upt
+    integer, intent(in) :: atom_of(:), label(:), local(:)
+    type(ICGNPair), allocatable, intent(inout) :: pairs(:)
+    integer, intent(out) :: npair, ierr
+    integer :: r, k, c, ia, ib, slot, ne, e, m, i, nth, saved_levels, nc
+    integer, allocatable :: cand_a(:), cand_b(:), e_slot(:), e_row(:), e_k(:), e_ord(:), p_start(:), p_fill(:)
+    ierr = 0; npair = 0
+    allocate(cand_a(max(1,upt%ham%nnz)), cand_b(max(1,upt%ham%nnz)))
+    nc = 0
+    ! Pass 1: collect every inter-block edge key (duplicates allowed).
+    do r = 1, upt%ham%nrow
+       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+          c = upt%ham%Mj(k)
+          ia = label(atom_of(r)); ib = label(atom_of(c))
+          if (ia == ib) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
+          nc = nc + 1
+          cand_a(nc) = min(ia, ib); cand_b(nc) = max(ia, ib)
+       end do
+    end do
+    call icgn_sort_pairs(cand_a, cand_b, nc)
+    call icgn_unique_pairs(cand_a, cand_b, nc, npair)
+    if (allocated(pairs)) call destroy_pairs(pairs)
+    allocate(pairs(max(1, npair)))
+    do i = 1, npair
+       pairs(i)%a = cand_a(i); pairs(i)%b = cand_b(i)
+    end do
+    ! Pass 2: bucket CSR entries per pair (binary search for slot).
+    allocate(e_slot(max(1,upt%ham%nnz)), e_row(max(1,upt%ham%nnz)), e_k(max(1,upt%ham%nnz)))
+    ne = 0
+    do r = 1, upt%ham%nrow
+       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+          c = upt%ham%Mj(k)
+          ia = label(atom_of(r)); ib = label(atom_of(c))
+          if (ia == ib) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
+          slot = icgn_find_pair(cand_a, cand_b, npair, min(ia,ib), max(ia,ib))
+          if (slot == 0) cycle
+          ne = ne + 1
+          if (ia < ib) then; e_slot(ne) = slot; else; e_slot(ne) = -slot; end if
+          e_row(ne) = r; e_k(ne) = k
+       end do
+    end do
+    deallocate(cand_a, cand_b)
+    allocate(p_start(npair+1), p_fill(max(1,npair)), e_ord(max(1,ne)))
+    p_start = 0
+    do e = 1, ne
+       p_start(abs(e_slot(e))+1) = p_start(abs(e_slot(e))+1) + 1
+    end do
+    do i = 1, npair
+       p_start(i+1) = p_start(i+1) + p_start(i)
+    end do
+    p_fill(1:npair) = p_start(1:npair)
+    do e = 1, ne
+       i = abs(e_slot(e)); p_fill(i) = p_fill(i) + 1; e_ord(p_fill(i)) = e
+    end do
+    nth = min(icgn_thread_budget(), max(1, npair))
+    call icgn_flatten_nesting(saved_levels)
+    !$omp parallel do default(shared) private(i, m, e, r, c, k) num_threads(nth) &
+    !$omp& schedule(dynamic,1) if(nth > 1)
+    do i = 1, npair
+       allocate(pairs(i)%h(upt%icgn_blocks(pairs(i)%a)%nrow, upt%icgn_blocks(pairs(i)%b)%nrow))
+       pairs(i)%h = (0.0_dp, 0.0_dp)
+       do m = p_start(i)+1, p_start(i+1)
+          e = e_ord(m); r = e_row(e); k = e_k(e); c = upt%ham%Mj(k)
+          if (e_slot(e) > 0) then
+             pairs(i)%h(local(r),local(c)) = pairs(i)%h(local(r),local(c)) + upt%ham%M(k)
+          else
+             pairs(i)%h(local(c),local(r)) = pairs(i)%h(local(c),local(r)) + conjg(upt%ham%M(k))
+          end if
+       end do
+    end do
+    !$omp end parallel do
+    call icgn_restore_nesting(saved_levels)
+    deallocate(e_slot, e_row, e_k, e_ord, p_start, p_fill)
+  end subroutine icgn_collect_pairs
 
   ! Heapsort pairs (pa(i), pb(i)) by (a,b) ascending.  Used to unique inter-block
   ! pairs without a dense nb x nb map.
@@ -1454,169 +1496,67 @@ contains
     end do
   end function icgn_find_pair
 
-  ! Collect dense physical block couplings H_ab for every block pair that has
-  ! at least one inter-block edge.  Allocates pairs to the exact pair count
-  ! (no nb x nb map, no nb*(nb-1)/2).  Candidates collected from CSR, then
-  ! sort+unique; dense h filled in parallel over pairs.
-  subroutine icgn_collect_pairs(upt, atom_of, label, local, pairs, npair, ierr)
-    type(OUPT), intent(in) :: upt
-    integer, intent(in) :: atom_of(:), label(:), local(:)
-    type(ICGNPair), allocatable, intent(inout) :: pairs(:)
-    integer, intent(out) :: npair, ierr
-    integer :: r, k, c, ia, ib, slot, ne, e, m, i, nth, saved_levels, nc
-    integer, allocatable :: cand_a(:), cand_b(:), e_slot(:), e_row(:), e_k(:), e_ord(:), p_start(:), p_fill(:)
-    ierr = 0; npair = 0
-    allocate(cand_a(max(1,upt%ham%nnz)), cand_b(max(1,upt%ham%nnz)))
-    nc = 0
-    ! Pass 1: collect every inter-block edge key (duplicates allowed).
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          ia = label(atom_of(r)); ib = label(atom_of(c))
-          if (ia == ib) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
-          nc = nc + 1
-          cand_a(nc) = min(ia, ib); cand_b(nc) = max(ia, ib)
-       end do
+  ! ---------------------------------------------------------------------------
+  ! OpenMP helpers for the ICGN preparation stages.
+  !
+  ! Thread budget = omp_get_max_threads() (already divided by the number of MPI
+  ! processes in uptight.F90; under SLURM it follows OMP_NUM_THREADS /
+  ! --cpus-per-task / the cpuset).  The optional environment variable
+  ! UPT_CG_THREADS can only LOWER it (UPT_CG_THREADS=1 disables the outer
+  ! parallelism, i.e. recovers the old serial-outer behaviour).  Inside an
+  ! already-parallel region the budget is 1.  Without OpenMP it is always 1.
+  ! ---------------------------------------------------------------------------
+  ! Stable counting sort: groups the indices 1..n by key(i) in 1..nkeys.
+  ! Entries of group g are ord(ptr(g):ptr(g+1)-1), in ascending index order.
+  subroutine icgn_group_by(key, n, nkeys, ptr, ord)
+    integer, intent(in) :: key(:), n, nkeys
+    integer, allocatable, intent(out) :: ptr(:), ord(:)
+    integer, allocatable :: fill(:)
+    integer :: i, g
+    allocate(ptr(nkeys+1), ord(max(1,n)), fill(nkeys))
+    ptr = 0
+    do i = 1, n
+       ptr(key(i)+1) = ptr(key(i)+1) + 1
     end do
-    call icgn_sort_pairs(cand_a, cand_b, nc)
-    call icgn_unique_pairs(cand_a, cand_b, nc, npair)
-    if (allocated(pairs)) call destroy_pairs(pairs)
-    allocate(pairs(max(1, npair)))
-    do i = 1, npair
-       pairs(i)%a = cand_a(i); pairs(i)%b = cand_b(i)
+    ptr(1) = 1
+    do g = 1, nkeys
+       ptr(g+1) = ptr(g+1) + ptr(g)
     end do
-    ! Pass 2: bucket CSR entries per pair (binary search for slot).
-    allocate(e_slot(max(1,upt%ham%nnz)), e_row(max(1,upt%ham%nnz)), e_k(max(1,upt%ham%nnz)))
-    ne = 0
-    do r = 1, upt%ham%nrow
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          ia = label(atom_of(r)); ib = label(atom_of(c))
-          if (ia == ib) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          if (upt%icgn_blocks(ia)%nrow == 0 .or. upt%icgn_blocks(ib)%nrow == 0) cycle
-          slot = icgn_find_pair(cand_a, cand_b, npair, min(ia,ib), max(ia,ib))
-          if (slot == 0) cycle
-          ne = ne + 1
-          if (ia < ib) then; e_slot(ne) = slot; else; e_slot(ne) = -slot; end if
-          e_row(ne) = r; e_k(ne) = k
-       end do
+    fill = ptr(1:nkeys)
+    do i = 1, n
+       g = key(i); ord(fill(g)) = i; fill(g) = fill(g) + 1
     end do
-    deallocate(cand_a, cand_b)
-    allocate(p_start(npair+1), p_fill(max(1,npair)), e_ord(max(1,ne)))
-    p_start = 0
-    do e = 1, ne
-       p_start(abs(e_slot(e))+1) = p_start(abs(e_slot(e))+1) + 1
-    end do
-    do i = 1, npair
-       p_start(i+1) = p_start(i+1) + p_start(i)
-    end do
-    p_fill(1:npair) = p_start(1:npair)
-    do e = 1, ne
-       i = abs(e_slot(e)); p_fill(i) = p_fill(i) + 1; e_ord(p_fill(i)) = e
-    end do
-    nth = min(icgn_thread_budget(), max(1, npair))
-    call icgn_flatten_nesting(saved_levels)
-    !$omp parallel do default(shared) private(i, m, e, r, c, k) num_threads(nth) &
-    !$omp& schedule(dynamic,1) if(nth > 1)
-    do i = 1, npair
-       allocate(pairs(i)%h(upt%icgn_blocks(pairs(i)%a)%nrow, upt%icgn_blocks(pairs(i)%b)%nrow))
-       pairs(i)%h = (0.0_dp, 0.0_dp)
-       do m = p_start(i)+1, p_start(i+1)
-          e = e_ord(m); r = e_row(e); k = e_k(e); c = upt%ham%Mj(k)
-          if (e_slot(e) > 0) then
-             pairs(i)%h(local(r),local(c)) = pairs(i)%h(local(r),local(c)) + upt%ham%M(k)
-          else
-             pairs(i)%h(local(c),local(r)) = pairs(i)%h(local(c),local(r)) + conjg(upt%ham%M(k))
-          end if
-       end do
-    end do
-    !$omp end parallel do
-    call icgn_restore_nesting(saved_levels)
-    deallocate(e_slot, e_row, e_k, e_ord, p_start, p_fill)
-  end subroutine icgn_collect_pairs
+    deallocate(fill)
+  end subroutine icgn_group_by
 
-  ! Printed once (rank 0 only) when more threads are requested than the CPUs
-  ! this process is allowed to use.
-  subroutine icgn_warn_threads(req, avail)
-    integer, intent(in) :: req, avail
-    character(len=16) :: rk
-    integer :: ln, ios, rank
-    call get_environment_variable('OMPI_COMM_WORLD_RANK', rk, length=ln, status=ios)
-    if (ios == 0 .and. ln > 0) then
-       read(rk(1:ln), *, iostat=ios) rank
-       if (ios == 0 .and. rank /= 0) return
-    end if
-    write(*,'(a,i0,a,i0,a)') '  (icgn) WARNING: ', req, &
-         ' OpenMP threads requested (OMP_NUM_THREADS / --cpus-per-task) but this process may use only ', &
-         avail, ' CPU(s).'
-    write(*,'(a,i0,a)') '  (icgn) Falling back to ', avail, &
-         ' thread(s) for coarse-graining: more threads than CPUs only slows the run down.'
-    write(*,'(a)') '  (icgn) Choose OMP_NUM_THREADS (or --cpus-per-task) <= the CPUs available to each MPI rank.'
-  end subroutine icgn_warn_threads
+  subroutine project_pair(p, qa, qb, keep_h)
+    type(ICGNPair), intent(inout) :: p
+    complex(dp), intent(in) :: qa(:,:), qb(:,:)
+    logical, intent(in), optional :: keep_h
+    complex(dp), allocatable :: tmp(:,:)
+    logical :: keep
 
-  ! True when env UPT_CG_TIMING is set (any non-empty value).
-  function icgn_timing_on() result(on)
-    logical :: on
-    character(len=8) :: s
-    integer :: ln, ios
-    call get_environment_variable('UPT_CG_TIMING', s, length=ln, status=ios)
-    on = (ln > 0 .and. (ios == 0 .or. ios == -1))
-  end function icgn_timing_on
+    ! Fortran does not short-circuit .or./.and., so an absent optional argument
+    ! must never appear in the same expression as its use.
+    keep = .false.
+    if (present(keep_h)) keep = keep_h
 
-  ! Number of OUTER threads for a loop over nwork independent items.
-  ! default_nth is the automatic choice of the caller.  Env UPT_CG_OUTER:
-  !   0 -> no outer parallelism (items one after another; threaded BLAS/LAPACK
-  !        inside uses the whole thread budget)
-  !   1 -> always parallel over items (BLAS single-threaded inside)
-  !   unset/other -> default_nth, except that LARGE items (dim >= 512) are run
-  !        one after another so the threaded BLAS/LAPACK works on each of them
-  !        (measured: blocks of 1280 are faster this way, blocks of 160 the other way)
-  function icgn_outer_threads(nwork, default_nth, dim) result(nth)
-    integer, intent(in) :: nwork, default_nth
-    integer, intent(in), optional :: dim
-    integer :: nth
-    character(len=8) :: s
-    integer :: ln, ios
-    integer, parameter :: big_dim = 512
-    nth = default_nth
-    call get_environment_variable('UPT_CG_OUTER', s, length=ln, status=ios)
-    if (ios == 0 .and. ln > 0) then
-       if (s(1:1) == '0') then
-          nth = 1
-       else if (s(1:1) == '1') then
-          nth = min(icgn_thread_budget(), max(1, nwork))
-       else if (present(dim)) then
-          if (dim >= big_dim) nth = 1
-       end if
-    else if (present(dim)) then
-       if (dim >= big_dim) nth = 1
-    end if
-    nth = max(1, nth)
-  end function icgn_outer_threads
+    ! First H_AB * Q_B, then Q_A^H * (H_AB * Q_B).
+    ! The expensive arithmetic is now done at block level instead of once per
+    ! physical Hamiltonian entry.
+    allocate(p%v(size(qa,2), size(qb,2)))
+    call icgn_project_sparse(p%h, qa, qb, p%v)
+    if (.not. keep) deallocate(p%h)
+  end subroutine project_pair
 
-  ! How sparse are the block-block couplings?  Counts the rows/columns of each
-  ! H_ab that contain at least one nonzero (timing diagnostics only).
-  subroutine icgn_report_boundary(pairs, npair)
-    type(ICGNPair), intent(in) :: pairs(:)
-    integer, intent(in) :: npair
-    integer :: i, nr, nc, max_nr, max_nc
-    integer(8) :: sum_nr, sum_nc, sum_ra, sum_cb
-    sum_nr = 0; sum_nc = 0; sum_ra = 0; sum_cb = 0; max_nr = 0; max_nc = 0
-    do i = 1, npair
-       if (.not. associated(pairs(i)%h)) cycle
-       nr = count(any(pairs(i)%h /= (0.0_dp, 0.0_dp), dim=2))
-       nc = count(any(pairs(i)%h /= (0.0_dp, 0.0_dp), dim=1))
-       sum_nr = sum_nr + nr; sum_nc = sum_nc + nc
-       sum_ra = sum_ra + size(pairs(i)%h, 1); sum_cb = sum_cb + size(pairs(i)%h, 2)
-       max_nr = max(max_nr, nr); max_nc = max(max_nc, nc)
-    end do
-    write(*,'(a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0)') '[ICGN-TIME] boundary: npair=', npair, &
-         ' nonzero_rows=', sum_nr, '/', sum_ra, ' nonzero_cols=', sum_nc, '/', sum_cb, &
-         ' max_rows_per_pair=', max_nr, ' max_cols_per_pair=', max_nc
-  end subroutine icgn_report_boundary
+  subroutine project_accumulated_pair_icgn(p, qa)
+    type(ICGNPair), intent(inout) :: p
+    complex(dp), intent(in) :: qa(:,:)
+
+    allocate(p%v(size(qa,2), size(p%t,2)))
+    call icgn_zgemm('C', qa, p%t, p%v)
+    deallocate(p%t)
+  end subroutine project_accumulated_pair_icgn
 
   ! out = qa^H * h * qb, exploiting that the physical block coupling h has only a
   ! few nonzero rows and columns (the atoms next to the interface): only those
@@ -1664,848 +1604,64 @@ contains
     call icgn_zgemm_gen('C', 'N', cone, qas, tmp, czero, out)     ! (nA x nr)(nr x nB)
   end subroutine icgn_project_sparse
 
-  ! C = alpha*op(A)*op(B) + beta*C with BLAS zgemm (op = 'N','T','C').
-  subroutine icgn_zgemm_gen(opa, opb, alpha, A, B, beta, C)
-    character(len=1), intent(in) :: opa, opb
-    complex(dp), intent(in) :: alpha, beta
-    complex(dp), intent(in) :: A(:,:), B(:,:)
-    complex(dp), intent(inout) :: C(:,:)
-    integer :: m, n, kk
-    external :: zgemm
-    m = size(C,1); n = size(C,2)
-    if (m == 0 .or. n == 0) return
-    if (opa == 'N') then; kk = size(A,2); else; kk = size(A,1); end if
-    if (kk == 0) return
-    call zgemm(opa, opb, m, n, kk, alpha, A, max(1,size(A,1)), B, max(1,size(B,1)), &
-         beta, C, max(1,size(C,1)))
-  end subroutine icgn_zgemm_gen
-
-  ! G(P_a, Q_b) of the adjacency entry e (block a, neighbour b)
-  function icgn_qg(qp, nbr_pair, nbr_isA, e) result(p)
-    type(ICGNQPair), intent(in) :: qp(:)
-    integer, intent(in) :: nbr_pair(:), e
-    logical, intent(in) :: nbr_isA(:)
-    complex(dp), pointer :: p(:,:)
-    if (nbr_isA(e)) then
-       p => qp(nbr_pair(e))%gab
-    else
-       p => qp(nbr_pair(e))%gba
+  ! Write the coupling block p%v of the block pair (a,b) into the reduced CSR h.
+  !   oa, ob     : offsets of the retained states of blocks a and b in the reduced basis
+  !   fmt        : 'F' writes the block and its Hermitian conjugate, 'U' only
+  !                the block (upper), 'L' only the conjugate (lower)
+  !   next(:)    : running insertion position of every reduced row (updated)
+  !   keep_zeros : if .true. exact zeros are written too. Default: zeros are
+  !                skipped. The caller must size the CSR with the same rule
+  !                (caller counts only non-zero entries).
+  ! The number of slots written must match what the caller counted, otherwise
+  ! the tail of M/Mj of a row is left uninitialized.
+  subroutine emit_pair(h,p,oa,ob,fmt,next,keep_zeros)
+    type(CSR),intent(inout)::h
+    type(ICGNPair),intent(in)::p
+    integer,intent(in)::oa,ob
+    character(1),intent(in)::fmt
+    integer,intent(inout)::next(:)
+    logical,intent(in),optional::keep_zeros
+    integer::i,j,k
+    logical::skip_zero
+    ! CSR sizing counts only non-zero entries, so
+    ! zeros are skipped by default; with keep_zeros the caller must have
+    ! sized the CSR from the dense blocks, otherwise the unfilled slots of
+    ! M/Mj stay uninitialized.
+    skip_zero = .true.
+    if (present(keep_zeros)) skip_zero = .not. keep_zeros
+    if(fmt/='L') then
+       do i=1,size(p%v,1); do j=1,size(p%v,2)
+          if (skip_zero .and. abs(p%v(i,j)) == 0.0_dp) cycle
+          k=next(oa+i-1); h%Mj(k)=ob+j-1; h%M(k)=p%v(i,j); next(oa+i-1)=k+1
+       end do; end do
     end if
-  end function icgn_qg
-
-  subroutine icgn_build_neumann_blocks(upt, pairs, npair, local_ret_idx, E0, need_w, &
-       bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, npq_nz, nqq_nz)
-    type(OUPT), intent(in) :: upt
-    type(ICGNPair), intent(in) :: pairs(:)
-    integer, intent(in) :: npair, local_ret_idx(:,:)
-    real(dp), intent(in) :: E0
-    logical, intent(in) :: need_w
-    type(ICGNQBlock), allocatable, intent(out) :: bq(:)
-    type(ICGNQPair), allocatable, intent(out) :: qp(:)
-    integer, allocatable, intent(out) :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
-    logical, allocatable, intent(out) :: nbr_isA(:)
-    integer(8), intent(out) :: npq_nz, nqq_nz
-    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
-    real(dp), parameter :: thr = 1.0e-14_dp
-    integer :: nb, b, i, j, k, ia, ib, jq, kq, ra, rb, e, np_a, np_b, nq_a, nq_b
-    integer :: nth, saved_levels, nra, nrb, n_near
-    integer, allocatable :: cnt(:), fillp(:), eA(:), eB(:)
-    complex(dp) :: v
-    complex(dp), pointer :: g(:,:)
-    complex(dp), allocatable :: tmp(:,:)
-    logical :: own_g
-    integer(8) :: nzp, nzq
-    real(dp) :: gap, gap_min
-    character(len=160) :: msg
-
-    nb = upt%icgn_num_blocks
-    ! ---- per-block Q data ----
-    ! Discarded eigenvalues lie outside the core window, so E0 (inside the open
-    ! core) cannot match them exactly; still warn if |E0-E| is tiny (numerical).
-    allocate(bq(nb))
-    n_near = 0
-    gap_min = huge(1.0_dp)
-    do b = 1, nb
-       bq(b)%np = upt%icgn_blocks(b)%nret
-       bq(b)%nq = upt%icgn_blocks(b)%nrow - upt%icgn_blocks(b)%nret
-       allocate(bq(b)%qidx(max(0,bq(b)%nq)), bq(b)%res(max(0,bq(b)%nq)))
-       kq = 0
-       do k = 1, upt%icgn_blocks(b)%nrow
-          if (local_ret_idx(b, k) == 0) then
-             kq = kq + 1
-             bq(b)%qidx(kq) = k
-             gap = E0 - upt%icgn_blocks(b)%evals_full(k)
-             if (abs(gap) < 1.0e-8_dp) then
-                n_near = n_near + 1
-                gap_min = min(gap_min, abs(gap))
-             end if
-             bq(b)%res(kq) = 1.0_dp / gap
-          end if
-       end do
-    end do
-    if (n_near > 0) then
-       write(msg,'(a,i0,a,es12.5)') &
-            'Neumann resolvent: |E0-Eq| < 1e-8 for ', n_near, &
-            ' discarded state(s); min|gap|=', gap_min
-       call icgn_log_important(upt, trim(msg))
+    if(fmt=='F' .or. fmt=='L') then
+       do j=1,size(p%v,2); do i=1,size(p%v,1)
+          if (skip_zero .and. abs(p%v(i,j)) == 0.0_dp) cycle
+          k=next(ob+j-1); h%Mj(k)=oa+i-1; h%M(k)=conjg(p%v(i,j)); next(ob+j-1)=k+1
+       end do; end do
     end if
+  end subroutine emit_pair
 
-    ! ---- adjacency of the block graph (entries of block a: its neighbours) ----
-    allocate(nbr_ptr(nb+1), cnt(nb))
-    cnt = 0
-    do i = 1, npair
-       cnt(pairs(i)%a) = cnt(pairs(i)%a) + 1
-       cnt(pairs(i)%b) = cnt(pairs(i)%b) + 1
-    end do
-    nbr_ptr(1) = 1
-    do b = 1, nb
-       nbr_ptr(b+1) = nbr_ptr(b) + cnt(b)
-    end do
-    allocate(nbr_blk(max(1,2*npair)), nbr_pair(max(1,2*npair)), nbr_isA(max(1,2*npair)), &
-         nbr_rev(max(1,2*npair)), fillp(nb), eA(max(1,npair)), eB(max(1,npair)))
-    fillp = nbr_ptr(1:nb)
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       e = fillp(ia); fillp(ia) = fillp(ia) + 1
-       nbr_blk(e) = ib; nbr_pair(e) = i; nbr_isA(e) = .true.; eA(i) = e
-       e = fillp(ib); fillp(ib) = fillp(ib) + 1
-       nbr_blk(e) = ia; nbr_pair(e) = i; nbr_isA(e) = .false.; eB(i) = e
-    end do
-    do i = 1, npair
-       nbr_rev(eA(i)) = eB(i); nbr_rev(eB(i)) = eA(i)
-    end do
-    deallocate(cnt, fillp, eA, eB)
-
-    ! ---- dense filtered blocks of every pair (independent => parallel) ----
-    allocate(qp(max(1,npair)))
-    nzp = 0; nzq = 0
-    nth = min(icgn_thread_budget(), max(1, npair))
-    call icgn_flatten_nesting(saved_levels)
-    !$omp parallel do default(shared) private(i, ia, ib, jq, kq, k, ra, rb, v, g, tmp, own_g, &
-    !$omp&   np_a, np_b, nq_a, nq_b, nra, nrb) reduction(+:nzp, nzq) num_threads(nth) &
-    !$omp&   schedule(dynamic,1) if(nth > 1)
-    do i = 1, npair
-       ia = pairs(i)%a; ib = pairs(i)%b
-       np_a = bq(ia)%np; nq_a = bq(ia)%nq; np_b = bq(ib)%np; nq_b = bq(ib)%nq
-       nra = upt%icgn_blocks(ia)%nrow; nrb = upt%icgn_blocks(ib)%nrow
-       own_g = .false.
-       if (associated(pairs(i)%g)) then
-          g => pairs(i)%g                      ! full projection kept (outer path)
-       else
-          allocate(g(nra, nrb)); own_g = .true.
-          call icgn_project_sparse(pairs(i)%h, upt%icgn_blocks(ia)%S_full, &
-               upt%icgn_blocks(ib)%S_full, g)
-       end if
-
-       ! G(P_A, Q_B)
-       allocate(qp(i)%gab(np_a, nq_b))
-       do kq = 1, nq_b
-          k = bq(ib)%qidx(kq)
-          do jq = 1, np_a
-             ra = upt%icgn_blocks(ia)%retained_idx(jq)
-             v = g(ra, k)
-             if (abs(v) < thr) then
-                qp(i)%gab(jq, kq) = czero
-             else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(ra), &
-                  upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
-                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
-                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
-                qp(i)%gab(jq, kq) = czero
-             else
-                qp(i)%gab(jq, kq) = v; nzp = nzp + 1
-             end if
+  ! Sort column indices of every CSR row into strictly ascending order
+  ! (insertion sort; rows are short).  Required so the reduced operator
+  ! always matches the documented output convention regardless of path.
+  subroutine icgn_sort_csr_rows(h)
+    type(CSR), intent(inout) :: h
+    integer :: r, i, j, key_j
+    complex(dp) :: key_m
+    do r = 1, h%nrow
+       do i = h%Mi(r)+1, h%Mi(r+1)-1
+          key_j = h%Mj(i); key_m = h%M(i)
+          j = i - 1
+          do while (j >= h%Mi(r) .and. h%Mj(j) > key_j)
+             h%Mj(j+1) = h%Mj(j); h%M(j+1) = h%M(j)
+             j = j - 1
           end do
-       end do
-       ! G(P_B, Q_A) = conj of g(Q_A, P_B)
-       allocate(qp(i)%gba(np_b, nq_a))
-       do kq = 1, nq_a
-          k = bq(ia)%qidx(kq)
-          do jq = 1, np_b
-             rb = upt%icgn_blocks(ib)%retained_idx(jq)
-             v = g(k, rb)
-             if (abs(v) < thr) then
-                qp(i)%gba(jq, kq) = czero
-             else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(k), &
-                  upt%icgn_blocks(ib)%evals_full(rb), upt%icgn_epsilon, &
-                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
-                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
-                qp(i)%gba(jq, kq) = czero
-             else
-                qp(i)%gba(jq, kq) = conjg(v); nzp = nzp + 1
-             end if
-          end do
-       end do
-       ! W(Q_A, Q_B)
-       if (need_w) then
-          allocate(qp(i)%wab(nq_a, nq_b))
-          do kq = 1, nq_b
-             k = bq(ib)%qidx(kq)
-             do jq = 1, nq_a
-                ra = bq(ia)%qidx(jq)
-                v = g(ra, k)
-                if (abs(v) < thr) then
-                   qp(i)%wab(jq, kq) = czero
-                else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(ra), &
-                     upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
-                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
-                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
-                   qp(i)%wab(jq, kq) = czero
-                else
-                   qp(i)%wab(jq, kq) = v; nzq = nzq + 2
-                end if
-             end do
-          end do
-       end if
-       if (own_g) deallocate(g)
-    end do
-    !$omp end parallel do
-    call icgn_restore_nesting(saved_levels)
-    npq_nz = nzp; nqq_nz = nzq
-  end subroutine icgn_build_neumann_blocks
-
-  subroutine icgn_free_neumann_blocks(bq, qp, npair)
-    type(ICGNQBlock), allocatable, intent(inout) :: bq(:)
-    type(ICGNQPair), allocatable, intent(inout) :: qp(:)
-    integer, intent(in) :: npair
-    integer :: i
-    if (allocated(qp)) then
-       do i = 1, npair
-          if (associated(qp(i)%gab)) deallocate(qp(i)%gab)
-          if (associated(qp(i)%gba)) deallocate(qp(i)%gba)
-          if (associated(qp(i)%wab)) deallocate(qp(i)%wab)
-       end do
-       deallocate(qp)
-    end if
-    if (allocated(bq)) then
-       do i = 1, size(bq)
-          if (associated(bq(i)%qidx)) deallocate(bq(i)%qidx)
-          if (associated(bq(i)%res))  deallocate(bq(i)%res)
-       end do
-       deallocate(bq)
-    end if
-  end subroutine icgn_free_neumann_blocks
-
-  ! Sigma = sum_{ord=0..order} H_PQ R (W R)^ord H_QP on the block structure.
-  ! Parallel over the P blocks a (each owns the block row Sigma(P_a, :)); only
-  ! the blocks a2 >= a are accumulated, the rest follows from Hermiticity.
-  ! Locate or create the Sigma block (a, a2) inside sig(a).  a2 >= a.
-  function icgn_sig_slot(sig, a, a2, npa, npa2) result(slot)
-    type(ICGNSigRow), intent(inout) :: sig(:)
-    integer, intent(in) :: a, a2, npa, npa2
-    integer :: slot, t
-    integer, pointer :: blk_new(:)
-    type(ICGNMat), pointer :: mat_new(:)
-    slot = 0
-    do t = 1, sig(a)%n
-       if (sig(a)%blk(t) == a2) then; slot = t; return; end if
-    end do
-    ! grow by one
-    slot = sig(a)%n + 1
-    allocate(blk_new(slot), mat_new(slot))
-    if (sig(a)%n > 0) then
-       blk_new(1:sig(a)%n) = sig(a)%blk(1:sig(a)%n)
-       do t = 1, sig(a)%n
-          mat_new(t)%m => sig(a)%mat(t)%m
-          nullify(sig(a)%mat(t)%m)
-       end do
-       deallocate(sig(a)%blk, sig(a)%mat)
-    end if
-    sig(a)%blk => blk_new; sig(a)%mat => mat_new
-    sig(a)%n = slot
-    sig(a)%blk(slot) = a2
-    allocate(sig(a)%mat(slot)%m(npa, npa2))
-    sig(a)%mat(slot)%m = (0.0_dp, 0.0_dp)
-  end function icgn_sig_slot
-
-  subroutine icgn_free_sigrows(sig)
-    type(ICGNSigRow), allocatable, intent(inout) :: sig(:)
-    integer :: a, t
-    if (.not. allocated(sig)) return
-    do a = 1, size(sig)
-       do t = 1, sig(a)%n
-          if (associated(sig(a)%mat(t)%m)) deallocate(sig(a)%mat(t)%m)
-       end do
-       if (associated(sig(a)%blk)) deallocate(sig(a)%blk)
-       if (associated(sig(a)%mat)) deallocate(sig(a)%mat)
-       sig(a)%n = 0
-    end do
-    deallocate(sig)
-  end subroutine icgn_free_sigrows
-
-  ! Block-sparse Neumann Sigma in P-P space.  Only upper block triangle
-  ! (a2 >= a) is stored; lower follows from Hermiticity at CSR merge time.
-  subroutine icgn_sigma_blocksparse(nb, order, maxdim, bq, qp, &
-       nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, sig)
-    integer, intent(in) :: nb, order, maxdim
-    integer, intent(in) :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
-    logical, intent(in) :: nbr_isA(:)
-    type(ICGNQBlock), intent(in) :: bq(:)
-    type(ICGNQPair), intent(in) :: qp(:)
-    type(ICGNSigRow), intent(inout) :: sig(:)
-    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp)
-    real(dp), parameter :: thr = 1.0e-14_dp
-    integer :: a, b, b2, a2, e, f, ord, kq, nth, saved_levels, slot
-    integer :: npa, nqb, nqb2, npa2
-    type(ICGNMat), allocatable :: Acur(:), Anext(:)
-    complex(dp), pointer :: Gm(:,:), Wm(:,:)
-    character(len=1) :: opw
-    real(dp) :: amax
-    logical :: any_cur
-
-    nth = min(icgn_thread_budget(), max(1, nb))
-    nth = icgn_outer_threads(nb, nth, maxdim)
-    call icgn_flatten_nesting(saved_levels)
-    !$omp parallel default(shared) num_threads(nth) if(nth > 1) &
-    !$omp& private(a, b, b2, a2, e, f, ord, kq, npa, nqb, nqb2, npa2, Gm, Wm, opw, amax, &
-    !$omp&         any_cur, Acur, Anext, slot)
-    allocate(Acur(nb), Anext(nb))
-    !$omp do schedule(dynamic,1)
-    do a = 1, nb
-       npa = bq(a)%np
-       if (npa == 0) cycle
-       ! order 0:  A_0(a,b) = G(P_a,Q_b) R_b
-       do e = nbr_ptr(a), nbr_ptr(a+1)-1
-          b = nbr_blk(e); nqb = bq(b)%nq
-          if (nqb == 0) cycle
-          Gm => icgn_qg(qp, nbr_pair, nbr_isA, e)
-          allocate(Acur(b)%m(npa, nqb))
-          do kq = 1, nqb
-             Acur(b)%m(:, kq) = Gm(:, kq) * bq(b)%res(kq)
-          end do
-       end do
-
-       do ord = 0, order
-          if (ord > 0) then
-             ! A_next(a,b2) = sum_b A(a,b) W(b,b2) R_b2
-             do b = 1, nb
-                if (.not. associated(Acur(b)%m)) cycle
-                do f = nbr_ptr(b), nbr_ptr(b+1)-1
-                   b2 = nbr_blk(f); nqb2 = bq(b2)%nq
-                   if (nqb2 == 0) cycle
-                   if (.not. associated(Anext(b2)%m)) then
-                      allocate(Anext(b2)%m(npa, nqb2)); Anext(b2)%m = (0.0_dp, 0.0_dp)
-                   end if
-                   Wm => qp(nbr_pair(f))%wab
-                   if (nbr_isA(f)) then; opw = 'N'; else; opw = 'C'; end if
-                   call icgn_zgemm_gen('N', opw, cone, Acur(b)%m, Wm, cone, Anext(b2)%m)
-                end do
-             end do
-             do b = 1, nb
-                if (associated(Acur(b)%m)) deallocate(Acur(b)%m)
-             end do
-             amax = 0.0_dp; any_cur = .false.
-             do b2 = 1, nb
-                if (.not. associated(Anext(b2)%m)) cycle
-                do kq = 1, bq(b2)%nq
-                   Anext(b2)%m(:, kq) = Anext(b2)%m(:, kq) * bq(b2)%res(kq)
-                   amax = max(amax, maxval(abs(Anext(b2)%m(:, kq))))
-                end do
-                Acur(b2)%m => Anext(b2)%m
-                nullify(Anext(b2)%m)
-                any_cur = .true.
-             end do
-             if (.not. any_cur .or. amax < thr) exit
-          end if
-
-          ! close the chain into block-sparse Sigma(P_a, P_a2), a2 >= a
-          do b = 1, nb
-             if (.not. associated(Acur(b)%m)) cycle
-             do f = nbr_ptr(b), nbr_ptr(b+1)-1
-                a2 = nbr_blk(f)
-                if (a2 < a) cycle
-                npa2 = bq(a2)%np
-                if (npa2 == 0) cycle
-                Gm => icgn_qg(qp, nbr_pair, nbr_isA, nbr_rev(f))     ! G(P_a2, Q_b)
-                slot = icgn_sig_slot(sig, a, a2, npa, npa2)
-                call icgn_zgemm_gen('N', 'C', cone, Acur(b)%m, Gm, cone, sig(a)%mat(slot)%m)
-             end do
-          end do
-       end do
-
-       do b = 1, nb
-          if (associated(Acur(b)%m))  deallocate(Acur(b)%m)
-          if (associated(Anext(b)%m)) deallocate(Anext(b)%m)
+          h%Mj(j+1) = key_j; h%M(j+1) = key_m
        end do
     end do
-    !$omp end do
-    deallocate(Acur, Anext)
-    !$omp end parallel
-    call icgn_restore_nesting(saved_levels)
-  end subroutine icgn_sigma_blocksparse
-
-  ! Merge H_PP CSR with block-sparse Sigma into a new full CSR (sorted columns).
-  ! Lower triangle of Sigma is filled by Hermiticity; diagonal blocks are
-  ! Hermitianized in place.
-  subroutine icgn_csr_add_sigma(ham, roff_blk, sig, nred)
-    type(CSR), intent(inout) :: ham
-    integer, intent(in) :: roff_blk(:), nred
-    type(ICGNSigRow), intent(in) :: sig(:)
-    integer :: a, t, a2, i, j, r, c, k, nnew, pos
-    integer(8) :: ne
-    integer, allocatable :: ii(:), jj(:), ord(:)
-    complex(dp), allocatable :: vv(:)
-    integer, allocatable :: rowcount(:), next(:)
-    real(dp), parameter :: thr = 1.0e-14_dp
-    complex(dp) :: val
-
-    ! Upper bound of CSR entries after merge.  Diagonal blocks are Hermitianized
-    ! before the threshold test, so count after combining (i,j)/(j,i).
-    ne = ham%nnz
-    do a = 1, size(sig)
-       do t = 1, sig(a)%n
-          a2 = sig(a)%blk(t)
-          do i = 1, size(sig(a)%mat(t)%m, 1)
-             do j = 1, size(sig(a)%mat(t)%m, 2)
-                if (a2 == a) then
-                   if (j < i) cycle
-                   if (j > i) then
-                      val = (sig(a)%mat(t)%m(i,j) + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
-                      if (abs(val) <= thr) cycle
-                      ne = ne + 2
-                   else
-                      if (abs(sig(a)%mat(t)%m(i,j)) <= thr) cycle
-                      ne = ne + 1
-                   end if
-                else
-                   if (abs(sig(a)%mat(t)%m(i,j)) <= thr) cycle
-                   ne = ne + 2
-                end if
-             end do
-          end do
-       end do
-    end do
-    if (ne > int(huge(0), kind=8)) then
-       write(*,*) '(icgn) csr_add_sigma: entry count overflows default integer'
-       return
-    end if
-    allocate(ii(max(1, int(ne))), jj(max(1, int(ne))), vv(max(1, int(ne))))
-    nnew = 0
-    ! Existing H_PP
-    do r = 1, ham%nrow
-       do k = ham%Mi(r), ham%Mi(r+1)-1
-          nnew = nnew + 1
-          ii(nnew) = r; jj(nnew) = ham%Mj(k); vv(nnew) = ham%M(k)
-       end do
-    end do
-    ! Sigma blocks
-    do a = 1, size(sig)
-       do t = 1, sig(a)%n
-          a2 = sig(a)%blk(t)
-          do i = 1, size(sig(a)%mat(t)%m, 1)
-             do j = 1, size(sig(a)%mat(t)%m, 2)
-                val = sig(a)%mat(t)%m(i,j)
-                if (a2 == a) then
-                   ! Hermitianize diagonal block on the fly (keep upper + diag)
-                   if (j < i) cycle
-                   if (j > i) val = (val + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
-                   if (abs(val) <= thr) cycle
-                   nnew = nnew + 1
-                   ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a)+j-1; vv(nnew) = val
-                   if (j > i) then
-                      nnew = nnew + 1
-                      ii(nnew) = roff_blk(a)+j-1; jj(nnew) = roff_blk(a)+i-1; vv(nnew) = conjg(val)
-                   end if
-                else
-                   if (abs(val) <= thr) cycle
-                   nnew = nnew + 1
-                   ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a2)+j-1; vv(nnew) = val
-                   nnew = nnew + 1
-                   ii(nnew) = roff_blk(a2)+j-1; jj(nnew) = roff_blk(a)+i-1; vv(nnew) = conjg(val)
-                end if
-             end do
-          end do
-       end do
-    end do
-
-    ! Counting sort by row, then insertion-sort by col within each row and merge.
-    allocate(rowcount(nred), next(nred), ord(max(1,nnew)))
-    rowcount = 0
-    do k = 1, nnew
-       rowcount(ii(k)) = rowcount(ii(k)) + 1
-    end do
-    next(1) = 1
-    do r = 1, nred-1
-       next(r+1) = next(r) + rowcount(r)
-    end do
-    do k = 1, nnew
-       r = ii(k); ord(next(r)) = k; next(r) = next(r) + 1
-    end do
-    ! next(r) now past-the-end; start of row r is next(r)-rowcount(r)
-    call destroy_matrix(ham)
-    call create_matrix(ham, nred, nred, max(1, nnew))
-    ham%sparse_fmt = 'F'
-    ham%Mi(1) = 1
-    pos = 0
-    do r = 1, nred
-       i = next(r) - rowcount(r)          ! first index in ord for this row
-       j = next(r) - 1                    ! last index
-       ! insertion sort ord(i:j) by column
-       do k = i+1, j
-          a = ord(k); t = k - 1
-          do while (t >= i .and. jj(ord(t)) > jj(a))
-             ord(t+1) = ord(t); t = t - 1
-          end do
-          ord(t+1) = a
-       end do
-       ! emit merged entries
-       do k = i, j
-          a = ord(k)
-          if (pos >= ham%Mi(r) .and. ham%Mj(pos) == jj(a)) then
-             ham%M(pos) = ham%M(pos) + vv(a)
-          else
-             pos = pos + 1
-             ham%Mj(pos) = jj(a)
-             ham%M(pos)  = vv(a)
-          end if
-       end do
-       ham%Mi(r+1) = pos + 1
-    end do
-    ham%nnz = pos
-    deallocate(ii, jj, vv, ord, rowcount, next)
-  end subroutine icgn_csr_add_sigma
-
-  ! out_X = [R] * sum_Y (W_{Y,X})^T in_Y   (the operator W^T = conj(W) of the power iteration)
-  subroutine icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, vin, vout, apply_res)
-    integer, intent(in) :: nb, nbr_ptr(:), nbr_blk(:), nbr_pair(:), qoff(:)
-    logical, intent(in) :: nbr_isA(:), apply_res
-    type(ICGNQBlock), intent(in) :: bq(:)
-    type(ICGNQPair), intent(in) :: qp(:)
-    complex(dp), intent(in) :: vin(:)
-    complex(dp), intent(out) :: vout(:)
-    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp), czero = (0.0_dp, 0.0_dp)
-    integer :: X, Y, f, nqx, nqy, oX, oY, maxnq, nth, q
-    complex(dp), allocatable :: tmp(:), yv(:)
-    external :: zgemv
-
-    maxnq = 1
-    do X = 1, nb
-       maxnq = max(maxnq, bq(X)%nq)
-    end do
-    nth = min(icgn_thread_budget(), max(1, nb))
-    !$omp parallel default(shared) num_threads(nth) if(nth > 1) private(X, Y, f, nqx, nqy, oX, oY, q, tmp, yv)
-    allocate(tmp(maxnq), yv(maxnq))
-    !$omp do schedule(dynamic,1)
-    do X = 1, nb
-       nqx = bq(X)%nq
-       if (nqx == 0) cycle
-       oX = qoff(X)
-       vout(oX+1:oX+nqx) = czero
-       do f = nbr_ptr(X), nbr_ptr(X+1)-1
-          Y = nbr_blk(f); nqy = bq(Y)%nq
-          if (nqy == 0) cycle
-          oY = qoff(Y)
-          if (nbr_isA(f)) then
-             ! X = A, Y = B, wab is (nq_X x nq_Y):  out_X += conj(wab) in_Y = conj(wab * conj(in_Y))
-             do q = 1, nqy
-                tmp(q) = conjg(vin(oY+q))
-             end do
-             call zgemv('N', nqx, nqy, cone, qp(nbr_pair(f))%wab, max(1,nqx), tmp, 1, czero, yv, 1)
-             do q = 1, nqx
-                vout(oX+q) = vout(oX+q) + conjg(yv(q))
-             end do
-          else
-             ! X = B, Y = A, wab is (nq_Y x nq_X):  out_X += wab^T in_Y
-             do q = 1, nqy
-                tmp(q) = vin(oY+q)
-             end do
-             call zgemv('T', nqy, nqx, cone, qp(nbr_pair(f))%wab, max(1,nqy), tmp, 1, czero, yv, 1)
-             do q = 1, nqx
-                vout(oX+q) = vout(oX+q) + yv(q)
-             end do
-          end if
-       end do
-       if (apply_res) then
-          do q = 1, nqx
-             vout(oX+q) = vout(oX+q) * bq(X)%res(q)
-          end do
-       end if
-    end do
-    !$omp end do
-    deallocate(tmp, yv)
-    !$omp end parallel
-    ! blocks without Q states keep zeros
-    do X = 1, nb
-       if (bq(X)%nq == 0) cycle
-    end do
-  end subroutine icgn_blk_wt_apply
-
-  ! Power iteration for ||T||_2, T = R W, on the block structure (same iteration
-  ! as the CSR matvec form: u = R W^T v, w = R u, v <- W^T w).
-  subroutine icgn_power_iteration_blk(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, &
-       maxiter, tol, sigma_out, converged_out)
-    integer, intent(in) :: nb, nbr_ptr(:), nbr_blk(:), nbr_pair(:), maxiter
-    logical, intent(in) :: nbr_isA(:)
-    type(ICGNQBlock), intent(in) :: bq(:)
-    type(ICGNQPair), intent(in) :: qp(:)
-    real(dp), intent(in) :: tol
-    real(dp), intent(out) :: sigma_out
-    logical, intent(out) :: converged_out
-    integer :: k, X, j, ntot, q
-    integer, allocatable :: qoff(:)
-    real(dp) :: nrm, sigma_est, diff2, rr, ri
-    complex(dp), allocatable :: v(:), u(:), w(:), v_next(:)
-    real(dp), allocatable :: res(:)
-
-    sigma_out = 0.0_dp; converged_out = .true.
-    allocate(qoff(nb+1)); qoff(1) = 0
-    do X = 1, nb
-       qoff(X+1) = qoff(X) + bq(X)%nq
-    end do
-    ntot = qoff(nb+1)
-    if (ntot == 0) return
-    allocate(v(ntot), u(ntot), w(ntot), v_next(ntot), res(ntot))
-    do X = 1, nb
-       do q = 1, bq(X)%nq
-          res(qoff(X)+q) = bq(X)%res(q)
-       end do
-    end do
-    do j = 1, ntot
-       call random_number(rr); call random_number(ri)
-       v(j) = cmplx(rr - 0.5_dp, ri - 0.5_dp, kind=dp)
-    end do
-    nrm = sqrt(sum(real(v,dp)**2 + aimag(v)**2))
-    if (nrm < 1.0e-14_dp) then
-       deallocate(v, u, w, v_next, res, qoff); return
-    end if
-    v = v / nrm
-    converged_out = .false.
-    sigma_est = 0.0_dp
-    do k = 1, maxiter
-       call icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, v, u, .true.)
-       sigma_est = sqrt(sum(real(u,dp)**2 + aimag(u)**2))
-       do j = 1, ntot
-          w(j) = u(j) * res(j)
-       end do
-       call icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, w, v_next, .false.)
-       nrm = sqrt(sum(real(v_next,dp)**2 + aimag(v_next)**2))
-       if (nrm < 1.0e-14_dp) then
-          sigma_out = 0.0_dp; converged_out = .true.
-          deallocate(v, u, w, v_next, res, qoff); return
-       end if
-       v_next = v_next / nrm
-       diff2 = sum(real(v_next - v, dp)**2 + aimag(v_next - v)**2)
-       v = v_next
-       if (sqrt(diff2) < tol) then
-          converged_out = .true.
-          exit
-       end if
-    end do
-    if (icgn_timing_on()) write(*,'(a,i0,a,l1)') '[ICGN-TIME] power iteration sweeps: ', &
-         min(k, maxiter), ' converged=', converged_out
-    sigma_out = sigma_est
-    deallocate(v, u, w, v_next, res, qoff)
-  end subroutine icgn_power_iteration_blk
-
-  ! Warnings about the Neumann convergence estimate (same messages as the edge-list path)
-  subroutine icgn_report_convergence(upt)
-    type(OUPT), intent(in) :: upt
-    if (.not. upt%icgn_pi_converged) then
-       write(*,'(a,i0,a)') &
-            '  (icgn) WARNING: power iteration did not converge in ', &
-            upt%icgn_pi_maxiter, ' sweeps — ||T||_2 estimate may be unreliable.'
-    end if
-    if (upt%icgn_sigma_T2 >= 1.0_dp) then
-       write(*,'(a,f10.6,a)') &
-            '  (icgn) WARNING: ||T||_2 = ', upt%icgn_sigma_T2, &
-            ' >= 1 — Neumann series not guaranteed to converge at this E0.'
-       if (upt%icgn_selfenergy_order == 0) write(*,'(a)') &
-            '  (icgn) NOTE: order=0 does not use the Q-Q coupling W, so this' // &
-            ' warning is informational only for this run.'
-    else if (upt%verbose > 0) then
-       write(*,'(a,f10.6,a,l1)') &
-            '  (icgn) ||T||_2 = ', upt%icgn_sigma_T2, &
-            ', power-iter converged: ', upt%icgn_pi_converged
-       if (upt%icgn_selfenergy_order == 0) write(*,'(a)') &
-            '  (icgn) NOTE: order=0 ignores W — norm above is for diagnostics only.'
-    end if
-  end subroutine icgn_report_convergence
-
-  ! Wall-clock timing (portable, works with or without OpenMP).
-  function icgn_wall() result(t)
-    real(dp) :: t
-    integer(8) :: cnt, rate
-    call system_clock(cnt, rate)
-    t = real(cnt, dp) / real(max(1_8, rate), dp)
-  end function icgn_wall
-
-  ! Prints "[ICGN-TIME] phase: x s" when env UPT_CG_TIMING is set (any value).
-  subroutine icgn_report_time(phase, t0)
-    character(*), intent(in) :: phase
-    real(dp), intent(in) :: t0
-    character(len=8) :: s
-    integer :: ln, ios
-    call get_environment_variable('UPT_CG_TIMING', s, length=ln, status=ios)
-    if (ios == 0 .or. ios == -1) then
-       if (ln > 0) write(*,'(a,a,a,f10.3,a)') '[ICGN-TIME] ', phase, ': ', icgn_wall() - t0, ' s'
-    end if
-  end subroutine icgn_report_time
-
-  function icgn_thread_budget() result(nth)
-    !$ use omp_lib
-    integer :: nth
-    integer :: v, ios, ln, req, avail
-    logical, save :: warned = .false.
-    character(len=32) :: s
-    nth = 1; req = 1; avail = 1
-    !$ req = omp_get_max_threads(); avail = max(1, omp_get_num_procs())
-    !$ nth = min(req, avail)
-    !$ if (omp_in_parallel()) nth = 1
-    ! Safety guard: never use more threads than the CPUs this process may use
-    ! (affinity mask / cgroup / SLURM allocation); warn the user once.
-    !$ if (req > avail .and. .not. warned .and. .not. omp_in_parallel()) then
-    !$    warned = .true.
-    !$    call icgn_warn_threads(req, avail)
-    !$    ! also cut the thread count seen by threaded BLAS/LAPACK (MKL follows it)
-    !$    call omp_set_num_threads(avail)
-    !$ end if
-    call get_environment_variable('UPT_CG_THREADS', s, length=ln, status=ios)
-    if (ios == 0 .and. ln > 0) then
-       read(s(1:ln), *, iostat=ios) v
-       if (ios == 0 .and. v >= 1) nth = min(nth, v)
-    end if
-    nth = max(1, nth)
-  end function icgn_thread_budget
-
-  ! Resolve upt%icgn_num_blocks: 0 => auto heuristic; always clamp to [1, na].
-  ! Auto aims for ~target_orb orbitals per block (balance diag cost ~ N^3/B^2
-  ! against parallelism) and prefers B >= thread budget so outer parallel-do
-  ! over blocks can fill the CPUs.
-  subroutine icgn_resolve_num_blocks(upt, na, n_orb)
-    type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: na, n_orb
-    integer :: nb, T, requested
-    integer, parameter :: target_orb = 200
-    requested = upt%icgn_num_blocks
-    if (requested == 0) then
-       T = icgn_thread_budget()
-       nb = max(1, (max(1, n_orb) + target_orb - 1) / target_orb)  ! ceil(n_orb/target)
-       nb = max(nb, T)
-       write(*,'(a,i0,a,i0,a,i0,a,i0,a)') &
-            '(icgn) auto num_blocks=', nb, ' (n_orb=', n_orb, &
-            ', n_atoms=', na, ', threads=', T, ')'
-    else
-       nb = requested
-    end if
-    if (nb > na) then
-       write(*,'(a,i0,a,i0,a)') &
-            '(icgn) WARNING: num_blocks=', nb, ' exceeds n_atoms=', na, &
-            ' — falling back to num_blocks = n_atoms'
-       nb = na
-    end if
-    if (nb < 1) nb = 1
-    upt%icgn_num_blocks = nb
-  end subroutine icgn_resolve_num_blocks
-
-  ! Allow only ONE active parallel level while our outer loop runs, so that a
-  ! threaded BLAS/LAPACK called from inside it runs single-threaded instead of
-  ! spawning nproc threads per outer thread (oversubscription).
-  subroutine icgn_flatten_nesting(saved)
-    !$ use omp_lib
-    integer, intent(out) :: saved
-    saved = 1
-    !$ saved = omp_get_max_active_levels()
-    !$ call omp_set_max_active_levels(1)
-  end subroutine icgn_flatten_nesting
-
-  subroutine icgn_restore_nesting(saved)
-    !$ use omp_lib
-    integer, intent(in) :: saved
-    !$ call omp_set_max_active_levels(saved)
-  end subroutine icgn_restore_nesting
-
-  ! Diagonalize block ib of icgn_blocks.  Thread-safe for distinct ib: it reads
-  ! upt%ham and writes only upt%icgn_blocks(ib).  local(r) = position of row r
-  ! inside its own block, blk_of(r) = block that owns row r (both cover all rows).
-  subroutine icgn_diagonalize_block(upt, ib, local, blk_of, ierr)
-    type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: ib, local(:), blk_of(:)
-    integer, intent(out) :: ierr
-    integer :: nn, k, r, c, jr, m, j
-    complex(dp), allocatable :: h(:,:), z(:,:)
-    real(dp), allocatable :: w(:)
-    real(dp) :: vl, vu, margin
-    logical :: fast_path
-    ierr = 0; nn = upt%icgn_blocks(ib)%nrow
-    if (nn == 0) then; upt%icgn_blocks(ib)%nret = 0; return; end if
-    allocate(h(nn,nn), w(nn)); h = (0.0_dp, 0.0_dp)
-    do jr = 1, nn
-       r = upt%icgn_blocks(ib)%rows(jr)
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (blk_of(c) /= ib) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          h(local(r), local(c)) = upt%ham%M(k)
-          if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
-       end do
-    end do
-
-    ! Fast path (no outer, no Neumann): only core+buffer states are kept later,
-    ! so request that window from ZHEEVR. Outer / Neumann still need the full
-    ! spectrum (discarded states enter P-Q and Q-Q couplings).
-    fast_path = (upt%icgn_add_core_outers == 0 .and. upt%icgn_selfenergy_order < 0)
-    if (fast_path) then
-       vl = upt%icgn_core_emin - upt%icgn_bottom_buffer
-       vu = upt%icgn_core_emax + upt%icgn_top_buffer
-       ! ZHEEVR returns eigenvalues in the half-open interval (VL, VU]; expand
-       ! slightly so states exactly on the closed keep_mask bounds are included.
-       margin = max(1.0e-10_dp, 1.0e-12_dp * max(1.0_dp, abs(vl), abs(vu)))
-       vl = vl - margin
-       vu = vu + margin
-       allocate(z(nn, nn))
-       call dense_eigh_window(h, vl, vu, w, z, m, ierr)
-       if (ierr /= 0) then
-          ! Robust fallback: full ZHEEVD then same keep_mask filter as before.
-          h = (0.0_dp, 0.0_dp)
-          do jr = 1, nn
-             r = upt%icgn_blocks(ib)%rows(jr)
-             do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-                c = upt%ham%Mj(k)
-                if (blk_of(c) /= ib) cycle
-                if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-                h(local(r), local(c)) = upt%ham%M(k)
-                if (r /= c) h(local(c), local(r)) = conjg(upt%ham%M(k))
-             end do
-          end do
-          call coarse_eigh(h, w, ierr)
-          if (ierr /= 0) then
-             deallocate(h, w, z); return
-          end if
-          allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
-          upt%icgn_blocks(ib)%evals_full = w
-          upt%icgn_blocks(ib)%S_full     = h
-          deallocate(h, w, z)
-          return
-       end if
-       ! Store only the m window states as columns 1:m; remaining evals sit
-       ! outside the keep window so the existing keep_mask logic is unchanged.
-       allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
-       upt%icgn_blocks(ib)%evals_full = vu + 1.0_dp
-       upt%icgn_blocks(ib)%S_full     = (0.0_dp, 0.0_dp)
-       do j = 1, m
-          upt%icgn_blocks(ib)%evals_full(j) = w(j)
-          upt%icgn_blocks(ib)%S_full(:, j)  = z(:, j)
-       end do
-       deallocate(h, w, z)
-    else
-       call coarse_eigh(h, w, ierr)
-       if (ierr /= 0) then
-          deallocate(h, w); return
-       end if
-       allocate(upt%icgn_blocks(ib)%evals_full(nn), upt%icgn_blocks(ib)%S_full(nn,nn))
-       upt%icgn_blocks(ib)%evals_full = w
-       upt%icgn_blocks(ib)%S_full     = h
-       deallocate(h, w)
-    end if
-  end subroutine icgn_diagonalize_block
-
-  subroutine project_accumulated_pair_icgn(p, qa)
-    type(ICGNPair), intent(inout) :: p
-    complex(dp), intent(in) :: qa(:,:)
-
-    allocate(p%v(size(qa,2), size(p%t,2)))
-    call icgn_zgemm('C', qa, p%t, p%v)
-    deallocate(p%t)
-  end subroutine project_accumulated_pair_icgn
+  end subroutine icgn_sort_csr_rows
 
   ! Build reduced Hamiltonian H_PP (CSR) from retained states and pair couplings.
   subroutine build_icgn_reduced_hamiltonian(upt, atom_of, label, local, pairs, npair, reuse_full, ierr)
@@ -2749,201 +1905,1063 @@ contains
     call icgn_report_time('  assemble reduced CSR (serial)', t_stage)
   end subroutine build_icgn_reduced_hamiltonian
 
-  ! Lift eigenvectors from reduced basis back to orbital (physical) space:
-  ! physical(rows_of_block,:) = q_block * reduced(offset : offset+nret-1, :).
-  ! One zgemm per block (same helper used elsewhere in this module).
-  subroutine icgn_lift(upt, reduced, physical)
-    type(OUPT), intent(in) :: upt
-    complex(dp), intent(in) :: reduced(:,:)
-    complex(dp), intent(out) :: physical(:,:)
-    integer :: i, j, off, nn, nr, nev
-    complex(dp), allocatable :: tmp(:,:)
-    physical = (0.0_dp, 0.0_dp)
-    off = 1
-    nev = size(reduced, 2)
+  subroutine destroy_pairs(pairs)
+    type(ICGNPair),allocatable,intent(inout)::pairs(:)
+    integer::i,nv,nh,nt
+    if(.not.allocated(pairs)) then
+       ! write(*,'(A)') '[ICGN-TRACE] destroy_pairs: not allocated'
+       return
+    end if
+    nv=0; nh=0; nt=0
+    do i=1,size(pairs)
+       if(associated(pairs(i)%v)) nv=nv+1
+       if(associated(pairs(i)%h)) nh=nh+1
+       if(associated(pairs(i)%t)) nt=nt+1
+    end do
+    ! write(*,'(A,I0,A,I0,A,I0,A,I0)') '[ICGN-TRACE] destroy_pairs count=', size(pairs), &
+         ! ' v=', nv, ' h=', nh, ' t=', nt
+    do i=1,size(pairs)
+       if(associated(pairs(i)%v)) deallocate(pairs(i)%v)
+       if(associated(pairs(i)%h)) deallocate(pairs(i)%h)
+       if(associated(pairs(i)%t)) deallocate(pairs(i)%t)
+       if(associated(pairs(i)%g)) deallocate(pairs(i)%g)
+    end do
+    deallocate(pairs)
+    ! write(*,'(A)') '[ICGN-TRACE] destroy_pairs DONE'
+  end subroutine destroy_pairs
+
+  ! Free full-block eigensystems left on upt%icgn_blocks after a failed prepare
+  ! stage (diagonalize / collect / build).  Safe to call when blocks are absent.
+  subroutine icgn_free_block_eigensystems(upt)
+    type(OUPT), intent(inout) :: upt
+    integer :: i
+    if (.not. associated(upt%icgn_blocks)) return
     do i = 1, size(upt%icgn_blocks)
-       nr = upt%icgn_blocks(i)%nret
-       if (nr > 0) then
-          nn = upt%icgn_blocks(i)%nrow
-          allocate(tmp(nn, nev))
-          call icgn_zgemm('N', upt%icgn_blocks(i)%q, reduced(off:off+nr-1, :), tmp)
-          do j = 1, nn
-             physical(upt%icgn_blocks(i)%rows(j), :) = tmp(j, :)
-          end do
-          deallocate(tmp)
+       if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
+       if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
+       nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
+    end do
+  end subroutine icgn_free_block_eigensystems
+
+
+! ===========================================================================
+! SECTION C — Neumann self-energy (Sigma)
+! ===========================================================================
+
+  ! Common coupling filter. A coupling V between two
+  ! block eigenstates with energies ea, eb:
+  !   - never filtered when BOTH energies lie in the core+buffer window
+  !     [win_emin, win_emax] (only exact zeros are dropped);
+  !   - otherwise survives only if
+  !       |V|^2 > epsilon * |ea - eb|        (strict: equality is filtered out)
+  ! with epsilon >= 0. Product form avoids division by a vanishing energy
+  ! difference; for degenerate outer states RHS is 0 so any non-zero coupling
+  ! survives. epsilon = 0 reduces to |V|^2 > 0 outside the window.
+  pure logical function icgn_coupling_survives(v, ea, eb, epsilon, win_emin, win_emax)
+    complex(dp), intent(in) :: v
+    real(dp), intent(in) :: ea, eb, epsilon, win_emin, win_emax
+    real(dp) :: v2, de
+    v2 = real(v,dp)**2 + aimag(v)**2
+    icgn_coupling_survives = .false.
+    if (.not. (v2 > 0.0_dp)) return            ! exact zero (or NaN): no coupling
+    ! Core+buffer window: never filter non-zero couplings between in-window states.
+    if (ea >= win_emin .and. ea <= win_emax .and. &
+        eb >= win_emin .and. eb <= win_emax) then
+       icgn_coupling_survives = .true.
+       return
+    end if
+    de = abs(ea - eb)
+    if (de <= 0.0_dp) then
+       icgn_coupling_survives = .true.           ! degenerate: |V|^2 > 0 = epsilon*0
+    else
+       icgn_coupling_survives = (v2 > max(epsilon, 0.0_dp)*de)
+    end if
+  end function icgn_coupling_survives
+
+  subroutine icgn_build_neumann_blocks(upt, pairs, npair, local_ret_idx, E0, need_w, &
+       bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, npq_nz, nqq_nz)
+    type(OUPT), intent(in) :: upt
+    type(ICGNPair), intent(in) :: pairs(:)
+    integer, intent(in) :: npair, local_ret_idx(:,:)
+    real(dp), intent(in) :: E0
+    logical, intent(in) :: need_w
+    type(ICGNQBlock), allocatable, intent(out) :: bq(:)
+    type(ICGNQPair), allocatable, intent(out) :: qp(:)
+    integer, allocatable, intent(out) :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
+    logical, allocatable, intent(out) :: nbr_isA(:)
+    integer(8), intent(out) :: npq_nz, nqq_nz
+    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
+    real(dp), parameter :: thr = 1.0e-14_dp
+    integer :: nb, b, i, j, k, ia, ib, jq, kq, ra, rb, e, np_a, np_b, nq_a, nq_b
+    integer :: nth, saved_levels, nra, nrb, n_near
+    integer, allocatable :: cnt(:), fillp(:), eA(:), eB(:)
+    complex(dp) :: v
+    complex(dp), pointer :: g(:,:)
+    complex(dp), allocatable :: tmp(:,:)
+    logical :: own_g
+    integer(8) :: nzp, nzq
+    real(dp) :: gap, gap_min
+    character(len=160) :: msg
+
+    nb = upt%icgn_num_blocks
+    ! ---- per-block Q data ----
+    ! Discarded eigenvalues lie outside the core window, so E0 (inside the open
+    ! core) cannot match them exactly; still warn if |E0-E| is tiny (numerical).
+    allocate(bq(nb))
+    n_near = 0
+    gap_min = huge(1.0_dp)
+    do b = 1, nb
+       bq(b)%np = upt%icgn_blocks(b)%nret
+       bq(b)%nq = upt%icgn_blocks(b)%nrow - upt%icgn_blocks(b)%nret
+       allocate(bq(b)%qidx(max(0,bq(b)%nq)), bq(b)%res(max(0,bq(b)%nq)))
+       kq = 0
+       do k = 1, upt%icgn_blocks(b)%nrow
+          if (local_ret_idx(b, k) == 0) then
+             kq = kq + 1
+             bq(b)%qidx(kq) = k
+             gap = E0 - upt%icgn_blocks(b)%evals_full(k)
+             if (abs(gap) < 1.0e-8_dp) then
+                n_near = n_near + 1
+                gap_min = min(gap_min, abs(gap))
+             end if
+             bq(b)%res(kq) = 1.0_dp / gap
+          end if
+       end do
+    end do
+    if (n_near > 0) then
+       write(msg,'(a,i0,a,es12.5)') &
+            'Neumann resolvent: |E0-Eq| < 1e-8 for ', n_near, &
+            ' discarded state(s); min|gap|=', gap_min
+       call icgn_log_important(upt, trim(msg))
+    end if
+
+    ! ---- adjacency of the block graph (entries of block a: its neighbours) ----
+    allocate(nbr_ptr(nb+1), cnt(nb))
+    cnt = 0
+    do i = 1, npair
+       cnt(pairs(i)%a) = cnt(pairs(i)%a) + 1
+       cnt(pairs(i)%b) = cnt(pairs(i)%b) + 1
+    end do
+    nbr_ptr(1) = 1
+    do b = 1, nb
+       nbr_ptr(b+1) = nbr_ptr(b) + cnt(b)
+    end do
+    allocate(nbr_blk(max(1,2*npair)), nbr_pair(max(1,2*npair)), nbr_isA(max(1,2*npair)), &
+         nbr_rev(max(1,2*npair)), fillp(nb), eA(max(1,npair)), eB(max(1,npair)))
+    fillp = nbr_ptr(1:nb)
+    do i = 1, npair
+       ia = pairs(i)%a; ib = pairs(i)%b
+       e = fillp(ia); fillp(ia) = fillp(ia) + 1
+       nbr_blk(e) = ib; nbr_pair(e) = i; nbr_isA(e) = .true.; eA(i) = e
+       e = fillp(ib); fillp(ib) = fillp(ib) + 1
+       nbr_blk(e) = ia; nbr_pair(e) = i; nbr_isA(e) = .false.; eB(i) = e
+    end do
+    do i = 1, npair
+       nbr_rev(eA(i)) = eB(i); nbr_rev(eB(i)) = eA(i)
+    end do
+    deallocate(cnt, fillp, eA, eB)
+
+    ! ---- dense filtered blocks of every pair (independent => parallel) ----
+    allocate(qp(max(1,npair)))
+    nzp = 0; nzq = 0
+    nth = min(icgn_thread_budget(), max(1, npair))
+    call icgn_flatten_nesting(saved_levels)
+    !$omp parallel do default(shared) private(i, ia, ib, jq, kq, k, ra, rb, v, g, tmp, own_g, &
+    !$omp&   np_a, np_b, nq_a, nq_b, nra, nrb) reduction(+:nzp, nzq) num_threads(nth) &
+    !$omp&   schedule(dynamic,1) if(nth > 1)
+    do i = 1, npair
+       ia = pairs(i)%a; ib = pairs(i)%b
+       np_a = bq(ia)%np; nq_a = bq(ia)%nq; np_b = bq(ib)%np; nq_b = bq(ib)%nq
+       nra = upt%icgn_blocks(ia)%nrow; nrb = upt%icgn_blocks(ib)%nrow
+       own_g = .false.
+       if (associated(pairs(i)%g)) then
+          g => pairs(i)%g                      ! full projection kept (outer path)
+       else
+          allocate(g(nra, nrb)); own_g = .true.
+          call icgn_project_sparse(pairs(i)%h, upt%icgn_blocks(ia)%S_full, &
+               upt%icgn_blocks(ib)%S_full, g)
        end if
-       off = off + nr
-    end do
-  end subroutine icgn_lift
 
-  ! Helper: grow integer array
-
-  ! ============================================================================
-  ! icgn_graph_partition: connectivity-aware fallback partition when METIS is
-  ! unavailable.
-  !
-  ! Algorithm: weighted greedy graph growing (BFS-seeded, priority-queue-free),
-  ! with dynamic target rebalancing and best-fit neighbour selection.
-  ! Guarantees:
-  !   (1) Every atom in a block is reachable from the block seed via bonds —
-  !       so no block is a disjoint set of atoms (a block may still consist of
-  !       several BFS components if the seed's own component runs out before
-  !       reaching the target weight; each such component is itself internally
-  !       connected).
-  !   (2) All orbitals of an atom go to the same block (works at the atom level,
-  !       so the orbital → block mapping is done after by the caller).
-  !   (3) Balance: after each block is closed, the target weight for remaining
-  !       blocks is recomputed from the remaining unassigned weight, so any
-  !       overshoot/undershoot in one block is spread over the rest instead of
-  !       accumulating into the last block.
-  !
-  ! Inputs:
-  !   na         — number of atoms
-  !   nblocks    — desired number of blocks
-  !   vwgt(na)   — vertex weight of each atom (= number of orbitals, bsize(i))
-  !   xadj(na+1) — CSR row pointers of atom adjacency graph (0-based)
-  !   adjncy(*)  — CSR column indices (0-based atom indices)
-  !   adjwgt(*)  — CSR edge weights (integer, Hamiltonian coupling strength)
-  !
-  ! Output:
-  !   part(na)   — block index (0-based, in [0, nblocks-1]) for each atom
-  ! ============================================================================
-  subroutine icgn_graph_partition(na, nblocks, vwgt, xadj, adjncy, adjwgt, part)
-    use, intrinsic :: iso_c_binding, only : c_int
-    integer,            intent(in)  :: na, nblocks
-    integer(c_int),     intent(in)  :: vwgt(na)
-    integer(c_int),     intent(in)  :: xadj(na+1), adjncy(*), adjwgt(*)
-    integer(c_int),     intent(out) :: part(na)
-
-    ! --- local ---
-    integer :: i, j, atom, nb_atom, blk, seed
-    integer :: target_wt, cur_wt, total_wt, remaining_wt, remaining_blocks
-    integer :: qhead, qtail, qsize
-    integer, allocatable :: queue(:)     ! BFS queue (atom indices, 1-based)
-    logical, allocatable :: visited(:)  ! atom already assigned?
-    integer :: best_deg, deg, adj_start, adj_end
-    integer :: n_unvisited
-    integer :: best_fit_atom, best_fit_wt, best_fit_gap
-    logical :: found_fit
-
-    ! ----- compute total weight -----
-    total_wt = 0
-    do i = 1, na
-       total_wt = total_wt + int(vwgt(i))
-    end do
-
-    allocate(visited(na), queue(na))
-    visited = .false.
-    part    = int(nblocks - 1, c_int)   ! default: last block (catches unvisited atoms)
-
-    remaining_wt     = total_wt
-    remaining_blocks = nblocks
-    n_unvisited      = na
-
-    do blk = 0, nblocks - 2    ! assign blocks 0 .. nblocks-2; last gets remainder
-
-       if (n_unvisited == 0) exit
-
-       ! ---- recompute target dynamically from what's left, so overshoot/
-       ! undershoot in earlier blocks doesn't accumulate into later ones ----
-       target_wt = (remaining_wt + remaining_blocks - 1) / remaining_blocks   ! ceiling
-
-       cur_wt = 0
-       qhead  = 1
-       qtail  = 0
-       qsize  = 0
-
-       ! ---- grow the block, possibly across several connected components ----
-       do while (cur_wt < target_wt .and. n_unvisited > 0)
-
-          ! ---- need a new BFS seed (either first seed of this block, or a
-          ! new component because the previous one ran dry) ----
-          if (qhead > qtail) then
-             seed     = -1
-             best_deg = -1
-             do i = 1, na
-                if (visited(i)) cycle
-                deg = int(xadj(i+1) - xadj(i))   ! number of inter-atom bonds
-                if (deg > best_deg) then
-                   best_deg = deg
-                   seed     = i
+       ! G(P_A, Q_B)
+       allocate(qp(i)%gab(np_a, nq_b))
+       do kq = 1, nq_b
+          k = bq(ib)%qidx(kq)
+          do jq = 1, np_a
+             ra = upt%icgn_blocks(ia)%retained_idx(jq)
+             v = g(ra, k)
+             if (abs(v) < thr) then
+                qp(i)%gab(jq, kq) = czero
+             else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(ra), &
+                  upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
+                qp(i)%gab(jq, kq) = czero
+             else
+                qp(i)%gab(jq, kq) = v; nzp = nzp + 1
+             end if
+          end do
+       end do
+       ! G(P_B, Q_A) = conj of g(Q_A, P_B)
+       allocate(qp(i)%gba(np_b, nq_a))
+       do kq = 1, nq_a
+          k = bq(ia)%qidx(kq)
+          do jq = 1, np_b
+             rb = upt%icgn_blocks(ib)%retained_idx(jq)
+             v = g(k, rb)
+             if (abs(v) < thr) then
+                qp(i)%gba(jq, kq) = czero
+             else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(k), &
+                  upt%icgn_blocks(ib)%evals_full(rb), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
+                qp(i)%gba(jq, kq) = czero
+             else
+                qp(i)%gba(jq, kq) = conjg(v); nzp = nzp + 1
+             end if
+          end do
+       end do
+       ! W(Q_A, Q_B)
+       if (need_w) then
+          allocate(qp(i)%wab(nq_a, nq_b))
+          do kq = 1, nq_b
+             k = bq(ib)%qidx(kq)
+             do jq = 1, nq_a
+                ra = bq(ia)%qidx(jq)
+                v = g(ra, k)
+                if (abs(v) < thr) then
+                   qp(i)%wab(jq, kq) = czero
+                else if (.not. icgn_coupling_survives(v, upt%icgn_blocks(ia)%evals_full(ra), &
+                     upt%icgn_blocks(ib)%evals_full(k), upt%icgn_epsilon, &
+                    upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+                    upt%icgn_core_emax + upt%icgn_top_buffer)) then
+                   qp(i)%wab(jq, kq) = czero
+                else
+                   qp(i)%wab(jq, kq) = v; nzq = nzq + 2
                 end if
              end do
-             if (seed == -1) exit    ! no unvisited atoms left (shouldn't happen, n_unvisited>0)
+          end do
+       end if
+       if (own_g) deallocate(g)
+    end do
+    !$omp end parallel do
+    call icgn_restore_nesting(saved_levels)
+    npq_nz = nzp; nqq_nz = nzq
+  end subroutine icgn_build_neumann_blocks
 
-             visited(seed) = .true.
-             part(seed)    = int(blk, c_int)
-             cur_wt        = cur_wt + int(vwgt(seed))
-             n_unvisited   = n_unvisited - 1
-             qtail         = qtail + 1
-             queue(qtail)  = seed
-             if (cur_wt >= target_wt) exit
+  subroutine icgn_free_neumann_blocks(bq, qp, npair)
+    type(ICGNQBlock), allocatable, intent(inout) :: bq(:)
+    type(ICGNQPair), allocatable, intent(inout) :: qp(:)
+    integer, intent(in) :: npair
+    integer :: i
+    if (allocated(qp)) then
+       do i = 1, npair
+          if (associated(qp(i)%gab)) deallocate(qp(i)%gab)
+          if (associated(qp(i)%gba)) deallocate(qp(i)%gba)
+          if (associated(qp(i)%wab)) deallocate(qp(i)%wab)
+       end do
+       deallocate(qp)
+    end if
+    if (allocated(bq)) then
+       do i = 1, size(bq)
+          if (associated(bq(i)%qidx)) deallocate(bq(i)%qidx)
+          if (associated(bq(i)%res))  deallocate(bq(i)%res)
+       end do
+       deallocate(bq)
+    end if
+  end subroutine icgn_free_neumann_blocks
+
+  ! Block-sparse Neumann Sigma in P-P space.  Only upper block triangle
+  ! (a2 >= a) is stored; lower follows from Hermiticity at CSR merge time.
+  subroutine icgn_sigma_blocksparse(nb, order, maxdim, bq, qp, &
+       nbr_ptr, nbr_blk, nbr_pair, nbr_isA, nbr_rev, sig)
+    integer, intent(in) :: nb, order, maxdim
+    integer, intent(in) :: nbr_ptr(:), nbr_blk(:), nbr_pair(:), nbr_rev(:)
+    logical, intent(in) :: nbr_isA(:)
+    type(ICGNQBlock), intent(in) :: bq(:)
+    type(ICGNQPair), intent(in) :: qp(:)
+    type(ICGNSigRow), intent(inout) :: sig(:)
+    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp)
+    real(dp), parameter :: thr = 1.0e-14_dp
+    integer :: a, b, b2, a2, e, f, ord, kq, nth, saved_levels, slot
+    integer :: npa, nqb, nqb2, npa2
+    type(ICGNMat), allocatable :: Acur(:), Anext(:)
+    complex(dp), pointer :: Gm(:,:), Wm(:,:)
+    character(len=1) :: opw
+    real(dp) :: amax
+    logical :: any_cur
+
+    nth = min(icgn_thread_budget(), max(1, nb))
+    nth = icgn_outer_threads(nb, nth, maxdim)
+    call icgn_flatten_nesting(saved_levels)
+    !$omp parallel default(shared) num_threads(nth) if(nth > 1) &
+    !$omp& private(a, b, b2, a2, e, f, ord, kq, npa, nqb, nqb2, npa2, Gm, Wm, opw, amax, &
+    !$omp&         any_cur, Acur, Anext, slot)
+    allocate(Acur(nb), Anext(nb))
+    !$omp do schedule(dynamic,1)
+    do a = 1, nb
+       npa = bq(a)%np
+       if (npa == 0) cycle
+       ! order 0:  A_0(a,b) = G(P_a,Q_b) R_b
+       do e = nbr_ptr(a), nbr_ptr(a+1)-1
+          b = nbr_blk(e); nqb = bq(b)%nq
+          if (nqb == 0) cycle
+          Gm => icgn_qg(qp, nbr_pair, nbr_isA, e)
+          allocate(Acur(b)%m(npa, nqb))
+          do kq = 1, nqb
+             Acur(b)%m(:, kq) = Gm(:, kq) * bq(b)%res(kq)
+          end do
+       end do
+
+       do ord = 0, order
+          if (ord > 0) then
+             ! A_next(a,b2) = sum_b A(a,b) W(b,b2) R_b2
+             do b = 1, nb
+                if (.not. associated(Acur(b)%m)) cycle
+                do f = nbr_ptr(b), nbr_ptr(b+1)-1
+                   b2 = nbr_blk(f); nqb2 = bq(b2)%nq
+                   if (nqb2 == 0) cycle
+                   if (.not. associated(Anext(b2)%m)) then
+                      allocate(Anext(b2)%m(npa, nqb2)); Anext(b2)%m = (0.0_dp, 0.0_dp)
+                   end if
+                   Wm => qp(nbr_pair(f))%wab
+                   if (nbr_isA(f)) then; opw = 'N'; else; opw = 'C'; end if
+                   call icgn_zgemm_gen('N', opw, cone, Acur(b)%m, Wm, cone, Anext(b2)%m)
+                end do
+             end do
+             do b = 1, nb
+                if (associated(Acur(b)%m)) deallocate(Acur(b)%m)
+             end do
+             amax = 0.0_dp; any_cur = .false.
+             do b2 = 1, nb
+                if (.not. associated(Anext(b2)%m)) cycle
+                do kq = 1, bq(b2)%nq
+                   Anext(b2)%m(:, kq) = Anext(b2)%m(:, kq) * bq(b2)%res(kq)
+                   amax = max(amax, maxval(abs(Anext(b2)%m(:, kq))))
+                end do
+                Acur(b2)%m => Anext(b2)%m
+                nullify(Anext(b2)%m)
+                any_cur = .true.
+             end do
+             if (.not. any_cur .or. amax < thr) exit
           end if
 
-          atom = queue(qhead); qhead = qhead + 1
+          ! close the chain into block-sparse Sigma(P_a, P_a2), a2 >= a
+          do b = 1, nb
+             if (.not. associated(Acur(b)%m)) cycle
+             do f = nbr_ptr(b), nbr_ptr(b+1)-1
+                a2 = nbr_blk(f)
+                if (a2 < a) cycle
+                npa2 = bq(a2)%np
+                if (npa2 == 0) cycle
+                Gm => icgn_qg(qp, nbr_pair, nbr_isA, nbr_rev(f))     ! G(P_a2, Q_b)
+                slot = icgn_sig_slot(sig, a, a2, npa, npa2)
+                call icgn_zgemm_gen('N', 'C', cone, Acur(b)%m, Gm, cone, sig(a)%mat(slot)%m)
+             end do
+          end do
+       end do
 
-          adj_start = int(xadj(atom)) + 1    ! convert 0-based xadj to 1-based
-          adj_end   = int(xadj(atom+1))
+       do b = 1, nb
+          if (associated(Acur(b)%m))  deallocate(Acur(b)%m)
+          if (associated(Anext(b)%m)) deallocate(Anext(b)%m)
+       end do
+    end do
+    !$omp end do
+    deallocate(Acur, Anext)
+    !$omp end parallel
+    call icgn_restore_nesting(saved_levels)
+  end subroutine icgn_sigma_blocksparse
 
-          ! Repeatedly pick the best-fit unvisited neighbour of this atom:
-          ! prefer the one whose weight fills up to target_wt without
-          ! exceeding it (minimises overshoot); if every remaining neighbour
-          ! would overshoot, take the smallest one (minimises the overshoot
-          ! amount rather than picking arbitrarily / by edge weight alone).
-          ! Cost: O(degree^2) per atom — degree is small for tight-binding.
-          do while (cur_wt < target_wt)
-             found_fit     = .false.
-             best_fit_atom = -1
-             best_fit_wt   = -1
-             best_fit_gap  = huge(0)   ! smallest (target - cur - w) >= 0 seen so far
-             do j = adj_start, adj_end
-                i = int(adjncy(j)) + 1    ! 0-based → 1-based
-                if (.not. visited(i)) then
-                   block
-                     integer :: wv, gap
-                     wv = int(vwgt(i))
-                     gap = target_wt - cur_wt - wv
-                     if (gap >= 0) then
-                        ! fits without overshoot: keep the tightest fit
-                        if (.not. found_fit .or. gap < best_fit_gap) then
-                           found_fit     = .true.
-                           best_fit_gap  = gap
-                           best_fit_atom = i
-                           best_fit_wt   = wv
-                        end if
-                     else if (.not. found_fit) then
-                        ! would overshoot: among these, keep the smallest atom
-                        ! (minimises how far over target_wt we go)
-                        if (best_fit_atom == -1 .or. wv < best_fit_wt) then
-                           best_fit_atom = i
-                           best_fit_wt   = wv
-                        end if
-                     end if
-                   end block
+  ! Merge H_PP CSR with block-sparse Sigma into a new full CSR (sorted columns).
+  ! Lower triangle of Sigma is filled by Hermiticity; diagonal blocks are
+  ! Hermitianized in place.
+  subroutine icgn_csr_add_sigma(ham, roff_blk, sig, nred)
+    type(CSR), intent(inout) :: ham
+    integer, intent(in) :: roff_blk(:), nred
+    type(ICGNSigRow), intent(in) :: sig(:)
+    integer :: a, t, a2, i, j, r, c, k, nnew, pos
+    integer(8) :: ne
+    integer, allocatable :: ii(:), jj(:), ord(:)
+    complex(dp), allocatable :: vv(:)
+    integer, allocatable :: rowcount(:), next(:)
+    real(dp), parameter :: thr = 1.0e-14_dp
+    complex(dp) :: val
+
+    ! Upper bound of CSR entries after merge.  Diagonal blocks are Hermitianized
+    ! before the threshold test, so count after combining (i,j)/(j,i).
+    ne = ham%nnz
+    do a = 1, size(sig)
+       do t = 1, sig(a)%n
+          a2 = sig(a)%blk(t)
+          do i = 1, size(sig(a)%mat(t)%m, 1)
+             do j = 1, size(sig(a)%mat(t)%m, 2)
+                if (a2 == a) then
+                   if (j < i) cycle
+                   if (j > i) then
+                      val = (sig(a)%mat(t)%m(i,j) + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
+                      if (abs(val) <= thr) cycle
+                      ne = ne + 2
+                   else
+                      if (abs(sig(a)%mat(t)%m(i,j)) <= thr) cycle
+                      ne = ne + 1
+                   end if
+                else
+                   if (abs(sig(a)%mat(t)%m(i,j)) <= thr) cycle
+                   ne = ne + 2
                 end if
              end do
-             if (best_fit_atom == -1) exit     ! no more unvisited neighbours of this atom
-
-             nb_atom          = best_fit_atom
-             visited(nb_atom) = .true.
-             part(nb_atom)    = int(blk, c_int)
-             cur_wt           = cur_wt + int(vwgt(nb_atom))
-             n_unvisited      = n_unvisited - 1
-             qtail            = qtail + 1
-             queue(qtail)     = nb_atom
           end do
+       end do
+    end do
+    if (ne > int(huge(0), kind=8)) then
+       write(*,*) '(icgn) csr_add_sigma: entry count overflows default integer'
+       return
+    end if
+    allocate(ii(max(1, int(ne))), jj(max(1, int(ne))), vv(max(1, int(ne))))
+    nnew = 0
+    ! Existing H_PP
+    do r = 1, ham%nrow
+       do k = ham%Mi(r), ham%Mi(r+1)-1
+          nnew = nnew + 1
+          ii(nnew) = r; jj(nnew) = ham%Mj(k); vv(nnew) = ham%M(k)
+       end do
+    end do
+    ! Sigma blocks
+    do a = 1, size(sig)
+       do t = 1, sig(a)%n
+          a2 = sig(a)%blk(t)
+          do i = 1, size(sig(a)%mat(t)%m, 1)
+             do j = 1, size(sig(a)%mat(t)%m, 2)
+                val = sig(a)%mat(t)%m(i,j)
+                if (a2 == a) then
+                   ! Hermitianize diagonal block on the fly (keep upper + diag)
+                   if (j < i) cycle
+                   if (j > i) val = (val + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
+                   if (abs(val) <= thr) cycle
+                   nnew = nnew + 1
+                   ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a)+j-1; vv(nnew) = val
+                   if (j > i) then
+                      nnew = nnew + 1
+                      ii(nnew) = roff_blk(a)+j-1; jj(nnew) = roff_blk(a)+i-1; vv(nnew) = conjg(val)
+                   end if
+                else
+                   if (abs(val) <= thr) cycle
+                   nnew = nnew + 1
+                   ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a2)+j-1; vv(nnew) = val
+                   nnew = nnew + 1
+                   ii(nnew) = roff_blk(a2)+j-1; jj(nnew) = roff_blk(a)+i-1; vv(nnew) = conjg(val)
+                end if
+             end do
+          end do
+       end do
+    end do
 
-       end do  ! grow block (possibly multi-component)
+    ! Counting sort by row, then insertion-sort by col within each row and merge.
+    allocate(rowcount(nred), next(nred), ord(max(1,nnew)))
+    rowcount = 0
+    do k = 1, nnew
+       rowcount(ii(k)) = rowcount(ii(k)) + 1
+    end do
+    next(1) = 1
+    do r = 1, nred-1
+       next(r+1) = next(r) + rowcount(r)
+    end do
+    do k = 1, nnew
+       r = ii(k); ord(next(r)) = k; next(r) = next(r) + 1
+    end do
+    ! next(r) now past-the-end; start of row r is next(r)-rowcount(r)
+    call destroy_matrix(ham)
+    call create_matrix(ham, nred, nred, max(1, nnew))
+    ham%sparse_fmt = 'F'
+    ham%Mi(1) = 1
+    pos = 0
+    do r = 1, nred
+       i = next(r) - rowcount(r)          ! first index in ord for this row
+       j = next(r) - 1                    ! last index
+       ! insertion sort ord(i:j) by column
+       do k = i+1, j
+          a = ord(k); t = k - 1
+          do while (t >= i .and. jj(ord(t)) > jj(a))
+             ord(t+1) = ord(t); t = t - 1
+          end do
+          ord(t+1) = a
+       end do
+       ! emit merged entries
+       do k = i, j
+          a = ord(k)
+          if (pos >= ham%Mi(r) .and. ham%Mj(pos) == jj(a)) then
+             ham%M(pos) = ham%M(pos) + vv(a)
+          else
+             pos = pos + 1
+             ham%Mj(pos) = jj(a)
+             ham%M(pos)  = vv(a)
+          end if
+       end do
+       ham%Mi(r+1) = pos + 1
+    end do
+    ham%nnz = pos
+    deallocate(ii, jj, vv, ord, rowcount, next)
+  end subroutine icgn_csr_add_sigma
 
-       remaining_wt     = remaining_wt - cur_wt
-       remaining_blocks = remaining_blocks - 1
+  ! Sigma = sum_{ord=0..order} H_PQ R (W R)^ord H_QP on the block structure.
+  ! Parallel over the P blocks a (each owns the block row Sigma(P_a, :)); only
+  ! the blocks a2 >= a are accumulated, the rest follows from Hermiticity.
+  ! Locate or create the Sigma block (a, a2) inside sig(a).  a2 >= a.
+  function icgn_sig_slot(sig, a, a2, npa, npa2) result(slot)
+    type(ICGNSigRow), intent(inout) :: sig(:)
+    integer, intent(in) :: a, a2, npa, npa2
+    integer :: slot, t
+    integer, pointer :: blk_new(:)
+    type(ICGNMat), pointer :: mat_new(:)
+    slot = 0
+    do t = 1, sig(a)%n
+       if (sig(a)%blk(t) == a2) then; slot = t; return; end if
+    end do
+    ! grow by one
+    slot = sig(a)%n + 1
+    allocate(blk_new(slot), mat_new(slot))
+    if (sig(a)%n > 0) then
+       blk_new(1:sig(a)%n) = sig(a)%blk(1:sig(a)%n)
+       do t = 1, sig(a)%n
+          mat_new(t)%m => sig(a)%mat(t)%m
+          nullify(sig(a)%mat(t)%m)
+       end do
+       deallocate(sig(a)%blk, sig(a)%mat)
+    end if
+    sig(a)%blk => blk_new; sig(a)%mat => mat_new
+    sig(a)%n = slot
+    sig(a)%blk(slot) = a2
+    allocate(sig(a)%mat(slot)%m(npa, npa2))
+    sig(a)%mat(slot)%m = (0.0_dp, 0.0_dp)
+  end function icgn_sig_slot
 
-    end do  ! blk loop
+  subroutine icgn_free_sigrows(sig)
+    type(ICGNSigRow), allocatable, intent(inout) :: sig(:)
+    integer :: a, t
+    if (.not. allocated(sig)) return
+    do a = 1, size(sig)
+       do t = 1, sig(a)%n
+          if (associated(sig(a)%mat(t)%m)) deallocate(sig(a)%mat(t)%m)
+       end do
+       if (associated(sig(a)%blk)) deallocate(sig(a)%blk)
+       if (associated(sig(a)%mat)) deallocate(sig(a)%mat)
+       sig(a)%n = 0
+    end do
+    deallocate(sig)
+  end subroutine icgn_free_sigrows
 
-    ! ---- any unvisited atom (leftover / disconnected remainder) → last block ----
-    ! (part already initialised to nblocks-1)
+  ! G(P_a, Q_b) of the adjacency entry e (block a, neighbour b)
+  function icgn_qg(qp, nbr_pair, nbr_isA, e) result(p)
+    type(ICGNQPair), intent(in) :: qp(:)
+    integer, intent(in) :: nbr_pair(:), e
+    logical, intent(in) :: nbr_isA(:)
+    complex(dp), pointer :: p(:,:)
+    if (nbr_isA(e)) then
+       p => qp(nbr_pair(e))%gab
+    else
+       p => qp(nbr_pair(e))%gba
+    end if
+  end function icgn_qg
 
-    deallocate(visited, queue)
-  end subroutine icgn_graph_partition
+  ! out_X = [R] * sum_Y (W_{Y,X})^T in_Y   (the operator W^T = conj(W) of the power iteration)
+  subroutine icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, vin, vout, apply_res)
+    integer, intent(in) :: nb, nbr_ptr(:), nbr_blk(:), nbr_pair(:), qoff(:)
+    logical, intent(in) :: nbr_isA(:), apply_res
+    type(ICGNQBlock), intent(in) :: bq(:)
+    type(ICGNQPair), intent(in) :: qp(:)
+    complex(dp), intent(in) :: vin(:)
+    complex(dp), intent(out) :: vout(:)
+    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp), czero = (0.0_dp, 0.0_dp)
+    integer :: X, Y, f, nqx, nqy, oX, oY, maxnq, nth, q
+    complex(dp), allocatable :: tmp(:), yv(:)
+    external :: zgemv
+
+    maxnq = 1
+    do X = 1, nb
+       maxnq = max(maxnq, bq(X)%nq)
+    end do
+    nth = min(icgn_thread_budget(), max(1, nb))
+    !$omp parallel default(shared) num_threads(nth) if(nth > 1) private(X, Y, f, nqx, nqy, oX, oY, q, tmp, yv)
+    allocate(tmp(maxnq), yv(maxnq))
+    !$omp do schedule(dynamic,1)
+    do X = 1, nb
+       nqx = bq(X)%nq
+       if (nqx == 0) cycle
+       oX = qoff(X)
+       vout(oX+1:oX+nqx) = czero
+       do f = nbr_ptr(X), nbr_ptr(X+1)-1
+          Y = nbr_blk(f); nqy = bq(Y)%nq
+          if (nqy == 0) cycle
+          oY = qoff(Y)
+          if (nbr_isA(f)) then
+             ! X = A, Y = B, wab is (nq_X x nq_Y):  out_X += conj(wab) in_Y = conj(wab * conj(in_Y))
+             do q = 1, nqy
+                tmp(q) = conjg(vin(oY+q))
+             end do
+             call zgemv('N', nqx, nqy, cone, qp(nbr_pair(f))%wab, max(1,nqx), tmp, 1, czero, yv, 1)
+             do q = 1, nqx
+                vout(oX+q) = vout(oX+q) + conjg(yv(q))
+             end do
+          else
+             ! X = B, Y = A, wab is (nq_Y x nq_X):  out_X += wab^T in_Y
+             do q = 1, nqy
+                tmp(q) = vin(oY+q)
+             end do
+             call zgemv('T', nqy, nqx, cone, qp(nbr_pair(f))%wab, max(1,nqy), tmp, 1, czero, yv, 1)
+             do q = 1, nqx
+                vout(oX+q) = vout(oX+q) + yv(q)
+             end do
+          end if
+       end do
+       if (apply_res) then
+          do q = 1, nqx
+             vout(oX+q) = vout(oX+q) * bq(X)%res(q)
+          end do
+       end if
+    end do
+    !$omp end do
+    deallocate(tmp, yv)
+    !$omp end parallel
+    ! blocks without Q states keep zeros
+    do X = 1, nb
+       if (bq(X)%nq == 0) cycle
+    end do
+  end subroutine icgn_blk_wt_apply
+
+  ! Power iteration for ||T||_2, T = R W, on the block structure (same iteration
+  ! as the CSR matvec form: u = R W^T v, w = R u, v <- W^T w).
+  subroutine icgn_power_iteration_blk(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, &
+       maxiter, tol, sigma_out, converged_out)
+    integer, intent(in) :: nb, nbr_ptr(:), nbr_blk(:), nbr_pair(:), maxiter
+    logical, intent(in) :: nbr_isA(:)
+    type(ICGNQBlock), intent(in) :: bq(:)
+    type(ICGNQPair), intent(in) :: qp(:)
+    real(dp), intent(in) :: tol
+    real(dp), intent(out) :: sigma_out
+    logical, intent(out) :: converged_out
+    integer :: k, X, j, ntot, q
+    integer, allocatable :: qoff(:)
+    real(dp) :: nrm, sigma_est, diff2, rr, ri
+    complex(dp), allocatable :: v(:), u(:), w(:), v_next(:)
+    real(dp), allocatable :: res(:)
+
+    sigma_out = 0.0_dp; converged_out = .true.
+    allocate(qoff(nb+1)); qoff(1) = 0
+    do X = 1, nb
+       qoff(X+1) = qoff(X) + bq(X)%nq
+    end do
+    ntot = qoff(nb+1)
+    if (ntot == 0) return
+    allocate(v(ntot), u(ntot), w(ntot), v_next(ntot), res(ntot))
+    do X = 1, nb
+       do q = 1, bq(X)%nq
+          res(qoff(X)+q) = bq(X)%res(q)
+       end do
+    end do
+    do j = 1, ntot
+       call random_number(rr); call random_number(ri)
+       v(j) = cmplx(rr - 0.5_dp, ri - 0.5_dp, kind=dp)
+    end do
+    nrm = sqrt(sum(real(v,dp)**2 + aimag(v)**2))
+    if (nrm < 1.0e-14_dp) then
+       deallocate(v, u, w, v_next, res, qoff); return
+    end if
+    v = v / nrm
+    converged_out = .false.
+    sigma_est = 0.0_dp
+    do k = 1, maxiter
+       call icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, v, u, .true.)
+       sigma_est = sqrt(sum(real(u,dp)**2 + aimag(u)**2))
+       do j = 1, ntot
+          w(j) = u(j) * res(j)
+       end do
+       call icgn_blk_wt_apply(nb, bq, qp, nbr_ptr, nbr_blk, nbr_pair, nbr_isA, qoff, w, v_next, .false.)
+       nrm = sqrt(sum(real(v_next,dp)**2 + aimag(v_next)**2))
+       if (nrm < 1.0e-14_dp) then
+          sigma_out = 0.0_dp; converged_out = .true.
+          deallocate(v, u, w, v_next, res, qoff); return
+       end if
+       v_next = v_next / nrm
+       diff2 = sum(real(v_next - v, dp)**2 + aimag(v_next - v)**2)
+       v = v_next
+       if (sqrt(diff2) < tol) then
+          converged_out = .true.
+          exit
+       end if
+    end do
+    if (icgn_timing_on()) write(*,'(a,i0,a,l1)') '[ICGN-TIME] power iteration sweeps: ', &
+         min(k, maxiter), ' converged=', converged_out
+    sigma_out = sigma_est
+    deallocate(v, u, w, v_next, res, qoff)
+  end subroutine icgn_power_iteration_blk
+
+  ! Warnings about the Neumann convergence estimate (same messages as the edge-list path)
+  subroutine icgn_report_convergence(upt)
+    type(OUPT), intent(in) :: upt
+    if (.not. upt%icgn_pi_converged) then
+       write(*,'(a,i0,a)') &
+            '  (icgn) WARNING: power iteration did not converge in ', &
+            upt%icgn_pi_maxiter, ' sweeps — ||T||_2 estimate may be unreliable.'
+    end if
+    if (upt%icgn_sigma_T2 >= 1.0_dp) then
+       write(*,'(a,f10.6,a)') &
+            '  (icgn) WARNING: ||T||_2 = ', upt%icgn_sigma_T2, &
+            ' >= 1 — Neumann series not guaranteed to converge at this E0.'
+       if (upt%icgn_selfenergy_order == 0) write(*,'(a)') &
+            '  (icgn) NOTE: order=0 does not use the Q-Q coupling W, so this' // &
+            ' warning is informational only for this run.'
+    else if (upt%verbose > 0) then
+       write(*,'(a,f10.6,a,l1)') &
+            '  (icgn) ||T||_2 = ', upt%icgn_sigma_T2, &
+            ', power-iter converged: ', upt%icgn_pi_converged
+       if (upt%icgn_selfenergy_order == 0) write(*,'(a)') &
+            '  (icgn) NOTE: order=0 ignores W — norm above is for diagnostics only.'
+    end if
+  end subroutine icgn_report_convergence
+
+
+! ===========================================================================
+! SECTION D — Dense eigensolvers & BLAS helpers
+! ===========================================================================
+
+  subroutine dense_eigh(a, w, ierr)
+    complex(dp), intent(inout) :: a(:,:)
+    real(dp), intent(out) :: w(:)
+    integer, intent(out) :: ierr
+    integer :: n, info, lwork, lrwork, liwork
+    complex(dp) :: workq(1)
+    real(dp) :: rworkq(1)
+    integer :: iworkq(1)
+    complex(dp), allocatable :: work(:)
+    real(dp), allocatable :: rwork(:)
+    integer, allocatable :: iwork(:)
+    n=size(w)
+    if (n == 0) then; ierr=0; return; end if
+    call zheevd('V','U',n,a,n,w,workq,-1,rworkq,-1,iworkq,-1,info)
+    if (info /= 0) then; ierr=10; return; end if
+    lwork=max(1,int(real(workq(1)))); lrwork=max(1,int(rworkq(1))); liwork=max(1,iworkq(1))
+    allocate(work(lwork),rwork(lrwork),iwork(liwork))
+    call zheevd('V','U',n,a,n,w,work,lwork,rwork,lrwork,iwork,liwork,info)
+    deallocate(work,rwork,iwork); ierr=info
+  end subroutine dense_eigh
+
+  ! Partial Hermitian eigenproblem on energy window (VL, VU] via ZHEEVR (MRRR).
+  ! ABSTOL = 0 selects the relative-accuracy path (EPS*|T|), matching the
+  ! high-accuracy regime of ZHEEVD for the eigenvalues that are requested.
+  ! On failure the caller should fall back to dense_eigh.
+  ! On success: m eigenvalues in w(1:m), eigenvectors in z(:,1:m).
+  subroutine dense_eigh_window(a, vl, vu, w, z, m, ierr)
+    complex(dp), intent(inout) :: a(:,:)
+    real(dp), intent(in) :: vl, vu
+    real(dp), intent(out) :: w(:)
+    complex(dp), intent(out) :: z(:,:)
+    integer, intent(out) :: m, ierr
+    integer :: n, info, lwork, lrwork, liwork
+    complex(dp) :: workq(1)
+    real(dp) :: rworkq(1)
+    integer :: iworkq(1)
+    complex(dp), allocatable :: work(:)
+    real(dp), allocatable :: rwork(:)
+    integer, allocatable :: iwork(:), isuppz(:)
+    real(dp), parameter :: abstol = 0.0_dp
+    n = size(a, 1)
+    m = 0; ierr = 0; w = 0.0_dp; z = (0.0_dp, 0.0_dp)
+    if (n == 0) return
+    if (.not. (vu > vl)) then; ierr = 11; return; end if
+    allocate(isuppz(2 * max(1, n)))
+    call zheevr('V', 'V', 'U', n, a, n, vl, vu, 1, n, abstol, m, w, z, n, &
+         isuppz, workq, -1, rworkq, -1, iworkq, -1, info)
+    if (info /= 0) then; deallocate(isuppz); ierr = 10; return; end if
+    lwork  = max(1, int(real(workq(1), kind=dp)))
+    lrwork = max(1, int(rworkq(1)))
+    liwork = max(1, iworkq(1))
+    allocate(work(lwork), rwork(lrwork), iwork(liwork))
+    call zheevr('V', 'V', 'U', n, a, n, vl, vu, 1, n, abstol, m, w, z, n, &
+         isuppz, work, lwork, rwork, lrwork, iwork, liwork, info)
+    deallocate(work, rwork, iwork, isuppz)
+    ierr = info
+  end subroutine dense_eigh_window
+
+  ! Full spectrum (ZHEEVD). Used when outer / Neumann need discarded states.
+  subroutine coarse_eigh(a, w, ierr)
+    complex(dp), intent(inout) :: a(:,:)
+    real(dp), intent(out) :: w(:)
+    integer, intent(out) :: ierr
+    call dense_eigh(a, w, ierr)
+  end subroutine coarse_eigh
+
+  logical function stored_entry(fmt, r, c)
+    character(1), intent(in) :: fmt
+    integer, intent(in) :: r, c
+    select case (fmt)
+    case ('U', 'u')
+       stored_entry = (r <= c)
+    case ('L', 'l')
+       stored_entry = (r >= c)
+    case default
+       ! The Hamiltonian builder may emit a complete matrix even when the
+       ! sparse format is labelled F.  Process one triangle here; the
+       ! projected matrix is completed by its Hermitian conjugate below.
+       stored_entry = (r <= c)
+    end select
+  end function stored_entry
+
+  ! C = op(A) * B with BLAS zgemm (opa = 'N' or 'C').  Much faster than the
+  ! Fortran intrinsic matmul and thread-safe (runs single-threaded inside our
+  ! OpenMP regions because nesting is flattened, threaded when called serially).
+  subroutine icgn_zgemm(opa, A, B, C)
+    character(len=1), intent(in) :: opa
+    complex(dp), intent(in) :: A(:,:), B(:,:)
+    complex(dp), intent(inout) :: C(:,:)
+    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp), czero = (0.0_dp, 0.0_dp)
+    integer :: m, n, kk
+    external :: zgemm
+    m = size(C,1); n = size(C,2)
+    if (m == 0 .or. n == 0) return
+    if (opa == 'N') then; kk = size(A,2); else; kk = size(A,1); end if
+    if (kk == 0) then; C = czero; return; end if
+    call zgemm(opa, 'N', m, n, kk, cone, A, max(1,size(A,1)), B, max(1,size(B,1)), &
+         czero, C, max(1,size(C,1)))
+  end subroutine icgn_zgemm
+
+  ! C = alpha*op(A)*op(B) + beta*C with BLAS zgemm (op = 'N','T','C').
+  subroutine icgn_zgemm_gen(opa, opb, alpha, A, B, beta, C)
+    character(len=1), intent(in) :: opa, opb
+    complex(dp), intent(in) :: alpha, beta
+    complex(dp), intent(in) :: A(:,:), B(:,:)
+    complex(dp), intent(inout) :: C(:,:)
+    integer :: m, n, kk
+    external :: zgemm
+    m = size(C,1); n = size(C,2)
+    if (m == 0 .or. n == 0) return
+    if (opa == 'N') then; kk = size(A,2); else; kk = size(A,1); end if
+    if (kk == 0) return
+    call zgemm(opa, opb, m, n, kk, alpha, A, max(1,size(A,1)), B, max(1,size(B,1)), &
+         beta, C, max(1,size(C,1)))
+  end subroutine icgn_zgemm_gen
+
+
+! ===========================================================================
+! SECTION E — Logging, timing, OpenMP thread control
+! ===========================================================================
+
+   ! Statistics/progress message: printed only when ICGN_LOG_STATS is .true.
+   ! (disabled by default so that a normal run is not flooded with ICGN details).
+   subroutine icgn_log_progress(upt, message)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: message
+      if (ICGN_LOG_STATS) call icgn_log_important(upt, message)
+   end subroutine icgn_log_progress
+
+   ! Message that is always forwarded to the host application log (through the
+   ! C++ callback upt_log_message): summaries, fall-backs, diagnostics.
+   subroutine icgn_log_important(upt, message)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: message
+      character(kind=c_char), allocatable :: c_message(:)
+      integer :: i, message_length
+
+      message_length = len_trim(message)
+      allocate(c_message(max(1, message_length)))
+      do i = 1, message_length
+          c_message(i) = message(i:i)
+      end do
+      call upt_log_message(c_message, int(message_length, c_int))
+      deallocate(c_message)
+   end subroutine icgn_log_important
+
+   subroutine icgn_log_block(upt, mode, block_number, block_dimension, phase)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: mode, phase
+      integer, intent(in) :: block_number, block_dimension
+      character(len=256) :: message
+      write(message,'(a,a,a,i0,a,i0)') 'mode=', trim(mode), ', block=', block_number, &
+             ', dimension=', block_dimension
+      message = trim(message)//', phase='//trim(phase)
+      call icgn_log_progress(upt, message)
+   end subroutine icgn_log_block
+
+   subroutine icgn_log_timing(upt, phase, seconds)
+      type(OUPT), intent(in) :: upt
+      character(*), intent(in) :: phase
+      real(dp), intent(in) :: seconds
+      integer(kind=8) :: total_seconds, hours, minutes, secs
+      character(len=256) :: message
+
+      total_seconds = int(max(0.0_dp, seconds), kind=8)
+      hours = total_seconds / 3600_8
+      minutes = mod(total_seconds, 3600_8) / 60_8
+      secs = mod(total_seconds, 60_8)
+      write(message,'(a,a,a,i0,a,i2.2,a,i2.2,a)') 'mode=icgn timing: ', trim(phase), &
+           ' = ', hours, 'h ', minutes, 'm ', secs, 's'
+      call icgn_log_progress(upt, trim(message))
+   end subroutine icgn_log_timing
+
+   ! One-shot summary of a finished preparation: original -> reduced dimension,
+   ! number of blocks, cut fraction and (ICGN) Neumann-series norm estimate.
+   ! This is the only ICGN statistic shown by default.
+   subroutine icgn_log_info(upt, mode, original_dim, reduced_dim, &
+     nblocks, cut_fraction, sigma_t2, pi_converged, has_norm)
+    type(OUPT), intent(in) :: upt
+    character(*), intent(in) :: mode
+    integer, intent(in) :: original_dim, reduced_dim, nblocks
+    real(dp), intent(in) :: cut_fraction, sigma_t2
+    logical, intent(in) :: pi_converged, has_norm
+      character(len=512) :: line
+
+      write(line,'(a,a,a,i0,a,i0,a,i0,a,f8.4)') 'mode=', trim(mode), &
+        ', dimension=', original_dim, ' -> ', reduced_dim, ', blocks=', nblocks, &
+        ', retained fraction=', real(reduced_dim,dp)/max(1.0_dp,real(original_dim,dp))
+      call icgn_log_important(upt, trim(line))
+      write(line,'(a,f8.4)') 'cut fraction=', cut_fraction
+      call icgn_log_important(upt, trim(line))
+   if (has_norm) then
+         write(line,'(a,f12.6,a,l1)') 'Neumann norm=', sigma_t2, &
+         ', power iteration converged=', pi_converged
+         call icgn_log_important(upt, trim(line))
+    end if
+  end subroutine icgn_log_info
+
+  ! Wall-clock timing (portable, works with or without OpenMP).
+  function icgn_wall() result(t)
+    real(dp) :: t
+    integer(8) :: cnt, rate
+    call system_clock(cnt, rate)
+    t = real(cnt, dp) / real(max(1_8, rate), dp)
+  end function icgn_wall
+
+  ! Prints "[ICGN-TIME] phase: x s" when env UPT_CG_TIMING is set (any value).
+  subroutine icgn_report_time(phase, t0)
+    character(*), intent(in) :: phase
+    real(dp), intent(in) :: t0
+    character(len=8) :: s
+    integer :: ln, ios
+    call get_environment_variable('UPT_CG_TIMING', s, length=ln, status=ios)
+    if (ios == 0 .or. ios == -1) then
+       if (ln > 0) write(*,'(a,a,a,f10.3,a)') '[ICGN-TIME] ', phase, ': ', icgn_wall() - t0, ' s'
+    end if
+  end subroutine icgn_report_time
+
+  ! How sparse are the block-block couplings?  Counts the rows/columns of each
+  ! H_ab that contain at least one nonzero (timing diagnostics only).
+  subroutine icgn_report_boundary(pairs, npair)
+    type(ICGNPair), intent(in) :: pairs(:)
+    integer, intent(in) :: npair
+    integer :: i, nr, nc, max_nr, max_nc
+    integer(8) :: sum_nr, sum_nc, sum_ra, sum_cb
+    sum_nr = 0; sum_nc = 0; sum_ra = 0; sum_cb = 0; max_nr = 0; max_nc = 0
+    do i = 1, npair
+       if (.not. associated(pairs(i)%h)) cycle
+       nr = count(any(pairs(i)%h /= (0.0_dp, 0.0_dp), dim=2))
+       nc = count(any(pairs(i)%h /= (0.0_dp, 0.0_dp), dim=1))
+       sum_nr = sum_nr + nr; sum_nc = sum_nc + nc
+       sum_ra = sum_ra + size(pairs(i)%h, 1); sum_cb = sum_cb + size(pairs(i)%h, 2)
+       max_nr = max(max_nr, nr); max_nc = max(max_nc, nc)
+    end do
+    write(*,'(a,i0,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0)') '[ICGN-TIME] boundary: npair=', npair, &
+         ' nonzero_rows=', sum_nr, '/', sum_ra, ' nonzero_cols=', sum_nc, '/', sum_cb, &
+         ' max_rows_per_pair=', max_nr, ' max_cols_per_pair=', max_nc
+  end subroutine icgn_report_boundary
+
+  ! True when env UPT_CG_TIMING is set (any non-empty value).
+  function icgn_timing_on() result(on)
+    logical :: on
+    character(len=8) :: s
+    integer :: ln, ios
+    call get_environment_variable('UPT_CG_TIMING', s, length=ln, status=ios)
+    on = (ln > 0 .and. (ios == 0 .or. ios == -1))
+  end function icgn_timing_on
+
+  function icgn_thread_budget() result(nth)
+    !$ use omp_lib
+    integer :: nth
+    integer :: v, ios, ln, req, avail
+    logical, save :: warned = .false.
+    character(len=32) :: s
+    nth = 1; req = 1; avail = 1
+    !$ req = omp_get_max_threads(); avail = max(1, omp_get_num_procs())
+    !$ nth = min(req, avail)
+    !$ if (omp_in_parallel()) nth = 1
+    ! Safety guard: never use more threads than the CPUs this process may use
+    ! (affinity mask / cgroup / SLURM allocation); warn the user once.
+    !$ if (req > avail .and. .not. warned .and. .not. omp_in_parallel()) then
+    !$    warned = .true.
+    !$    call icgn_warn_threads(req, avail)
+    !$    ! also cut the thread count seen by threaded BLAS/LAPACK (MKL follows it)
+    !$    call omp_set_num_threads(avail)
+    !$ end if
+    call get_environment_variable('UPT_CG_THREADS', s, length=ln, status=ios)
+    if (ios == 0 .and. ln > 0) then
+       read(s(1:ln), *, iostat=ios) v
+       if (ios == 0 .and. v >= 1) nth = min(nth, v)
+    end if
+    nth = max(1, nth)
+  end function icgn_thread_budget
+
+  ! Number of OUTER threads for a loop over nwork independent items.
+  ! default_nth is the automatic choice of the caller.  Env UPT_CG_OUTER:
+  !   0 -> no outer parallelism (items one after another; threaded BLAS/LAPACK
+  !        inside uses the whole thread budget)
+  !   1 -> always parallel over items (BLAS single-threaded inside)
+  !   unset/other -> default_nth, except that LARGE items (dim >= 512) are run
+  !        one after another so the threaded BLAS/LAPACK works on each of them
+  !        (measured: blocks of 1280 are faster this way, blocks of 160 the other way)
+  function icgn_outer_threads(nwork, default_nth, dim) result(nth)
+    integer, intent(in) :: nwork, default_nth
+    integer, intent(in), optional :: dim
+    integer :: nth
+    character(len=8) :: s
+    integer :: ln, ios
+    integer, parameter :: big_dim = 512
+    nth = default_nth
+    call get_environment_variable('UPT_CG_OUTER', s, length=ln, status=ios)
+    if (ios == 0 .and. ln > 0) then
+       if (s(1:1) == '0') then
+          nth = 1
+       else if (s(1:1) == '1') then
+          nth = min(icgn_thread_budget(), max(1, nwork))
+       else if (present(dim)) then
+          if (dim >= big_dim) nth = 1
+       end if
+    else if (present(dim)) then
+       if (dim >= big_dim) nth = 1
+    end if
+    nth = max(1, nth)
+  end function icgn_outer_threads
+
+  ! Printed once (rank 0 only) when more threads are requested than the CPUs
+  ! this process is allowed to use.
+  subroutine icgn_warn_threads(req, avail)
+    integer, intent(in) :: req, avail
+    character(len=16) :: rk
+    integer :: ln, ios, rank
+    call get_environment_variable('OMPI_COMM_WORLD_RANK', rk, length=ln, status=ios)
+    if (ios == 0 .and. ln > 0) then
+       read(rk(1:ln), *, iostat=ios) rank
+       if (ios == 0 .and. rank /= 0) return
+    end if
+    write(*,'(a,i0,a,i0,a)') '  (icgn) WARNING: ', req, &
+         ' OpenMP threads requested (OMP_NUM_THREADS / --cpus-per-task) but this process may use only ', &
+         avail, ' CPU(s).'
+    write(*,'(a,i0,a)') '  (icgn) Falling back to ', avail, &
+         ' thread(s) for coarse-graining: more threads than CPUs only slows the run down.'
+    write(*,'(a)') '  (icgn) Choose OMP_NUM_THREADS (or --cpus-per-task) <= the CPUs available to each MPI rank.'
+  end subroutine icgn_warn_threads
+
+  ! Allow only ONE active parallel level while our outer loop runs, so that a
+  ! threaded BLAS/LAPACK called from inside it runs single-threaded instead of
+  ! spawning nproc threads per outer thread (oversubscription).
+  subroutine icgn_flatten_nesting(saved)
+    !$ use omp_lib
+    integer, intent(out) :: saved
+    saved = 1
+    !$ saved = omp_get_max_active_levels()
+    !$ call omp_set_max_active_levels(1)
+  end subroutine icgn_flatten_nesting
+
+  subroutine icgn_restore_nesting(saved)
+    !$ use omp_lib
+    integer, intent(in) :: saved
+    !$ call omp_set_max_active_levels(saved)
+  end subroutine icgn_restore_nesting
 
 end module coarse_grain
