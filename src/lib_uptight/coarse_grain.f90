@@ -146,6 +146,12 @@ contains
 
   ! Called by the orchestrator right after the orbital operator has been built
   ! and before the reduced one is prepared.
+  !
+  ! Ownership: this is a SHALLOW snapshot of the CSR header (pointer addresses
+  ! only, not a deep copy of the matrix data). The caller MUST keep the original
+  ! Hamiltonian heap alive until icgn_swap_out / icgn_forget / icgn_destroy_operator.
+  ! Destroying or reallocating upt%ham between set_original and restore is a
+  ! contract violation and leaves dangling pointers in the snapshot.
   subroutine icgn_set_original(upt)
     type(OUPT), intent(inout) :: upt
     ! write(*,'(A,L1,A,L1,A,I0,A,I0)') '[ICGN-TRACE] set_original ham M/Mi=', associated(upt%ham%M), '/', &
@@ -154,7 +160,7 @@ contains
          ! associated(upt%U%Mi), ' nrow=', upt%U%nrow, ' nnz=', upt%U%nnz
     icgn_original_ham = upt%ham    ! value copy of struct header (pointer addresses, not heap data)
     icgn_original_u   = upt%U
-    icgn_original_valid = .true.
+    icgn_original_valid = associated(icgn_original_ham%M) .and. associated(icgn_original_ham%Mi)
     ! write(*,'(A,L1,A,L1)') '[ICGN-TRACE] set_original snapshot ham M/Mi=', associated(icgn_original_ham%M), '/', &
          ! associated(icgn_original_ham%Mi)
     ! write(*,'(A,L1,A,L1)') '[ICGN-TRACE] set_original snapshot U M/Mi=', associated(icgn_original_u%M), '/', &
@@ -297,9 +303,16 @@ contains
          ! associated(icgn_saved_u)
     ! write(*,'(A,L1,A,L1)') '[ICGN-TRACE] swap_out snapshot ham M/Mi=', associated(icgn_original_ham%M), '/', &
          ! associated(icgn_original_ham%Mi)
-    if (icgn_original_valid) then
+    ! Restore only when the shallow snapshot still looks alive. If the original
+    ! heap was freed against the set_original contract, skip the assignment
+    ! rather than planting a dangling CSR into upt%ham.
+    if (icgn_original_valid .and. associated(icgn_original_ham%M) .and. &
+        associated(icgn_original_ham%Mi)) then
       upt%ham = icgn_original_ham
       upt%U   = icgn_original_u
+    else if (icgn_original_valid) then
+      write(*,'(a)') '(icgn) swap_out: original Hamiltonian snapshot is no longer associated; skip restore'
+      icgn_original_valid = .false.
     end if
     ! write(*,'(A,L1,A,L1)') '[ICGN-TRACE] swap_out restored ham M/Mi=', associated(upt%ham%M), '/', &
          ! associated(upt%ham%Mi)
@@ -628,6 +641,19 @@ contains
     ! write(*,'(A)') '[ICGN-TRACE] destroy_pairs DONE'
   end subroutine destroy_pairs
 
+  ! Free full-block eigensystems left on upt%icgn_blocks after a failed prepare
+  ! stage (diagonalize / collect / build).  Safe to call when blocks are absent.
+  subroutine icgn_free_block_eigensystems(upt)
+    type(OUPT), intent(inout) :: upt
+    integer :: i
+    if (.not. associated(upt%icgn_blocks)) return
+    do i = 1, size(upt%icgn_blocks)
+       if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
+       if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
+       nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
+    end do
+  end subroutine icgn_free_block_eigensystems
+
 
   ! ==========================================================================
   ! ICGN prepare / configure
@@ -927,7 +953,10 @@ contains
     end block
     do i = 1, nb
        if (ierr_blk(i) /= 0) then
-          ierr = ierr_blk(i); return
+          ierr = ierr_blk(i)
+          ! Successful blocks already hold S_full/evals_full; free them all.
+          call icgn_free_block_eigensystems(upt)
+          return
        end if
     end do
     deallocate(ierr_blk, blk_of)
@@ -968,11 +997,7 @@ contains
        call icgn_collect_pairs(upt, atom_of, label, row_of, pairs, npair, ierr)
        if (ierr /= 0) then
           call destroy_pairs(pairs)
-          do i = 1, upt%icgn_num_blocks
-             if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
-             if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
-             nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
-          end do
+          call icgn_free_block_eigensystems(upt)
           return
        end if
        call icgn_report_time('collect pair couplings H_ab', t_stage)
@@ -1052,11 +1077,7 @@ contains
     if (total_ret == 0) then
        ierr = 9; write(*,*) '(icgn) no states retained'
        call destroy_pairs(pairs)
-       do i = 1, nb
-          if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
-          if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
-          nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
-       end do
+       call icgn_free_block_eigensystems(upt)
        return
     end if
     upt%icgn_original_dim = n
@@ -1096,11 +1117,7 @@ contains
          upt%icgn_add_core_outers > 0, ierr)
     if (ierr /= 0) then
        call destroy_pairs(pairs)
-       do i = 1, nb
-          if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
-          if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
-          nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
-       end do
+       call icgn_free_block_eigensystems(upt)
        return
     end if
     call icgn_report_time('build reduced H (pair projection)', t_stage)
@@ -1142,11 +1159,7 @@ contains
        call icgn_report_time('Neumann: block P-Q/Q-Q blocks', t_stage)
        t_mark = icgn_wall()
 
-       do i = 1, nb
-          if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
-          if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
-          nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
-       end do
+       call icgn_free_block_eigensystems(upt)
        call destroy_pairs(pairs)
 
        upt%icgn_sigma_T2     = -1.0_dp
@@ -1195,11 +1208,7 @@ contains
     ! released the pair matrices (v/h/t) nor the full block eigensystems.
     ! Free them here; both calls are no-ops if the Neumann branch already did it.
     if (allocated(pairs)) call destroy_pairs(pairs)
-    do i = 1, nb
-       if (associated(upt%icgn_blocks(i)%S_full))     deallocate(upt%icgn_blocks(i)%S_full)
-       if (associated(upt%icgn_blocks(i)%evals_full)) deallocate(upt%icgn_blocks(i)%evals_full)
-       nullify(upt%icgn_blocks(i)%S_full, upt%icgn_blocks(i)%evals_full)
-    end do
+    call icgn_free_block_eigensystems(upt)
 
     ! Build icgn_U (identity)
     call create_matrix(upt%icgn_U, nred, nred, nred)
