@@ -170,6 +170,12 @@ contains
          ! associated(upt%ham%Mi), ' nrow=', upt%ham%nrow, ' nnz=', upt%ham%nnz
     ! write(*,'(A,L1,A,L1,A,I0,A,I0)') '[ICGN-TRACE] set_original U M/Mi=', associated(upt%U%M), '/', &
          ! associated(upt%U%Mi), ' nrow=', upt%U%nrow, ' nnz=', upt%U%nnz
+    ! Do not overwrite the original snapshot while the reduced operator is
+    ! swapped into upt%ham: that would snapshot the reduced matrix instead.
+    if (associated(icgn_saved_ham)) then
+       write(*,'(a)') '(icgn) set_original: ignored while reduced operator is swapped in'
+       return
+    end if
     icgn_original_ham = upt%ham    ! value copy of struct header (pointer addresses, not heap data)
     icgn_original_u   = upt%U
     icgn_original_valid = associated(icgn_original_ham%M) .and. associated(icgn_original_ham%Mi)
@@ -377,6 +383,16 @@ contains
   subroutine icgn_destroy_operator(upt)
     type(OUPT), intent(inout), target :: upt
     integer :: i
+    ! Do not destroy icgn_ham while upt%ham still aliases it. If the original
+    ! snapshot has gone stale, fail closed and preserve the live operator.
+    if (associated(icgn_saved_ham)) then
+       if (.not. icgn_original_valid .or. .not. associated(icgn_original_ham%M) .or. &
+           .not. associated(icgn_original_ham%Mi)) then
+          write(*,'(a)') '(icgn) destroy_operator: original Hamiltonian unavailable; keeping swapped operator intact'
+          return
+       end if
+       call icgn_swap_out(upt)
+    end if
     call icgn_forget(upt)
     ! write(*,"(A,L1)") "[ICGN-TRACE] clear ham associated=", associated(upt%icgn_ham%M)
     if (associated(upt%icgn_ham%M)) then
@@ -484,6 +500,17 @@ contains
   subroutine icgn_clear(upt)
     type(OUPT), intent(inout) :: upt
     integer :: i
+    ! Never free the reduced matrix while upt%ham aliases it. Restore the
+    ! original first; if its snapshot is no longer valid, leave the operator
+    ! untouched rather than create a dangling pointer.
+    if (associated(icgn_saved_ham)) then
+       if (.not. icgn_original_valid .or. .not. associated(icgn_original_ham%M) .or. &
+           .not. associated(icgn_original_ham%Mi)) then
+          write(*,'(a)') '(icgn) clear: original Hamiltonian unavailable; keeping swapped operator intact'
+          return
+       end if
+       call icgn_swap_out(upt)
+    end if
     ! write(*,'(A)') '[ICGN-TRACE] clear ENTER'
     ! write(*,'(A,L1)') '[ICGN-TRACE] clear ham associated=', associated(upt%icgn_ham%M)
     if (associated(upt%icgn_ham%M)) then
@@ -1654,7 +1681,8 @@ contains
        do i = h%Mi(r)+1, h%Mi(r+1)-1
           key_j = h%Mj(i); key_m = h%M(i)
           j = i - 1
-          do while (j >= h%Mi(r) .and. h%Mj(j) > key_j)
+          do while (j >= h%Mi(r))
+             if (h%Mj(j) <= key_j) exit
              h%Mj(j+1) = h%Mj(j); h%M(j+1) = h%M(j)
              j = j - 1
           end do
@@ -2380,7 +2408,8 @@ contains
        ! insertion sort ord(i:j) by column
        do k = i+1, j
           a = ord(k); t = k - 1
-          do while (t >= i .and. jj(ord(t)) > jj(a))
+          do while (t >= i)
+             if (jj(ord(t)) <= jj(a)) exit
              ord(t+1) = ord(t); t = t - 1
           end do
           ord(t+1) = a
@@ -2388,8 +2417,14 @@ contains
        ! emit merged entries
        do k = i, j
           a = ord(k)
-          if (pos >= ham%Mi(r) .and. ham%Mj(pos) == jj(a)) then
-             ham%M(pos) = ham%M(pos) + vv(a)
+          if (pos >= ham%Mi(r)) then
+             if (ham%Mj(pos) == jj(a)) then
+                ham%M(pos) = ham%M(pos) + vv(a)
+             else
+                pos = pos + 1
+                ham%Mj(pos) = jj(a)
+                ham%M(pos)  = vv(a)
+             end if
           else
              pos = pos + 1
              ham%Mj(pos) = jj(a)
