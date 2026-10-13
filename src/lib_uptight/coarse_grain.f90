@@ -152,10 +152,6 @@ contains
 ! Solvers only see H via swap_in; they never know about coarse-graining.
 ! ===========================================================================
 
-! Swap/restore, configure, query, clear, prepare, lift.
-! Solvers only see H via swap_in; they never know about coarse-graining.
-! ===========================================================================
-
   ! Called by the orchestrator right after the orbital operator has been built
   ! and before the reduced one is prepared.
   !
@@ -295,6 +291,7 @@ contains
     type(OUPT), intent(inout), target :: upt
     complex(dp), allocatable :: reduced(:,:), lifted(:,:)
     integer :: nfull, nred, num_ev
+    character(len=256) :: log_message
 
     if (.not. associated(icgn_saved_ham)) return
     if (.not. associated(upt%eigen_vectors)) then
@@ -314,16 +311,18 @@ contains
     ! to be rotated back from the block eigenbasis, so only nfull < nred, or a
     ! row count that differs from the recorded reduced dimension, is an error.
     if (nfull < nred .or. nred /= upt%icgn_reduced_dim) then
-      write(*,'(a,i0,a,i0,a,i0,a)') &
+      write(log_message,'(a,i0,a,i0,a,i0,a)') &
            '(icgn) finalize: inconsistent dimensions (nred=', nred, &
            ', reduced_dim=', upt%icgn_reduced_dim, ', nfull=', nfull, &
            '), keeping reduced vectors'
+      call icgn_log_important(upt, trim(log_message))
       call icgn_swap_out(upt)
       return
     end if
 
-    write(*,'(a,i0,a,i0,a,i0)') '(icgn) finalize: lifting nred=', nred, &
+    write(log_message,'(a,i0,a,i0,a,i0)') '(icgn) finalize: lifting nred=', nred, &
          ' -> nfull=', nfull, ', num_ev=', num_ev
+    call icgn_log_progress(upt, trim(log_message))
 
     allocate(reduced(nred, num_ev))
     reduced = upt%eigen_vectors(1:nred, 1:num_ev)
@@ -550,7 +549,7 @@ contains
   ! for H_PP assembly and, when selfenergy_order >= 0, for H_PQ / H_QQ.
   ! ---------------------------------------------------------------------------
   subroutine icgn_prepare(upt, ierr)
-    character(len=*), parameter :: core_acq_warning = &
+    character(len=*), parameter :: core_outer_warning = &
          'Including core-state outers higher than level 1 is not yet implemented --> ' // &
          'Fall back to level-1 outers only.'
     type(OUPT), intent(inout) :: upt
@@ -566,6 +565,10 @@ contains
     integer(c_int), allocatable :: xadj(:), adjncy(:), vwgt(:), adjwgt(:), part(:)
     real(dp), allocatable :: edge_weight(:)
     real(dp) :: max_weight, all_weight, cut_weight
+    ! Item 8 experiment temporarily disabled for performance comparison:
+    ! real(dp), parameter :: energy_margin = 1.0e-3_dp
+    ! real(dp) :: emin_keep, emax_keep, best_dist, boundary_eval
+    ! integer :: idx_lo, idx_hi
     type(ICGNPair), allocatable :: pairs(:)
 
     logical, allocatable :: is_core(:,:), keep_mask(:,:)
@@ -576,6 +579,7 @@ contains
     type(ICGNSigRow), allocatable :: sig(:)
     real(dp) :: max_sigma, E0_used, t_all, t_stage, t_mark
     logical :: need_qq
+    ! logical :: fast_path  ! item 8 experiment temporarily disabled
     ! Block-sparse Neumann correction (P-Q / Q-Q blocks + Sigma via ICGNSigRow)
     type(ICGNQBlock), allocatable :: bq(:)
     type(ICGNQPair), allocatable :: qp(:)
@@ -629,7 +633,6 @@ contains
        end do
     end do
     ! write(*,'(A,I0)') '[ICGN-TRACE] prepare after mapping loop pos=', pos
-    call icgn_log_progress(upt, 'mode=icgn graph partition complete')
     offsets(na+1) = pos
     if (pos-1 /= n) then
        ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'
@@ -702,6 +705,7 @@ contains
        call icgn_log_progress(upt, 'METIS partitioning done')
     end if
     do i = 1, na; label(i) = int(part(i)) + 1; end do
+    call icgn_log_progress(upt, 'mode=icgn graph partition complete')
 
     all_weight = 0.0_dp; cut_weight = 0.0_dp
     do r = 1, n
@@ -781,7 +785,7 @@ contains
     end do
     deallocate(ierr_blk, blk_of)
 
-    ! ---- Improved keep-mask: core + buffer + outer -------------------
+    ! ---- Core + buffer selection (original logic; item 8 disabled) -----
     allocate(is_core(nb, maxval(counts)), keep_mask(nb, maxval(counts)))
     is_core = .false.; keep_mask = .false.
 
@@ -799,6 +803,14 @@ contains
           end associate
        end do
     end do
+
+    ! ITEM 8 EXPERIMENT TEMPORARILY DISABLED FOR PERFORMANCE TESTING:
+    ! The following logic used a fixed 1e-3 energy margin to find the eigenvalue
+    ! nearest each core+buffer boundary and retain additional states within that
+    ! margin. It also excluded uncomputed ZHEEVR tail entries in the fast path.
+    ! This per-block scan was added for the degeneracy-at-window-edge handling;
+    ! it is commented out so the original state-selection logic can be benchmarked.
+    ! See the previous implementation in version control if re-enabling it.
 
     row_of = 0
     do i = 1, nb
@@ -850,8 +862,7 @@ contains
     ! core-state outer level; higher requested levels fall back to it.
     t_stage = icgn_wall()
     if (upt%icgn_add_core_outers > 1) then
-       call icgn_log_important(upt, core_acq_warning)
-       write(*,'(a)') core_acq_warning
+       call icgn_log_important(upt, core_outer_warning)
     end if
     if (upt%icgn_add_core_outers > 0) then
        do i = 1, npair
@@ -1326,8 +1337,9 @@ contains
     if (fast_path) then
        vl = upt%icgn_core_emin - upt%icgn_bottom_buffer
        vu = upt%icgn_core_emax + upt%icgn_top_buffer
-       ! ZHEEVR returns eigenvalues in the half-open interval (VL, VU]; expand
-       ! slightly so states exactly on the closed keep_mask bounds are included.
+       ! ITEM 8 EXPERIMENT DISABLED: use the original small numerical margin.
+       ! The fixed 1e-3 expansion was introduced for boundary-degeneracy tests.
+       ! margin = 1.0e-3_dp
        margin = max(1.0e-10_dp, 1.0e-12_dp * max(1.0_dp, abs(vl), abs(vu)))
        vl = vl - margin
        vu = vu + margin
@@ -2339,6 +2351,7 @@ contains
     integer, allocatable :: ii(:), jj(:), ord(:)
     complex(dp), allocatable :: vv(:)
     integer, allocatable :: rowcount(:), next(:)
+    type(CSR) :: compact_ham
     real(dp), parameter :: thr = 1.0e-14_dp
     complex(dp) :: val
 
@@ -2466,6 +2479,24 @@ contains
        ham%Mi(r+1) = pos + 1
     end do
     ham%nnz = pos
+
+    ! The merge can collapse duplicate (row,column) entries, so the allocation
+    ! made with nnew entries may have unused tail elements.  Some downstream
+    ! routines use size(ham%M), not ham%nnz, as the stored-entry count; compact
+    ! both value/index arrays to the actual CSR length before returning.
+    if (size(ham%M) /= pos .or. size(ham%Mj) /= pos) then
+       call create_matrix(compact_ham, nred, nred, pos)
+       if (pos > 0) then
+          compact_ham%M(1:pos)  = ham%M(1:pos)
+          compact_ham%Mj(1:pos) = ham%Mj(1:pos)
+       end if
+       compact_ham%Mi = ham%Mi
+       compact_ham%nnz = pos
+       compact_ham%sparse_fmt = ham%sparse_fmt
+       call destroy_matrix(ham)
+       ham = compact_ham
+    end if
+
     deallocate(ii, jj, vv, ord, rowcount, next)
   end subroutine icgn_csr_add_sigma
 
@@ -2953,8 +2984,6 @@ contains
     !$ if (req > avail .and. .not. warned .and. .not. omp_in_parallel()) then
     !$    warned = .true.
     !$    call icgn_warn_threads(req, avail)
-    !$    ! also cut the thread count seen by threaded BLAS/LAPACK (MKL follows it)
-    !$    call omp_set_num_threads(avail)
     !$ end if
     call get_environment_variable('UPT_CG_THREADS', s, length=ln, status=ios)
     if (ios == 0 .and. ln > 0) then
