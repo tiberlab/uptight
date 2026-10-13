@@ -558,6 +558,8 @@ contains
 
     integer :: n, na, i, j, k, p, status, nedge, maxedge
     integer :: r, c, br, bc, npair, total_ret, pos
+    integer :: hash_size, slot, min_atom, max_atom
+    integer(8), allocatable :: edge_key(:)
     integer, allocatable :: atom_of(:), label(:), row_of(:)
     integer, allocatable :: counts(:), cursor(:), offsets(:), bsize(:)
     integer, allocatable :: blk_of(:), ierr_blk(:)
@@ -582,6 +584,7 @@ contains
     integer(8) :: npq_nz, nqq_nz
 
     ierr = 0
+    npq = 0; nqq = 0
     ! write(*,"(A)") "[ICGN-TRACE] prepare ENTER"
     ! write(*,"(A)") "[ICGN-TRACE] prepare before clear"
     call icgn_clear(upt)
@@ -629,28 +632,47 @@ contains
     call icgn_log_progress(upt, 'mode=icgn graph partition complete')
     offsets(na+1) = pos
     if (pos-1 /= n) then
-       ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'; return
+       ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'
+       call icgn_clear(upt)
+       return
     end if
 
     ! ---- METIS partition (same as icgn_prepare) ----------------------------
     maxedge = max(1, upt%ham%nnz)
-    allocate(edge_weight(maxedge), counts(na), label(na))
+    ! Aggregate all orbital couplings into one weighted undirected edge per atom
+    ! pair. The open-addressed hash avoids passing duplicate edges to METIS.
+    hash_size = max(17, 2*maxedge + 1)
+    allocate(edge_key(hash_size), edge_weight(hash_size), counts(na), label(na))
+    edge_key = 0_8; edge_weight = 0.0_dp
     nedge = 0; max_weight = 0.0_dp; counts = 0
     do r = 1, n
        do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
           c = upt%ham%Mj(k)
           if (atom_of(r) == atom_of(c)) cycle
           if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          nedge = nedge + 1
-          if (nedge > maxedge) then; ierr = 6; return; end if
-          edge_weight(nedge) = abs(upt%ham%M(k))**2
-          counts(atom_of(r)) = counts(atom_of(r)) + 1
-          counts(atom_of(c)) = counts(atom_of(c)) + 1
-          max_weight = max(max_weight, edge_weight(nedge))
+          br = atom_of(r); bc = atom_of(c)
+          min_atom = min(br, bc); max_atom = max(br, bc)
+          slot = int(mod(int(min_atom-1,8)*int(na,8) + int(max_atom,8), int(hash_size,8))) + 1
+          do while (edge_key(slot) /= 0_8 .and. edge_key(slot) /= int(min_atom-1,8)*int(na,8)+int(max_atom,8))
+             slot = slot + 1
+             if (slot > hash_size) slot = 1
+          end do
+          if (edge_key(slot) == 0_8) then
+             edge_key(slot) = int(min_atom-1,8)*int(na,8) + int(max_atom,8)
+             nedge = nedge + 1
+             counts(min_atom) = counts(min_atom) + 1
+             counts(max_atom) = counts(max_atom) + 1
+          end if
+          edge_weight(slot) = edge_weight(slot) + abs(upt%ham%M(k))**2
        end do
     end do
+    do slot = 1, hash_size
+       if (edge_key(slot) /= 0_8) max_weight = max(max_weight, edge_weight(slot))
+    end do
     if (nedge == 0 .or. max_weight == 0.0_dp) then
-       ierr = 7; write(*,*) '(icgn) atom graph has no couplings'; return
+       ierr = 7; write(*,*) '(icgn) atom graph has no couplings'
+       call icgn_clear(upt)
+       return
     end if
     allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
     xadj(1) = 0_c_int
@@ -659,19 +681,20 @@ contains
        cursor(i)  = int(xadj(i)) + 1
        vwgt(i)    = int(bsize(i), c_int)
     end do
-    do r = 1, n
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (atom_of(r) == atom_of(c)) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          br = atom_of(r); bc = atom_of(c)
-          p  = max(1, nint(abs(upt%ham%M(k))**2 / max_weight * 1000000.0_dp))
-          adjncy(cursor(br)) = int(bc-1,c_int); adjwgt(cursor(br)) = int(p,c_int); cursor(br)=cursor(br)+1
-          adjncy(cursor(bc)) = int(br-1,c_int); adjwgt(cursor(bc)) = int(p,c_int); cursor(bc)=cursor(bc)+1
-       end do
+    do slot = 1, hash_size
+       if (edge_key(slot) == 0_8) cycle
+       br = int((edge_key(slot)-1_8) / int(na,8)) + 1
+       bc = int(mod(edge_key(slot)-1_8, int(na,8))) + 1
+       p = max(1, nint(edge_weight(slot) / max_weight * 1000000.0_dp))
+       adjncy(cursor(br)) = int(bc-1,c_int); adjwgt(cursor(br)) = int(p,c_int); cursor(br)=cursor(br)+1
+       adjncy(cursor(bc)) = int(br-1,c_int); adjwgt(cursor(bc)) = int(p,c_int); cursor(bc)=cursor(bc)+1
     end do
+    deallocate(edge_key)
+    ! METIS UFACTOR is (imbalance - 1) * 1000 (e.g. 1.03 -> 30),
+    ! not imbalance * 1000.
     status = icgn_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
-         int(upt%icgn_num_blocks,c_int), int(nint(1000.0_dp*upt%icgn_metis_imbalance),c_int), 42_c_int, part)
+         int(upt%icgn_num_blocks,c_int), &
+         int(max(1, nint(1000.0_dp*(upt%icgn_metis_imbalance-1.0_dp))),c_int), 42_c_int, part)
     if (status /= 0) then
        call icgn_log_important(upt, 'METIS unavailable or failed; using built-in graph-BFS fallback partitioning')
        call icgn_graph_partition(na, upt%icgn_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
@@ -750,8 +773,9 @@ contains
     do i = 1, nb
        if (ierr_blk(i) /= 0) then
           ierr = ierr_blk(i)
-          ! Successful blocks already hold S_full/evals_full; free them all.
+          ! Release pointer-owned block storage as well as the full eigensystems.
           call icgn_free_block_eigensystems(upt)
+          call icgn_clear(upt)
           return
        end if
     end do
@@ -794,6 +818,7 @@ contains
        if (ierr /= 0) then
           call destroy_pairs(pairs)
           call icgn_free_block_eigensystems(upt)
+          call icgn_clear(upt)
           return
        end if
        call icgn_report_time('collect pair couplings H_ab', t_stage)
@@ -874,6 +899,7 @@ contains
        ierr = 9; write(*,*) '(icgn) no states retained'
        call destroy_pairs(pairs)
        call icgn_free_block_eigensystems(upt)
+       call icgn_clear(upt)
        return
     end if
     upt%icgn_original_dim = n
@@ -914,6 +940,7 @@ contains
     if (ierr /= 0) then
        call destroy_pairs(pairs)
        call icgn_free_block_eigensystems(upt)
+       call icgn_clear(upt)
        return
     end if
     call icgn_report_time('build reduced H (pair projection)', t_stage)
@@ -1018,7 +1045,8 @@ contains
     upt%icgn_ready = .true.
        call icgn_log_info(upt, 'icgn', n, total_ret, &
           upt%icgn_num_blocks, upt%icgn_cut_fraction, upt%icgn_sigma_T2, &
-          upt%icgn_pi_converged, upt%icgn_check_convergence)
+          upt%icgn_pi_converged, &
+          upt%icgn_check_convergence .and. upt%icgn_selfenergy_order >= 0 .and. nqq > 0)
 
     ! Cleanup
     ! write(*,'(A,L1,A,L1,A,I0,A,I0)') '[ICGN-TRACE] prepare final ham M/Mi=', associated(upt%icgn_ham%M), '/', &
@@ -2363,7 +2391,11 @@ contains
                 if (a2 == a) then
                    ! Hermitianize diagonal block on the fly (keep upper + diag)
                    if (j < i) cycle
-                   if (j > i) val = (val + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
+                   if (j > i) then
+                      val = (val + conjg(sig(a)%mat(t)%m(j,i))) / 2.0_dp
+                   else
+                      val = cmplx(real(val,dp), 0.0_dp, kind=dp)
+                   end if
                    if (abs(val) <= thr) cycle
                    nnew = nnew + 1
                    ii(nnew) = roff_blk(a)+i-1; jj(nnew) = roff_blk(a)+j-1; vv(nnew) = val
