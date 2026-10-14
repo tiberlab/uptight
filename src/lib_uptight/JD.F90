@@ -53,11 +53,11 @@ MODULE JD_DIAG
   PRIVATE
 
   interface
-    subroutine upt_log_message(message, length) bind(C, name='upt_log_message')
+    subroutine upt_jd_log_message(message, length) bind(C, name='upt_jd_log_message')
       import :: c_char, c_int
       character(kind=c_char), intent(in) :: message(*)
       integer(c_int), value :: length
-    end subroutine upt_log_message
+    end subroutine upt_jd_log_message
   end interface
 
 !===========================================================================
@@ -75,7 +75,7 @@ CONTAINS
     do i = 1, n
       c_message(i) = message(i:i)
     end do
-    call upt_log_message(c_message, int(n, c_int))
+    call upt_jd_log_message(c_message, int(n, c_int))
     deallocate(c_message)
   end subroutine jd_log_dispatch
 
