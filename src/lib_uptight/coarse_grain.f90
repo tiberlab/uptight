@@ -160,14 +160,30 @@ contains
   ! Destroying or reallocating upt%ham between set_original and restore is a
   ! contract violation and leaves dangling pointers in the snapshot.
   subroutine icgn_set_original(upt)
-    type(OUPT), intent(inout) :: upt
+    type(OUPT), intent(inout), target :: upt
 
-    ! Do not overwrite the original snapshot while the reduced operator is
-    ! swapped into upt%ham: that would snapshot the reduced matrix instead.
+    ! A previous solve may have exited before its normal finalize hook. If the
+    ! original snapshot is still valid, restore it before taking a fresh snapshot;
+    ! otherwise fail closed and keep the current swap bookkeeping intact.
     if (associated(icgn_saved_ham)) then
-       write(*,'(a)') '(icgn) set_original: ignored while reduced operator is swapped in'
-       return
+       if (.not. icgn_original_valid) then
+          call icgn_log_important(upt, &
+               '(icgn) set_original: cannot refresh snapshot while original operator is invalid')
+          return
+       end if
+       if (.not. associated(icgn_original_ham%M)) then
+          call icgn_log_important(upt, &
+               '(icgn) set_original: cannot refresh snapshot; original Hamiltonian storage is unavailable')
+          return
+       end if
+       if (.not. associated(icgn_original_ham%Mi)) then
+          call icgn_log_important(upt, &
+               '(icgn) set_original: cannot refresh snapshot; original row pointers are unavailable')
+          return
+       end if
+       call icgn_swap_out(upt)
     end if
+
     icgn_original_ham = upt%ham    ! value copy of struct header (pointer addresses, not heap data)
     icgn_original_u   = upt%U
     icgn_original_valid = associated(icgn_original_ham%M) .and. associated(icgn_original_ham%Mi)
