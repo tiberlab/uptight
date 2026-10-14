@@ -2041,6 +2041,15 @@ contains
        !$omp& schedule(dynamic,1) if(nth > 1)
        do i = 1, npair
           a = pairs(i)%a; b = pairs(i)%b
+          ! After keep_mask some blocks may retain zero states. retained_idx/q/eval
+          ! are not allocated for those blocks — must not touch them.
+          if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) then
+             if (associated(pairs(i)%v)) deallocate(pairs(i)%v)
+             allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+             if (associated(pairs(i)%h)) deallocate(pairs(i)%h)
+             nullify(pairs(i)%g)
+             cycle
+          end if
           if (.not. reuse_full) call project_pair(pairs(i), upt%icgn_blocks(a)%S_full, &
                upt%icgn_blocks(b)%S_full, .true.)
 
