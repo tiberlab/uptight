@@ -2036,6 +2036,8 @@ contains
        ! icgn_prepare), then slice to the retained states.  Pairs are
        ! independent; g_full is a per-thread temporary.
        nth = min(icgn_thread_budget(), max(1, npair))
+       call icgn_report_time('  outer path: start slice pairs', t_stage)
+       t_stage = icgn_wall()
        call icgn_flatten_nesting(saved_levels)
        !$omp parallel do default(shared) private(i, a, b, j, k, g_full) num_threads(nth) &
        !$omp& schedule(dynamic,1) if(nth > 1)
@@ -2046,6 +2048,14 @@ contains
           if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) then
              if (associated(pairs(i)%v)) deallocate(pairs(i)%v)
              allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+             if (associated(pairs(i)%h)) deallocate(pairs(i)%h)
+             nullify(pairs(i)%g)
+             cycle
+          end if
+          if (.not. associated(pairs(i)%v)) then
+             ! Project path left this pair without a coupling matrix; emit empty v.
+             allocate(pairs(i)%v(upt%icgn_blocks(a)%nret, upt%icgn_blocks(b)%nret))
+             pairs(i)%v = (0.0_dp, 0.0_dp)
              if (associated(pairs(i)%h)) deallocate(pairs(i)%h)
              nullify(pairs(i)%g)
              cycle
@@ -2094,15 +2104,23 @@ contains
        end do
        !$omp end parallel do
        call icgn_restore_nesting(saved_levels)
+       call icgn_report_time('  outer path: slice pairs done', t_stage)
     end if
 
     t_stage = icgn_wall()
     ! Build CSR in the canonical reduced format (always 'F', diagonal present,
     ! columns strictly ascending per row). Count both triangles for every
     ! non-zero coupling; zeros are omitted.
+    if (nred <= 0) then
+       ierr = 9
+       write(*,*) '(icgn) build reduced H: nred <= 0'
+       return
+    end if
     allocate(rowcount(nred), next(nred)); rowcount = 1
     do i = 1, npair
+       if (.not. associated(pairs(i)%v)) cycle
        a = pairs(i)%a; b = pairs(i)%b
+       if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) cycle
        do j = 1, size(pairs(i)%v,1)
           do k = 1, size(pairs(i)%v,2)
              if (abs(pairs(i)%v(j,k)) == 0.0_dp) cycle
@@ -2111,7 +2129,27 @@ contains
           end do
        end do
     end do
-    nnz = sum(rowcount); call create_matrix(upt%icgn_ham, nred, nred, nnz)
+    ! Guard against 32-bit integer overflow of nnz (common when H_CG is dense).
+    block
+       integer(kind=8) :: nnz8
+       nnz8 = 0_8
+       do i = 1, nred
+          nnz8 = nnz8 + int(rowcount(i), kind=8)
+       end do
+       if (nnz8 > int(huge(nnz), kind=8)) then
+          write(*,'(a,i0,a)') '(icgn) ERROR: reduced CSR nnz=', nnz8, &
+               ' exceeds default INTEGER capacity; tighten core window / epsilon'
+          ierr = 12
+          deallocate(roff, rowcount, next)
+          return
+       end if
+       nnz = int(nnz8)
+    end block
+    if (icgn_timing_on()) then
+       write(*,'(a,i0,a,i0,a,i0)') '[ICGN-TIME] assemble prep: nred=', nred, &
+            ' npair=', npair, ' nnz=', nnz
+    end if
+    call create_matrix(upt%icgn_ham, nred, nred, nnz)
     upt%icgn_ham%sparse_fmt = 'F'; upt%icgn_ham%Mi(1) = 1
     do i = 1, nred; upt%icgn_ham%Mi(i+1) = upt%icgn_ham%Mi(i) + rowcount(i); end do
     next = upt%icgn_ham%Mi(1:nred)
@@ -2124,7 +2162,9 @@ contains
        end do
     end do
     do i = 1, npair
+       if (.not. associated(pairs(i)%v)) cycle
        a = pairs(i)%a; b = pairs(i)%b
+       if (upt%icgn_blocks(a)%nret == 0 .or. upt%icgn_blocks(b)%nret == 0) cycle
        call emit_pair(upt%icgn_ham, pairs(i), roff(a), roff(b), 'F', next)
     end do
     upt%icgn_ham%nnz = nnz
