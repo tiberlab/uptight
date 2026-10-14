@@ -789,13 +789,22 @@ contains
     end do
     deallocate(ierr_blk, blk_of)
 
-    ! ---- Core + buffer selection (original logic; item 8 disabled) -----
+    ! ---- Core + buffer selection, then boundary-degeneracy expansion --------
+    ! Nominal window: [core_emin - bottom_buffer, core_emax + top_buffer].
+    ! Greedy expand at both edges: if consecutive (energy-sorted) states have
+    ! |E_{k+1}-E_k| <= delta, keep the outside one too (all-or-nothing multiplet
+    ! at the cut).  Fast-path ZHEEVR uses a 1e-3 guard so those near-edge states
+    ! exist; dummy uncomputed columns are skipped.
     allocate(is_core(nb, maxval(counts)), keep_mask(nb, maxval(counts)))
     is_core = .false.; keep_mask = .false.
 
+    !$omp parallel do default(shared) private(i, j) schedule(dynamic,1)
     do i = 1, nb
        do j = 1, upt%icgn_blocks(i)%nrow
           if (.not. associated(upt%icgn_blocks(i)%evals_full)) cycle
+          if (.not. associated(upt%icgn_blocks(i)%S_full)) cycle
+          ! Skip ZHEEVR placeholder columns (zero vectors, sentinel evals).
+          if (maxval(abs(upt%icgn_blocks(i)%S_full(:, j))) <= 0.0_dp) cycle
           associate(e => upt%icgn_blocks(i)%evals_full(j))
             if (e >= upt%icgn_core_emin .and. e <= upt%icgn_core_emax) then
                is_core(i,j)   = .true.
@@ -806,15 +815,11 @@ contains
             end if
           end associate
        end do
+       call icgn_expand_keep_boundary(upt%icgn_blocks(i), keep_mask(i, :), &
+            upt%icgn_core_emin - upt%icgn_bottom_buffer, &
+            upt%icgn_core_emax + upt%icgn_top_buffer, 1.0e-6_dp)
     end do
-
-    ! ITEM 8 EXPERIMENT TEMPORARILY DISABLED FOR PERFORMANCE TESTING:
-    ! The following logic used a fixed 1e-3 energy margin to find the eigenvalue
-    ! nearest each core+buffer boundary and retain additional states within that
-    ! margin. It also excluded uncomputed ZHEEVR tail entries in the fast path.
-    ! This per-block scan was added for the degeneracy-at-window-edge handling;
-    ! it is commented out so the original state-selection logic can be benchmarked.
-    ! See the previous implementation in version control if re-enabling it.
+    !$omp end parallel do
 
     row_of = 0
     do i = 1, nb
@@ -1508,10 +1513,9 @@ contains
     if (fast_path) then
        vl = upt%icgn_core_emin - upt%icgn_bottom_buffer
        vu = upt%icgn_core_emax + upt%icgn_top_buffer
-       ! ITEM 8 EXPERIMENT DISABLED: use the original small numerical margin.
-       ! The fixed 1e-3 expansion was introduced for boundary-degeneracy tests.
-       ! margin = 1.0e-3_dp
-       margin = max(1.0e-10_dp, 1.0e-12_dp * max(1.0_dp, abs(vl), abs(vu)))
+       ! Guard band outside the nominal keep window so ZHEEVR also returns
+       ! near-edge states needed by boundary-degeneracy expansion (delta).
+       margin = 1.0e-3_dp
        vl = vl - margin
        vu = vu + margin
        allocate(z(nn, nn))
@@ -2945,6 +2949,74 @@ contains
     call zheevd('V','U',n,a,n,w,work,lwork,rwork,lrwork,iwork,liwork,info)
     deallocate(work,rwork,iwork); ierr=info
   end subroutine dense_eigh
+
+  ! Expand keep_mask at the energy-window edges when consecutive (sorted)
+  ! eigenvalues differ by at most delta.  Only computed eigenvectors participate
+  ! (zero S_full columns from the ZHEEVR fast path are ignored).
+  subroutine icgn_expand_keep_boundary(blk, keep, elo, ehi, delta)
+    type(ICGNBlock), intent(in) :: blk
+    logical, intent(inout) :: keep(:)
+    real(dp), intent(in) :: elo, ehi, delta
+    integer :: nn, ncomp, j, k, p, tmp
+    integer, allocatable :: ord(:)
+    real(dp) :: ej
+
+    if (.not. associated(blk%evals_full) .or. .not. associated(blk%S_full)) return
+    nn = blk%nrow
+    if (nn <= 0) return
+
+    allocate(ord(nn))
+    ncomp = 0
+    do j = 1, nn
+       if (j > size(keep)) exit
+       if (maxval(abs(blk%S_full(:, j))) <= 0.0_dp) cycle
+       ncomp = ncomp + 1
+       ord(ncomp) = j
+    end do
+    if (ncomp <= 1) then
+       deallocate(ord)
+       return
+    end if
+
+    ! Insertion sort by eigenvalue (ncomp is modest per block).
+    do k = 2, ncomp
+       tmp = ord(k)
+       ej = blk%evals_full(tmp)
+       p = k - 1
+       do while (p >= 1)
+          if (blk%evals_full(ord(p)) <= ej) exit
+          ord(p + 1) = ord(p)
+          p = p - 1
+       end do
+       ord(p + 1) = tmp
+    end do
+
+    ! High edge: from last kept state with E <= ehi, walk upward.
+    p = 0
+    do k = 1, ncomp
+       j = ord(k)
+       if (keep(j) .and. blk%evals_full(j) <= ehi) p = k
+    end do
+    do while (p >= 1 .and. p < ncomp)
+       if (abs(blk%evals_full(ord(p+1)) - blk%evals_full(ord(p))) > delta) exit
+       keep(ord(p+1)) = .true.
+       p = p + 1
+    end do
+
+    ! Low edge: from first kept state with E >= elo, walk downward.
+    p = 0
+    do k = ncomp, 1, -1
+       j = ord(k)
+       if (keep(j) .and. blk%evals_full(j) >= elo) p = k
+    end do
+    do while (p >= 2)
+       if (abs(blk%evals_full(ord(p)) - blk%evals_full(ord(p-1))) > delta) exit
+       keep(ord(p-1)) = .true.
+       p = p - 1
+    end do
+
+    deallocate(ord)
+  end subroutine icgn_expand_keep_boundary
 
   ! Partial Hermitian eigenproblem on energy window (VL, VU] via ZHEEVR (MRRR).
   ! ABSTOL = 0 selects the relative-accuracy path (EPS*|T|), matching the
