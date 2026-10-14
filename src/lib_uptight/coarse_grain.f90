@@ -142,6 +142,9 @@ module coarse_grain
   integer :: icgn_saved_shift_init_mi = 0
   integer :: icgn_saved_shift_end_mi = 0
   integer :: icgn_saved_n_spin = 0
+  ! .true. when icgn_U is Q^T U Q (Kramers shortcut valid on reduced space).
+  ! .false. when identity fallback is used → swap_in forces n_spin=1.
+  logical :: icgn_u_projected = .false.
 
 contains
 
@@ -234,9 +237,10 @@ contains
 
     upt%ham = reduced_ham
     upt%U   = reduced_u
-    ! The reduced operator already carries the spin degeneracy of the states it
-    ! retained, so a solver must not generate degenerate partners again.
-    upt%n_spin = 1
+    ! When U_red = Q^T U Q was built, keep n_spin so Lanczos/JD can still use the
+    ! Kramers shortcut on the reduced space (same contract as direct mode).
+    ! Identity fallback means the shortcut is not valid → force n_spin=1.
+    if (.not. icgn_u_projected) upt%n_spin = 1
 
     ! The result arrays of the previous solve belong to the previous operator and
     ! are kept across k-points so that band tracking can pick them up. Their row
@@ -374,6 +378,7 @@ contains
     icgn_saved_shift_init_mi = 0
     icgn_saved_shift_end_mi = 0
     icgn_saved_n_spin = 0
+    icgn_u_projected = .false.
   end subroutine icgn_forget
 
   ! Drops every pointer into the reduced operator. Only for teardown. Must not touch the record of
@@ -1045,22 +1050,19 @@ contains
        call icgn_report_time('merge Sigma into CSR (block-sparse)', t_mark)
     end if  ! icgn_selfenergy_order >= 0 (Neumann correction)
 
-    call icgn_report_time('TOTAL from block diagonalization to end of Neumann/Sigma', t_all)
-
     ! When the Neumann branch is skipped (selfenergy_order < 0) nothing above has
     ! released the pair matrices (v/h/t) nor the full block eigensystems.
     ! Free them here; both calls are no-ops if the Neumann branch already did it.
     if (allocated(pairs)) call destroy_pairs(pairs)
     call icgn_free_block_eigensystems(upt)
 
-    ! Build icgn_U (identity)
-    call create_matrix(upt%icgn_U, nred, nred, nred)
-    upt%icgn_U%sparse_fmt = 'F'; upt%icgn_U%Mi(1) = 1
-    do i = 1, nred
-       upt%icgn_U%Mj(i) = i; upt%icgn_U%M(i) = (1.0_dp, 0.0_dp)
-       upt%icgn_U%Mi(i+1) = i + 1
-    end do
-    upt%icgn_U%nnz = nred
+    ! Build icgn_U: Q^T U Q when original U exists (Kramers-capable), else identity.
+    ! pairs already freed above; U build only needs blocks%q and upt%U.
+    call icgn_build_reduced_U(upt, nred, ierr)
+    if (ierr /= 0) return
+
+    ! Last timing line: wall from start of block diagonalization through U_red.
+    call icgn_report_time('TOTAL ICGN PREPARATION TIME', t_all)
 
     upt%icgn_ready = .true.
        call icgn_log_info(upt, 'icgn', n, total_ret, &
@@ -1101,6 +1103,172 @@ contains
        off = off + nr
     end do
   end subroutine icgn_lift
+
+  ! Build upt%icgn_U = Q^T U Q (block-diagonal) so Lanczos/JD keep the Kramers
+  ! shortcut on the reduced space.  The solver applies partner = conjg(U*v)
+  ! (antilinear).  With real U (TB onsite ±I), matching the physical partner
+  ! Q^H conjg(U Q v) requires transpose, not conjugate-transpose:
+  !   U_red = Q^T U Q
+  ! Falls back to identity when original U is missing or n_spin /= 2; then
+  ! icgn_u_projected stays .false. and swap_in forces n_spin=1.
+  !
+  ! Parallelism: dense U_red_ii per CG block (same OpenMP pattern as diag).
+  ! CSR assembly is serial.
+  subroutine icgn_build_reduced_U(upt, nred, ierr)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: nred
+    integer, intent(out) :: ierr
+    integer :: nb, i, jr, k, r, c, lc, nn, nr, oa, nnz, pos, jcol, nfull
+    integer :: nth, saved_levels, max_nn
+    integer, allocatable :: roff(:), locmap(:), rowcount(:), next(:)
+    complex(dp), allocatable :: u_loc(:,:), work(:,:)
+    type(ICGNMat), allocatable :: ured(:)
+    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
+    real(dp), parameter :: drop = 1.0e-14_dp
+    real(dp) :: t_mark
+
+    ierr = 0
+    icgn_u_projected = .false.
+    if (associated(upt%icgn_U%M)) call destroy_matrix(upt%icgn_U)
+
+    ! Fallback: identity (no Kramers on reduced space).
+    if (.not. associated(upt%U%M) .or. .not. associated(upt%U%Mi) .or. &
+        upt%n_spin /= 2 .or. nred <= 0) then
+       call create_matrix(upt%icgn_U, nred, nred, max(nred, 1))
+       upt%icgn_U%sparse_fmt = 'F'
+       upt%icgn_U%Mi(1) = 1
+       do i = 1, nred
+          upt%icgn_U%Mj(i) = i
+          upt%icgn_U%M(i)  = (1.0_dp, 0.0_dp)
+          upt%icgn_U%Mi(i+1) = i + 1
+       end do
+       upt%icgn_U%nnz = nred
+       return
+    end if
+
+    nb = upt%icgn_num_blocks
+    nfull = upt%U%nrow
+    allocate(roff(nb+1))
+    roff(1) = 1
+    do i = 1, nb
+       roff(i+1) = roff(i) + upt%icgn_blocks(i)%nret
+    end do
+
+    ! ---- Parallel: project U onto each retained block basis ----------------
+    allocate(ured(nb))
+    do i = 1, nb
+       nullify(ured(i)%m)
+    end do
+
+    max_nn = 1
+    do i = 1, nb
+       if (upt%icgn_blocks(i)%nret > 0) max_nn = max(max_nn, upt%icgn_blocks(i)%nrow)
+    end do
+    nth = icgn_thread_budget()
+    if (nb < nth) nth = 1
+    nth = icgn_outer_threads(nb, nth, max_nn)
+    t_mark = icgn_wall()
+    call icgn_flatten_nesting(saved_levels)
+    !$omp parallel do default(shared) private(i, jr, k, r, c, lc, nn, nr, locmap, u_loc, work) &
+    !$omp& num_threads(nth) schedule(dynamic,1) if(nth > 1)
+    do i = 1, nb
+       nr = upt%icgn_blocks(i)%nret
+       if (nr == 0) cycle
+       if (.not. associated(upt%icgn_blocks(i)%q)) cycle
+       nn = upt%icgn_blocks(i)%nrow
+       allocate(locmap(nfull))
+       locmap = 0
+       do jr = 1, nn
+          locmap(upt%icgn_blocks(i)%rows(jr)) = jr
+       end do
+       allocate(u_loc(nn, nn))
+       u_loc = czero
+       do jr = 1, nn
+          r = upt%icgn_blocks(i)%rows(jr)
+          do k = upt%U%Mi(r), upt%U%Mi(r+1) - 1
+             c = upt%U%Mj(k)
+             if (c < 1 .or. c > nfull) cycle
+             lc = locmap(c)
+             if (lc == 0) cycle
+             u_loc(jr, lc) = upt%U%M(k)
+          end do
+       end do
+       allocate(work(nn, nr), ured(i)%m(nr, nr))
+       call icgn_zgemm('N', u_loc, upt%icgn_blocks(i)%q, work)  ! U_loc * q
+       call icgn_zgemm('T', upt%icgn_blocks(i)%q, work, ured(i)%m)  ! q^T *(U_loc q)
+       deallocate(u_loc, work, locmap)
+    end do
+    !$omp end parallel do
+    call icgn_restore_nesting(saved_levels)
+    call icgn_report_time('build U_red (Q^T U Q, parallel)', t_mark)
+
+    ! ---- Serial: count nnz and assemble CSR --------------------------------
+    allocate(rowcount(nred))
+    rowcount = 0
+    do i = 1, nb
+       if (.not. associated(ured(i)%m)) cycle
+       nr = size(ured(i)%m, 1)
+       oa = roff(i)
+       do jr = 1, nr
+          do jcol = 1, nr
+             if (abs(ured(i)%m(jr, jcol)) > drop) &
+                  rowcount(oa + jr - 1) = rowcount(oa + jr - 1) + 1
+          end do
+       end do
+    end do
+
+    nnz = sum(rowcount)
+    if (nnz <= 0) then
+       do i = 1, nb
+          if (associated(ured(i)%m)) deallocate(ured(i)%m)
+       end do
+       deallocate(ured, roff, rowcount)
+       call create_matrix(upt%icgn_U, nred, nred, max(nred, 1))
+       upt%icgn_U%sparse_fmt = 'F'
+       upt%icgn_U%Mi(1) = 1
+       do i = 1, nred
+          upt%icgn_U%Mj(i) = i
+          upt%icgn_U%M(i)  = (1.0_dp, 0.0_dp)
+          upt%icgn_U%Mi(i+1) = i + 1
+       end do
+       upt%icgn_U%nnz = nred
+       return
+    end if
+
+    call create_matrix(upt%icgn_U, nred, nred, nnz)
+    upt%icgn_U%sparse_fmt = 'F'
+    upt%icgn_U%Mi(1) = 1
+    do i = 1, nred
+       upt%icgn_U%Mi(i+1) = upt%icgn_U%Mi(i) + rowcount(i)
+    end do
+    upt%icgn_U%nnz = nnz
+    allocate(next(nred))
+    do i = 1, nred
+       next(i) = upt%icgn_U%Mi(i)
+    end do
+
+    do i = 1, nb
+       if (.not. associated(ured(i)%m)) cycle
+       nr = size(ured(i)%m, 1)
+       oa = roff(i)
+       do jr = 1, nr
+          do jcol = 1, nr
+             if (abs(ured(i)%m(jr, jcol)) <= drop) cycle
+             pos = next(oa + jr - 1)
+             upt%icgn_U%Mj(pos) = oa + jcol - 1
+             upt%icgn_U%M(pos)  = ured(i)%m(jr, jcol)
+             next(oa + jr - 1)  = pos + 1
+          end do
+       end do
+       deallocate(ured(i)%m)
+    end do
+
+    call icgn_sort_csr_rows(upt%icgn_U)
+
+    deallocate(ured, roff, rowcount, next)
+    icgn_u_projected = .true.
+    call icgn_log_progress(upt, '(icgn) U_red = Q^T U Q built (Kramers shortcut enabled on reduced space)')
+  end subroutine icgn_build_reduced_U
 
 ! ===========================================================================
 ! SECTION B — Prepare helpers (partition, diagonalize, pairs, H_red)
@@ -2839,7 +3007,7 @@ contains
     end select
   end function stored_entry
 
-  ! C = op(A) * B with BLAS zgemm (opa = 'N' or 'C').  Much faster than the
+  ! C = op(A) * B with BLAS zgemm (opa = 'N', 'T', or 'C').  Much faster than the
   ! Fortran intrinsic matmul and thread-safe (runs single-threaded inside our
   ! OpenMP regions because nesting is flattened, threaded when called serially).
   subroutine icgn_zgemm(opa, A, B, C)
