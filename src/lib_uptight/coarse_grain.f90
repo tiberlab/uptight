@@ -646,72 +646,86 @@ contains
        return
     end if
 
-    ! ---- METIS partition (same as icgn_prepare) ----------------------------
-    maxedge = max(1, upt%ham%nnz)
-    ! Aggregate all orbital couplings into one weighted undirected edge per atom
-    ! pair. The open-addressed hash avoids passing duplicate edges to METIS.
-    hash_size = max(17, 2*maxedge + 1)
-    allocate(edge_key(hash_size), edge_weight(hash_size), counts(na), label(na))
-    edge_key = 0_8; edge_weight = 0.0_dp
-    nedge = 0; max_weight = 0.0_dp; counts = 0
-    do r = 1, n
-       do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
-          c = upt%ham%Mj(k)
-          if (atom_of(r) == atom_of(c)) cycle
-          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
-          br = atom_of(r); bc = atom_of(c)
-          min_atom = min(br, bc); max_atom = max(br, bc)
-          slot = int(mod(int(min_atom-1,8)*int(na,8) + int(max_atom,8), int(hash_size,8))) + 1
-          do while (edge_key(slot) /= 0_8 .and. edge_key(slot) /= int(min_atom-1,8)*int(na,8)+int(max_atom,8))
-             slot = slot + 1
-             if (slot > hash_size) slot = 1
-          end do
-          if (edge_key(slot) == 0_8) then
-             edge_key(slot) = int(min_atom-1,8)*int(na,8) + int(max_atom,8)
-             nedge = nedge + 1
-             counts(min_atom) = counts(min_atom) + 1
-             counts(max_atom) = counts(max_atom) + 1
-          end if
-          edge_weight(slot) = edge_weight(slot) + abs(upt%ham%M(k))**2
-       end do
-    end do
-    do slot = 1, hash_size
-       if (edge_key(slot) /= 0_8) max_weight = max(max_weight, edge_weight(slot))
-    end do
-    if (nedge == 0 .or. max_weight == 0.0_dp) then
-       ierr = 7; write(*,*) '(icgn) atom graph has no couplings'
-       call icgn_prepare_cleanup(upt, pairs, bq, qp, sig)
-       return
-    end if
-    allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
-    xadj(1) = 0_c_int
-    do i = 1, na
-       xadj(i+1) = xadj(i) + int(counts(i), c_int)
-       cursor(i)  = int(xadj(i)) + 1
-       vwgt(i)    = int(bsize(i), c_int)
-    end do
-    do slot = 1, hash_size
-       if (edge_key(slot) == 0_8) cycle
-       br = int((edge_key(slot)-1_8) / int(na,8)) + 1
-       bc = int(mod(edge_key(slot)-1_8, int(na,8))) + 1
-       p = max(1, nint(edge_weight(slot) / max_weight * 1000000.0_dp))
-       adjncy(cursor(br)) = int(bc-1,c_int); adjwgt(cursor(br)) = int(p,c_int); cursor(br)=cursor(br)+1
-       adjncy(cursor(bc)) = int(br-1,c_int); adjwgt(cursor(bc)) = int(p,c_int); cursor(bc)=cursor(bc)+1
-    end do
-    deallocate(edge_key)
-    ! METIS UFACTOR is (imbalance - 1) * 1000 (e.g. 1.03 -> 30),
-    ! not imbalance * 1000.
-    status = icgn_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
-         int(upt%icgn_num_blocks,c_int), &
-         int(max(1, nint(1000.0_dp*(upt%icgn_metis_imbalance-1.0_dp))),c_int), 42_c_int, part)
-    if (status /= 0) then
-       call icgn_log_important(upt, 'METIS unavailable or failed; using built-in graph-BFS fallback partitioning')
-       call icgn_graph_partition(na, upt%icgn_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
+    ! ---- Block partition: geometry (1D PL) or coupling (METIS/graph) --------
+    allocate(label(na), counts(na))
+    if (upt%icgn_partition_type == 1) then
+       allocate(part(na))
+       call icgn_geometry_partition(upt, na, bsize, part, status)
+       if (status /= 0) then
+          ierr = status
+          call icgn_prepare_cleanup(upt, pairs, bq, qp, sig)
+          return
+       end if
+       do i = 1, na; label(i) = int(part(i)) + 1; end do
+       deallocate(part)
+       call icgn_log_progress(upt, 'mode=icgn geometry partition complete')
     else
-       call icgn_log_progress(upt, 'METIS partitioning done')
+       maxedge = max(1, upt%ham%nnz)
+       ! Aggregate all orbital couplings into one weighted undirected edge per atom
+       ! pair. The open-addressed hash avoids passing duplicate edges to METIS.
+       hash_size = max(17, 2*maxedge + 1)
+       allocate(edge_key(hash_size), edge_weight(hash_size))
+       edge_key = 0_8; edge_weight = 0.0_dp
+       nedge = 0; max_weight = 0.0_dp; counts = 0
+       do r = 1, n
+          do k = upt%ham%Mi(r), upt%ham%Mi(r+1)-1
+             c = upt%ham%Mj(k)
+             if (atom_of(r) == atom_of(c)) cycle
+             if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+             br = atom_of(r); bc = atom_of(c)
+             min_atom = min(br, bc); max_atom = max(br, bc)
+             slot = int(mod(int(min_atom-1,8)*int(na,8) + int(max_atom,8), int(hash_size,8))) + 1
+             do while (edge_key(slot) /= 0_8 .and. edge_key(slot) /= int(min_atom-1,8)*int(na,8)+int(max_atom,8))
+                slot = slot + 1
+                if (slot > hash_size) slot = 1
+             end do
+             if (edge_key(slot) == 0_8) then
+                edge_key(slot) = int(min_atom-1,8)*int(na,8) + int(max_atom,8)
+                nedge = nedge + 1
+                counts(min_atom) = counts(min_atom) + 1
+                counts(max_atom) = counts(max_atom) + 1
+             end if
+             edge_weight(slot) = edge_weight(slot) + abs(upt%ham%M(k))**2
+          end do
+       end do
+       do slot = 1, hash_size
+          if (edge_key(slot) /= 0_8) max_weight = max(max_weight, edge_weight(slot))
+       end do
+       if (nedge == 0 .or. max_weight == 0.0_dp) then
+          ierr = 7; write(*,*) '(icgn) atom graph has no couplings'
+          call icgn_prepare_cleanup(upt, pairs, bq, qp, sig)
+          return
+       end if
+       allocate(xadj(na+1), cursor(na), adjncy(2*nedge), adjwgt(2*nedge), vwgt(na), part(na))
+       xadj(1) = 0_c_int
+       do i = 1, na
+          xadj(i+1) = xadj(i) + int(counts(i), c_int)
+          cursor(i)  = int(xadj(i)) + 1
+          vwgt(i)    = int(bsize(i), c_int)
+       end do
+       do slot = 1, hash_size
+          if (edge_key(slot) == 0_8) cycle
+          br = int((edge_key(slot)-1_8) / int(na,8)) + 1
+          bc = int(mod(edge_key(slot)-1_8, int(na,8))) + 1
+          p = max(1, nint(edge_weight(slot) / max_weight * 1000000.0_dp))
+          adjncy(cursor(br)) = int(bc-1,c_int); adjwgt(cursor(br)) = int(p,c_int); cursor(br)=cursor(br)+1
+          adjncy(cursor(bc)) = int(br-1,c_int); adjwgt(cursor(bc)) = int(p,c_int); cursor(bc)=cursor(bc)+1
+       end do
+       deallocate(edge_key)
+       ! METIS UFACTOR is (imbalance - 1) * 1000 (e.g. 1.03 -> 30),
+       ! not imbalance * 1000.
+       status = icgn_metis_partition(int(na,c_int), xadj, adjncy, vwgt, adjwgt, &
+            int(upt%icgn_num_blocks,c_int), &
+            int(max(1, nint(1000.0_dp*(upt%icgn_metis_imbalance-1.0_dp))),c_int), 42_c_int, part)
+       if (status /= 0) then
+          call icgn_log_important(upt, 'METIS unavailable or failed; using built-in graph-BFS fallback partitioning')
+          call icgn_graph_partition(na, upt%icgn_num_blocks, vwgt, xadj, adjncy, adjwgt, part)
+       else
+          call icgn_log_progress(upt, 'METIS partitioning done')
+       end if
+       do i = 1, na; label(i) = int(part(i)) + 1; end do
+       call icgn_log_progress(upt, 'mode=icgn graph partition complete')
     end if
-    do i = 1, na; label(i) = int(part(i)) + 1; end do
-    call icgn_log_progress(upt, 'mode=icgn graph partition complete')
 
     all_weight = 0.0_dp; cut_weight = 0.0_dp
     do r = 1, n
@@ -722,9 +736,35 @@ contains
           all_weight = all_weight + abs(upt%ham%M(k))**2
           if (label(atom_of(r)) /= label(atom_of(c))) &
                cut_weight = cut_weight + abs(upt%ham%M(k))**2
+          ! Geometry PL must be block-tridiagonal (or circulant under PBC):
+          ! no H coupling between non-adjacent blocks. With periodic BC along
+          ! the partition axis, blocks 1 and nb are neighbours (ring).
+          if (upt%icgn_partition_type == 1 .and. abs(upt%ham%M(k)) > 0.0_dp) then
+             block
+               integer :: lb, lc, dblk, nb_chk
+               lb = label(atom_of(r)); lc = label(atom_of(c))
+               nb_chk = upt%icgn_num_blocks
+               dblk = abs(lb - lc)
+               if (upt%basis%periodic .and. nb_chk > 1) &
+                    dblk = min(dblk, nb_chk - dblk)
+               if (dblk > 1) then
+                  ierr = 24
+                  write(*,'(a,i0,a,i0,a,i0,a)') &
+                       '(icgn) ERROR: geometry partition has non-adjacent block coupling |i-j|=', &
+                       dblk, ' (blocks ', lb, ' and ', lc, &
+                       '). PL too thin vs ETB interaction range; increase layer content or reduce num_blocks.'
+                  call icgn_prepare_cleanup(upt, pairs, bq, qp, sig)
+                  return
+               end if
+             end block
+          end if
        end do
     end do
-    upt%icgn_cut_fraction = cut_weight / all_weight
+    if (all_weight > 0.0_dp) then
+       upt%icgn_cut_fraction = cut_weight / all_weight
+    else
+       upt%icgn_cut_fraction = 0.0_dp
+    end if
 
     ! ---- Allocate icgn_blocks and fill rows arrays --------------------------
     deallocate(counts)
@@ -736,6 +776,9 @@ contains
        upt%icgn_blocks(i)%nrow = counts(i)
        allocate(upt%icgn_blocks(i)%rows(counts(i)))
     end do
+    ! cursor is only allocated on the METIS/graph path; geometry needs it too.
+    if (allocated(cursor)) deallocate(cursor)
+    allocate(cursor(nb))
     cursor = 0
     do i = 1, na
        br = label(i)
@@ -1075,10 +1118,20 @@ contains
           upt%icgn_pi_converged, &
           upt%icgn_check_convergence .and. upt%icgn_selfenergy_order >= 0 .and. nqq > 0)
 
-    ! Cleanup
-
-    deallocate(atom_of, offsets, bsize, label, row_of)
-    deallocate(counts, edge_weight, xadj, adjncy, adjwgt, vwgt, part, cursor)
+    ! Cleanup (geometry path never allocates the METIS/graph temporaries)
+    if (allocated(atom_of)) deallocate(atom_of)
+    if (allocated(offsets)) deallocate(offsets)
+    if (allocated(bsize)) deallocate(bsize)
+    if (allocated(label)) deallocate(label)
+    if (allocated(row_of)) deallocate(row_of)
+    if (allocated(counts)) deallocate(counts)
+    if (allocated(cursor)) deallocate(cursor)
+    if (allocated(edge_weight)) deallocate(edge_weight)
+    if (allocated(xadj)) deallocate(xadj)
+    if (allocated(adjncy)) deallocate(adjncy)
+    if (allocated(adjwgt)) deallocate(adjwgt)
+    if (allocated(vwgt)) deallocate(vwgt)
+    if (allocated(part)) deallocate(part)
 
   end subroutine icgn_prepare
 
@@ -1479,6 +1532,212 @@ contains
 
     deallocate(visited, queue)
   end subroutine icgn_graph_partition
+
+  ! ============================================================================
+  ! Geometry partition: 1D principal layers (PL) along x/y/z.
+  ! 1) Detect atomic layers from projected coordinates (gap clustering).
+  ! 2) Pack consecutive layers into K balanced blocks (DP on layer sizes).
+  ! part(1:na) is 0-based block id.  On failure ierr /= 0.
+  ! ============================================================================
+  subroutine icgn_geometry_partition(upt, na, bsize, part, ierr)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: na
+    integer, intent(in) :: bsize(na)
+    integer, intent(out) :: part(na)
+    integer, intent(out) :: ierr
+    integer :: dir, i, j, L, K, a, best_dir, n_gap
+    real(dp) :: extent(3), u, tol, gap, max_small, min_large, jump, best_jump
+    real(dp), allocatable :: u_atom(:), u_sorted(:), gaps(:)
+    integer, allocatable :: order(:), layer_of_atom(:), layer_size(:), layer_natom(:)
+    integer, allocatable :: cum(:), cut(:), dp_prev(:)
+    real(dp), allocatable :: cost(:,:)
+    real(dp) :: target, mean, dev, best_cost, c
+    integer :: s, t, prev, blk, first, last
+    character(len=256) :: msg
+
+    ierr = 0
+    part = 0
+    if (.not. associated(upt%basis%coord)) then
+       ierr = 20; write(*,*) '(icgn) geometry partition: basis coordinates missing'; return
+    end if
+    if (size(upt%basis%coord, 2) < na) then
+       ierr = 20; write(*,*) '(icgn) geometry partition: coord size mismatch'; return
+    end if
+
+    ! Direction: 1/2/3 = x/y/z; 0 = auto (longest extent)
+    dir = upt%icgn_partition_dir
+    if (dir < 0 .or. dir > 3) dir = 0
+    do j = 1, 3
+       extent(j) = maxval(upt%basis%coord(j, 1:na)) - minval(upt%basis%coord(j, 1:na))
+    end do
+    if (dir == 0) then
+       best_dir = 1
+       do j = 2, 3
+          if (extent(j) > extent(best_dir)) best_dir = j
+       end do
+       dir = best_dir
+       write(msg,'(a,i0,a,3(f10.4,1x))') &
+            '(icgn) geometry partition: auto direction=', dir, ' extents=', extent
+       call icgn_log_important(upt, trim(msg))
+    end if
+
+    allocate(u_atom(na), order(na))
+    do i = 1, na
+       u_atom(i) = upt%basis%coord(dir, i)
+       order(i) = i
+    end do
+    ! Insertion sort atoms by projected coordinate (na is modest for layer detect).
+    do i = 2, na
+       a = order(i); u = u_atom(a); j = i - 1
+       do while (j >= 1)
+          if (u_atom(order(j)) <= u) exit
+          order(j+1) = order(j); j = j - 1
+       end do
+       order(j+1) = a
+    end do
+
+    allocate(u_sorted(na), gaps(max(1, na-1)))
+    do i = 1, na
+       u_sorted(i) = u_atom(order(i))
+    end do
+    n_gap = na - 1
+    do i = 1, n_gap
+       gaps(i) = u_sorted(i+1) - u_sorted(i)
+    end do
+
+    tol = upt%icgn_layer_tol
+    if (tol <= 0.0_dp) then
+       ! Auto tol: largest jump between small (intra-layer jitter) and large (inter-layer) gaps.
+       if (n_gap < 1) then
+          L = 1
+          allocate(layer_of_atom(na), layer_size(1), layer_natom(1))
+          layer_of_atom = 1; layer_size(1) = sum(bsize); layer_natom(1) = na
+       else
+          block
+            integer, allocatable :: gord(:)
+            integer :: gi, gj, gt
+            allocate(gord(n_gap))
+            do gi = 1, n_gap; gord(gi) = gi; end do
+            do gi = 2, n_gap
+               gt = gord(gi); u = gaps(gt); gj = gi - 1
+               do while (gj >= 1)
+                  if (gaps(gord(gj)) <= u) exit
+                  gord(gj+1) = gord(gj); gj = gj - 1
+               end do
+               gord(gj+1) = gt
+            end do
+            best_jump = -1.0_dp; tol = -1.0_dp
+            do gi = 1, n_gap - 1
+               jump = gaps(gord(gi+1)) - gaps(gord(gi))
+               if (jump > best_jump) then
+                  best_jump = jump
+                  tol = 0.5_dp * (gaps(gord(gi)) + gaps(gord(gi+1)))
+               end if
+            end do
+            deallocate(gord)
+          end block
+          if (tol <= 0.0_dp) then
+             ierr = 21
+             write(*,*) '(icgn) geometry partition: cannot auto-detect layer tolerance (no clear gap clusters)'
+             write(*,*) '(icgn) set layer_tolerance explicitly (Angstrom)'
+             deallocate(u_atom, order, u_sorted, gaps)
+             return
+          end if
+          write(msg,'(a,f10.6,a)') '(icgn) geometry partition: auto layer_tolerance=', tol, ' Ang'
+          call icgn_log_important(upt, trim(msg))
+       end if
+    end if
+
+    if (.not. allocated(layer_of_atom)) then
+       allocate(layer_of_atom(na))
+       L = 1
+       layer_of_atom(order(1)) = 1
+       do i = 2, na
+          if (gaps(i-1) > tol) L = L + 1
+          layer_of_atom(order(i)) = L
+       end do
+       allocate(layer_size(L), layer_natom(L))
+       layer_size = 0; layer_natom = 0
+       do i = 1, na
+          layer_size(layer_of_atom(i)) = layer_size(layer_of_atom(i)) + bsize(i)
+          layer_natom(layer_of_atom(i)) = layer_natom(layer_of_atom(i)) + 1
+       end do
+    end if
+
+    write(msg,'(a,i0,a,i0)') '(icgn) geometry partition: atomic layers=', L, ', atoms=', na
+    call icgn_log_important(upt, trim(msg))
+
+    K = upt%icgn_num_blocks
+    ! Geometry PL: each block needs >= 1 atomic layer. Clamp when auto heuristic
+    ! (or an explicit request) exceeds L; never hard-fail on this alone.
+    if (K > L) then
+       write(msg,'(a,i0,a,i0,a)') &
+            '(icgn) geometry: num_blocks=', K, ' > atomic layers=', L, &
+            ' — clamping to n_layers (min(L, heuristic/request))'
+       call icgn_log_important(upt, trim(msg))
+       K = L
+       upt%icgn_num_blocks = K
+    end if
+    if (K < 1) K = 1
+    if (K == 1) then
+       part = 0
+       deallocate(u_atom, order, u_sorted, gaps, layer_of_atom, layer_size, layer_natom)
+       return
+    end if
+
+    ! DP: pack L consecutive layers into K groups, minimise sum of squared
+    ! deviations of group orbital counts from mean N/K.
+    mean = real(sum(layer_size), dp) / real(K, dp)
+    allocate(cum(0:L))
+    cum(0) = 0
+    do i = 1, L
+       cum(i) = cum(i-1) + layer_size(i)
+    end do
+    allocate(cost(0:L, 0:K))
+    cost = huge(1.0_dp)
+    cost(0, 0) = 0.0_dp
+    allocate(dp_prev(L*K)); dp_prev = 0
+    do t = 1, K
+       do j = t, L   ! at least one layer per remaining group: j-s >= K-t, s >= t-1
+          best_cost = huge(1.0_dp); prev = t - 1
+          do s = t - 1, j - 1
+             if (cost(s, t-1) >= huge(1.0_dp) * 0.5_dp) cycle
+             dev = real(cum(j) - cum(s), dp) - mean
+             c = cost(s, t-1) + dev * dev
+             if (c < best_cost) then
+                best_cost = c; prev = s
+             end if
+          end do
+          cost(j, t) = best_cost
+          dp_prev((t-1)*L + j) = prev
+       end do
+    end do
+    if (cost(L, K) >= huge(1.0_dp) * 0.5_dp) then
+       ierr = 23; write(*,*) '(icgn) geometry partition: DP failed'; return
+    end if
+
+    ! Backtrack cuts: cut(t) = last layer index of group t
+    allocate(cut(0:K))
+    cut(K) = L
+    do t = K, 1, -1
+       cut(t-1) = dp_prev((t-1)*L + cut(t))
+    end do
+    cut(0) = 0
+
+    ! Map layers -> blocks, atoms -> part (0-based)
+    do t = 1, K
+       first = cut(t-1) + 1
+       last = cut(t)
+       do i = 1, na
+          if (layer_of_atom(i) >= first .and. layer_of_atom(i) <= last) part(i) = t - 1
+       end do
+    end do
+
+    write(msg,'(a,i0,a,f12.3)') '(icgn) geometry partition: blocks=', K, ', balance cost=', cost(L, K)
+    call icgn_log_important(upt, trim(msg))
+
+    deallocate(u_atom, order, u_sorted, gaps, layer_of_atom, layer_size, layer_natom, cum, cost, dp_prev, cut)
+  end subroutine icgn_geometry_partition
 
   ! Diagonalize block ib of icgn_blocks.  Thread-safe for distinct ib: it reads
   ! upt%ham and writes only upt%icgn_blocks(ib).  local(r) = position of row r

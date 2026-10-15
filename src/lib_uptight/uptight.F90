@@ -53,6 +53,7 @@ module UPTIGHT
   public :: upt_write_eigenvectors, upt_get_mat_el, upt_nullify_all
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
+  public :: upt_set_coarse_graining_partition
   public :: upt_get_coarse_graining_error
   public :: upt_coarse_graining_swap_out
   public :: upt_configure_icgn, upt_get_icgn_info
@@ -427,6 +428,19 @@ contains
         top_buffer, bottom_buffer, epsilon, add_core_outers, neumann_order, expansion_energy, metis_imbalance, &
         check_neumann_convergence, pi_maxiter, pi_tol)
   end subroutine UPT_configure_coarse_graining
+
+  ! Select the block partition strategy.  ptype: 0 = coupling (METIS/graph),
+  ! 1 = geometry (1D principal layers).  pdir: 0 = auto (longest extent),
+  ! 1/2/3 = x/y/z.  layer_tol: atomic-layer gap tolerance in Angstrom
+  ! (<= 0 = auto-detect).  Must be called after UPT_configure_coarse_graining.
+  subroutine UPT_set_coarse_graining_partition(upt, ptype, pdir, layer_tol)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: ptype, pdir
+    real(dp), intent(in) :: layer_tol
+    upt%icgn_partition_type = ptype
+    upt%icgn_partition_dir = pdir
+    upt%icgn_layer_tol = layer_tol
+  end subroutine UPT_set_coarse_graining_partition
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
      use coarse_grain, only : icgn_get_info

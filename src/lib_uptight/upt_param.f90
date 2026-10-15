@@ -100,6 +100,12 @@ module upt_param
    integer :: icgn_error
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
      real(dp) :: icgn_emin, icgn_emax, icgn_metis_imbalance, icgn_cut_fraction
+     ! Block partition mode: 0 = coupling (METIS/graph), 1 = geometry (1D principal layers)
+     integer  :: icgn_partition_type = 0
+     ! Geometry partition direction: 0 = auto (longest extent), 1/2/3 = x/y/z
+     integer  :: icgn_partition_dir = 0
+     ! Atomic-layer gap tolerance (Angstrom); <= 0 means auto-detect
+     real(dp) :: icgn_layer_tol = 0.0_dp
     logical :: icgn_check_neumann_convergence
     integer :: icgn_pi_maxiter
     real(dp) :: icgn_pi_tol
@@ -220,6 +226,9 @@ contains
    upt%icgn_epsilon = 0.0_dp   ! 0 = coupling filter disabled
    upt%icgn_metis_imbalance = 0.03_dp
    upt%icgn_cut_fraction = 0.0_dp
+   upt%icgn_partition_type = 0
+   upt%icgn_partition_dir = 0
+   upt%icgn_layer_tol = 0.0_dp
    upt%icgn_add_core_outers = 0   ! default: do not add core-state outers
    upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)
    upt%icgn_E0 = 0.0_dp

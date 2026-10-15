@@ -567,6 +567,23 @@ subroutine upt_set_coarse_graining(handler, n_blocks, metis_imbalance, &
       power_iteration_max_iterations, power_iteration_tolerance)
 end subroutine upt_set_coarse_graining
 
+!!* Select block partition strategy (0 = coupling, 1 = geometry), direction
+!!* (0 = auto, 1/2/3 = x/y/z) and atomic-layer tolerance in Angstrom (<=0: auto).
+!!* Call after upt_set_coarse_graining.
+subroutine upt_set_coarse_graining_partition(handler, partition_type, partition_direction, layer_tolerance)
+  use precision, only : dp
+  use uptightAPICommon ! if:mod:use
+  use uptight, only : upt_set_coarse_graining_partition_f => upt_set_coarse_graining_partition ! if:mod:use
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: partition_type ! if:var:in
+  integer :: partition_direction ! if:var:in
+  real(dp) :: layer_tolerance ! if:var:in
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_set_coarse_graining_partition_f(pUPTs%pUPT, partition_type, partition_direction, layer_tolerance)
+end subroutine upt_set_coarse_graining_partition
+
 !!* Return coarse-graining reduction statistics after Hamiltonian creation.
 subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)
   use precision, only : dp
