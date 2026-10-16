@@ -100,7 +100,8 @@ module upt_param
    integer :: icgn_error
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
      real(dp) :: icgn_emin, icgn_emax, icgn_metis_imbalance, icgn_cut_fraction
-     ! Block partition mode: 0 = coupling (METIS/graph), 1 = geometry (1D principal layers)
+     ! Block partition mode: 0 = coupling (METIS/graph), 1 = geometry (1D PL),
+     ! 2 = nested (hierarchical cube→row→plane→bulk)
      integer  :: icgn_partition_type = 0
      ! Geometry partition direction: 0 = auto (longest extent), 1/2/3 = x/y/z
      integer  :: icgn_partition_dir = 0
@@ -124,6 +125,10 @@ module upt_param
      logical  :: icgn_check_convergence        ! .true. to run power iteration check
      real(dp) :: icgn_sigma_T2                 ! estimated ||T||_2 (output; -1 if not run)
      logical  :: icgn_pi_converged             ! .true. if power iteration converged
+     ! Nested CG (append at end to keep existing field order stable):
+     ! axes order (1/2/3 = x/y/z), e.g. (1,2,3) = x-y-z; grids along those axes
+     integer  :: icgn_nested_axes(3) = (/ 1, 2, 3 /)
+     integer  :: icgn_nested_grids(3) = (/ 0, 0, 0 /)
  
      REAL ( dp ),   DIMENSION( : ),    POINTER     :: eigen_values
      COMPLEX ( dp ), DIMENSION( :,: ),    POINTER  :: eigen_vectors
@@ -229,6 +234,8 @@ contains
    upt%icgn_partition_type = 0
    upt%icgn_partition_dir = 0
    upt%icgn_layer_tol = 0.0_dp
+   upt%icgn_nested_axes = (/ 1, 2, 3 /)
+   upt%icgn_nested_grids = (/ 0, 0, 0 /)
    upt%icgn_add_core_outers = 0   ! default: do not add core-state outers
    upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)
    upt%icgn_E0 = 0.0_dp

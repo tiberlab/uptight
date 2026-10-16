@@ -53,7 +53,7 @@ module UPTIGHT
   public :: upt_write_eigenvectors, upt_get_mat_el, upt_nullify_all
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
-  public :: upt_set_coarse_graining_partition
+  public :: upt_set_coarse_graining_partition, upt_set_coarse_graining_nested
   public :: upt_get_coarse_graining_error
   public :: upt_coarse_graining_swap_out
   public :: upt_configure_icgn, upt_get_icgn_info
@@ -430,9 +430,10 @@ contains
   end subroutine UPT_configure_coarse_graining
 
   ! Select the block partition strategy.  ptype: 0 = coupling (METIS/graph),
-  ! 1 = geometry (1D principal layers).  pdir: 0 = auto (longest extent),
-  ! 1/2/3 = x/y/z.  layer_tol: atomic-layer gap tolerance in Angstrom
-  ! (<= 0 = auto-detect).  Must be called after UPT_configure_coarse_graining.
+  ! 1 = geometry (1D principal layers), 2 = nested (cube→row→plane→bulk).
+  ! pdir: 0 = auto (longest extent), 1/2/3 = x/y/z (geometry only).
+  ! layer_tol: atomic-layer gap tolerance in Angstrom (<= 0 = auto-detect).
+  ! Must be called after UPT_configure_coarse_graining.
   subroutine UPT_set_coarse_graining_partition(upt, ptype, pdir, layer_tol)
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: ptype, pdir
@@ -441,6 +442,18 @@ contains
     upt%icgn_partition_dir = pdir
     upt%icgn_layer_tol = layer_tol
   end subroutine UPT_set_coarse_graining_partition
+
+  ! Nested CG grid/axes. axes(1:3) in {1,2,3} = x,y,z order (row along axes(1),
+  ! plane along axes(1:2)). grids(1:3) > 0. Call after set_coarse_graining_partition
+  ! with ptype=2. Forces fast-path (no core outers, no Neumann).
+  subroutine UPT_set_coarse_graining_nested(upt, axes, grids)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: axes(3), grids(3)
+    upt%icgn_nested_axes = axes
+    upt%icgn_nested_grids = grids
+    upt%icgn_add_core_outers = 0
+    upt%icgn_selfenergy_order = -1
+  end subroutine UPT_set_coarse_graining_nested
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
      use coarse_grain, only : icgn_get_info

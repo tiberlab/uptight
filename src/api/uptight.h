@@ -274,6 +274,22 @@ extern "C"
 }
 
 
+// Corresponding F77 arguments for upt_set_coarse_graining_nested:
+// integer, intent(in) :: handler(DAC_handlerSize)
+// integer, intent(in) :: ax1
+// integer, intent(in) :: ax2
+// integer, intent(in) :: ax3
+// integer, intent(in) :: g1
+// integer, intent(in) :: g2
+// integer, intent(in) :: g3
+extern "C"
+
+{
+  void upt_set_coarse_graining_nested_ (int const* handler, int const& ax1, int 
+      const& ax2, int const& ax3, int const& g1, int const& g2, int const& g3);
+}
+
+
 // Corresponding F77 arguments for upt_get_coarse_graining_info:
 // integer, intent(in) :: handler(DAC_handlerSize)
 // integer, intent(out) :: ready

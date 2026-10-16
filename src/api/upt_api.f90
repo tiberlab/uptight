@@ -584,6 +584,26 @@ subroutine upt_set_coarse_graining_partition(handler, partition_type, partition_
   call upt_set_coarse_graining_partition_f(pUPTs%pUPT, partition_type, partition_direction, layer_tolerance)
 end subroutine upt_set_coarse_graining_partition
 
+!!* Nested CG axes (1/2/3) and grids. Call after partition_type=2.
+subroutine upt_set_coarse_graining_nested(handler, ax1, ax2, ax3, g1, g2, g3)
+  use uptightAPICommon ! if:mod:use
+  use uptight, only : upt_set_coarse_graining_nested_f => upt_set_coarse_graining_nested ! if:mod:use
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  integer :: ax1 ! if:var:in
+  integer :: ax2 ! if:var:in
+  integer :: ax3 ! if:var:in
+  integer :: g1 ! if:var:in
+  integer :: g2 ! if:var:in
+  integer :: g3 ! if:var:in
+  integer :: axes(3), grids(3)
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  axes = (/ ax1, ax2, ax3 /)
+  grids = (/ g1, g2, g3 /)
+  call upt_set_coarse_graining_nested_f(pUPTs%pUPT, axes, grids)
+end subroutine upt_set_coarse_graining_nested
+
 !!* Return coarse-graining reduction statistics after Hamiltonian creation.
 subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)
   use precision, only : dp

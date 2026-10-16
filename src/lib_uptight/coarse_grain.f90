@@ -96,6 +96,20 @@ module coarse_grain
      complex(dp), pointer :: m(:,:) => null()
   end type ICGNMat
 
+  ! ---- Geometry of the nested (cube -> row -> plane) partition ---------------
+  ! Cube id ic = ix + nx*(iy-1) + nx*ny*(iz-1) (all 1-based), where ix/iy/iz run
+  ! along nested_axes(1:3).  The cubes of one row (fixed iy,iz) and the rows of
+  ! one plane (fixed iz) therefore have CONSECUTIVE ids.  perm(1:n) lists the
+  ! orbitals sorted by (cube id, orbital index): every cube, row and plane owns
+  ! one contiguous slice of perm (cstart marks the cube slices), and pos is the
+  ! inverse of perm.  The position of an orbital inside any unit (cube/row/plane)
+  ! is pos(orbital) - (start of that unit's slice) + 1; Q matrices of every level
+  ! use exactly this row order.
+  type ICGNHier
+     integer :: nx = 0, ny = 0, nz = 0
+     integer, allocatable :: cube_of_orb(:), perm(:), pos(:), cstart(:)
+  end type ICGNHier
+
   ! Block-sparse storage of the Neumann self-energy Sigma (P-P space).  Row a of
   ! blocks holds the blocks Sigma(P_a, P_blk(t)) for blk(t) >= a only; the part
   ! below the block diagonal follows from Hermiticity (see icgn_csr_add_sigma).
@@ -615,7 +629,7 @@ contains
     if (upt%icgn_num_blocks < 0) then
        ierr = 2; write(*,*) '(icgn) num_blocks must be non-negative (0 = auto)'; return
     end if
-    call icgn_resolve_num_blocks(upt, na, n)
+    if (upt%icgn_partition_type /= 2) call icgn_resolve_num_blocks(upt, na, n)
    if (upt%icgn_core_emin >= upt%icgn_core_emax .or. upt%icgn_top_buffer < 0.0_dp .or. &
       upt%icgn_bottom_buffer < 0.0_dp) then
        ierr = 3; write(*,*) '(icgn) invalid core window or buffer'; return
@@ -643,6 +657,18 @@ contains
     if (pos-1 /= n) then
        ierr = 5; write(*,*) '(icgn) atom/orbital mapping inconsistent'
        call icgn_prepare_cleanup(upt, pairs, bq, qp, sig)
+       return
+    end if
+
+    ! ---- Nested hierarchical CG (cube→row→plane→bulk) -----------------------
+    if (upt%icgn_partition_type == 2) then
+       ! Fast-path only: no core outers, no Neumann (contract of nested prototype).
+       upt%icgn_add_core_outers = 0
+       upt%icgn_selfenergy_order = -1
+       call icgn_nested_prepare(upt, na, n, offsets, bsize, atom_of, ierr)
+       if (allocated(atom_of)) deallocate(atom_of)
+       if (allocated(offsets)) deallocate(offsets)
+       if (allocated(bsize)) deallocate(bsize)
        return
     end if
 
@@ -1739,8 +1765,904 @@ contains
     deallocate(u_atom, order, u_sorted, gaps, layer_of_atom, layer_size, layer_natom, cum, cost, dp_prev, cut)
   end subroutine icgn_geometry_partition
 
+  ! ============================================================================
+  ! NESTED (MULTI-LEVEL) COARSE-GRAINING:  cube -> row -> plane -> bulk H_CG
+  !
+  ! The supercell is cut into nx*ny*nz cubes (grids along nested_axes).
+  !   level 0: every cube is diagonalized (window states kept)            -> cube units
+  !   level 1: cubes of one ROW  -> H_CG(row)   -> diagonalize -> row unit
+  !   level 2: rows  of one PLANE-> H_CG(plane) -> diagonalize -> plane unit
+  !   level 3: planes -> H_CG(bulk) (NOT diagonalized) handed to the solver.
+  !
+  ! Generic building block icgn_cg_assemble (no diagonalization): given a group of
+  ! units, each with an orthonormal retained basis Q_u (rows = the unit's orbitals
+  ! in the basis of H_in) and energies eval_u, it returns the CSR H_CG of the group:
+  ! diag(eval) on the unit diagonals, Q_a^H H_ab Q_b on the pairs (a,b) (only the
+  ! interface rows/columns of H_ab enter the products, as in the fast path).
+  ! H_in is any CSR and the unit/row maps are supplied by ICGNHier, so the same
+  ! routine serves every level.
+  !
+  ! Q bookkeeping: a unit's Q is always expressed in the ORBITAL basis, restricted
+  ! to the unit's own orbitals.  Merging a group gives
+  !     Q_group = blockdiag(Q_u) * Z        (Z = eigenvectors of H_CG(group))
+  ! so the accumulated Q of a plane is supported on that plane's orbitals only:
+  ! the final Q is block-diagonal over planes and is returned to uptight as
+  ! icgn_blocks(plane) (rows, q, eval) - exactly the contract of the fast path.
+  ! No other Q is kept: the Q of cubes/rows is freed as soon as its group is merged.
+  !
+  ! Memory/parallelism: planes are processed one after another (or T at a time when
+  ! #planes >= threads), inside a plane the rows, inside a row the cubes; only the
+  ! units of ONE group are alive at any time.  Exactly one loop level is parallel:
+  ! the outermost level having at least as many items as threads (items of large
+  ! dimension run one after another so threaded LAPACK works on them, see
+  ! icgn_outer_threads).  Pair projections of a merge are parallel when the merge
+  ! itself runs on the full thread budget (tb).
+  ! ============================================================================
+
+  ! Local unit index ul (0 = orbital c lies outside group g) and position lp of
+  ! orbital c inside that unit.  lev=1: units = cubes of row g; lev=2: units = rows
+  ! of plane g; lev=3: units = planes (g unused).
+  pure subroutine icgn_hier_map(hh, lev, g, c, ul, lp)
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: lev, g, c
+    integer, intent(out) :: ul, lp
+    integer :: ic, ir, ip
+    ic = hh%cube_of_orb(c)
+    ir = (ic - 1) / hh%nx + 1
+    ip = (ir - 1) / hh%ny + 1
+    ul = 0; lp = 0
+    select case (lev)
+    case (1)
+       if (ir /= g) return
+       ul = ic - (g - 1) * hh%nx
+       lp = hh%pos(c) - hh%cstart(ic) + 1
+    case (2)
+       if (ip /= g) return
+       ul = ir - (g - 1) * hh%ny
+       lp = hh%pos(c) - hh%cstart((ir - 1) * hh%nx + 1) + 1
+    case default
+       ul = ip
+       lp = hh%pos(c) - hh%cstart((ip - 1) * hh%nx * hh%ny + 1) + 1
+    end select
+  end subroutine icgn_hier_map
+
+  ! Slice [p1,p2] of perm owned by group g of level lev.
+  pure subroutine icgn_hier_range(hh, lev, g, p1, p2)
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: lev, g
+    integer, intent(out) :: p1, p2
+    select case (lev)
+    case (1)
+       p1 = hh%cstart((g - 1) * hh%nx + 1)
+       p2 = hh%cstart(g * hh%nx + 1) - 1
+    case (2)
+       p1 = hh%cstart((g - 1) * hh%nx * hh%ny + 1)
+       p2 = hh%cstart(g * hh%nx * hh%ny + 1) - 1
+    case default
+       p1 = 1
+       p2 = size(hh%perm)
+    end select
+  end subroutine icgn_hier_range
+
+  ! First position in perm of unit u (local index) of group g, level lev.
+  pure integer function icgn_hier_ustart(hh, lev, g, u) result(s)
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: lev, g, u
+    select case (lev)
+    case (1)
+       s = hh%cstart((g - 1) * hh%nx + u)
+    case (2)
+       s = hh%cstart(((g - 1) * hh%ny + (u - 1)) * hh%nx + 1)
+    case default
+       s = hh%cstart((u - 1) * hh%nx * hh%ny + 1)
+    end select
+  end function icgn_hier_ustart
+
+  ! Retained index range [i1,i2] among eigenvalues w(1:m) sorted ascending:
+  ! nominal window [elo,ehi], then all-or-nothing growth of degenerate multiplets
+  ! (|dE| <= delta) at both window edges (same rule as icgn_expand_keep_boundary).
+  ! i1 > i2 means nothing is retained.
+  pure subroutine icgn_window_range(w, m, elo, ehi, delta, i1, i2)
+    real(dp), intent(in) :: w(:)
+    integer, intent(in) :: m
+    real(dp), intent(in) :: elo, ehi, delta
+    integer, intent(out) :: i1, i2
+    integer :: j
+    i1 = m + 1; i2 = 0
+    do j = 1, m
+       if (w(j) >= elo .and. w(j) <= ehi) then
+          if (i1 > m) i1 = j
+          i2 = j
+       end if
+    end do
+    if (i2 < i1) then
+       i1 = 1; i2 = 0
+       return
+    end if
+    do while (i2 < m)
+       if (w(i2 + 1) - w(i2) > delta) exit
+       i2 = i2 + 1
+    end do
+    do while (i1 > 1)
+       if (w(i1) - w(i1 - 1) > delta) exit
+       i1 = i1 - 1
+    end do
+  end subroutine icgn_window_range
+
+  ! Window diagonalization of a dense Hermitian matrix h (both triangles filled).
+  ! Same policy as the fast path: ZHEEVR on [window -+ 1e-3 guard] (ZHEEVD fallback),
+  ! then keep the nominal core+buffer window plus degenerate multiplets at its edges.
+  ! w_out/z_out are allocated (size 0 when nothing is retained) unless ierr /= 0.
+  subroutine icgn_window_diag(upt, h, w_out, z_out, m, ierr)
+    type(OUPT), intent(in) :: upt
+    complex(dp), intent(in) :: h(:,:)
+    real(dp), allocatable, intent(out) :: w_out(:)
+    complex(dp), allocatable, intent(out) :: z_out(:,:)
+    integer, intent(out) :: m, ierr
+    real(dp), parameter :: margin = 1.0e-3_dp, delta = 1.0e-6_dp
+    integer :: nn, mm, i1, i2
+    real(dp) :: elo, ehi
+    real(dp), allocatable :: w(:)
+    complex(dp), allocatable :: a(:,:), z(:,:)
+
+    nn = size(h, 1)
+    m = 0; ierr = 0
+    if (nn < 1) then
+       allocate(w_out(0), z_out(0, 0))
+       return
+    end if
+    elo = upt%icgn_core_emin - upt%icgn_bottom_buffer
+    ehi = upt%icgn_core_emax + upt%icgn_top_buffer
+    allocate(a(nn, nn), w(nn), z(nn, nn))
+    a = h
+    call dense_eigh_window(a, elo - margin, ehi + margin, w, z, mm, ierr)
+    if (ierr /= 0) then
+       a = h
+       call coarse_eigh(a, w, ierr)
+       if (ierr /= 0) then
+          deallocate(a, w, z)
+          return
+       end if
+       z = a
+       mm = nn
+    end if
+    call icgn_window_range(w, mm, elo, ehi, delta, i1, i2)
+    m = max(0, i2 - i1 + 1)
+    allocate(w_out(m), z_out(nn, m))
+    if (m > 0) then
+       w_out = w(i1:i2)
+       z_out = z(:, i1:i2)
+    end if
+    deallocate(a, w, z)
+  end subroutine icgn_window_diag
+
+  subroutine icgn_free_unit(u)
+    type(ICGNBlock), intent(inout) :: u
+    if (associated(u%q)) deallocate(u%q)
+    if (associated(u%eval)) deallocate(u%eval)
+    if (associated(u%rows)) deallocate(u%rows)
+    nullify(u%q, u%eval, u%rows)
+    u%nret = 0
+  end subroutine icgn_free_unit
+
+  subroutine icgn_free_units(units)
+    type(ICGNBlock), allocatable, intent(inout) :: units(:)
+    integer :: i
+    if (.not. allocated(units)) return
+    do i = 1, size(units)
+       call icgn_free_unit(units(i))
+    end do
+    deallocate(units)
+  end subroutine icgn_free_units
+
+  ! V = Qa^H H_ab Qb for the pair (a,b) whose H_ab entries are
+  ! e_ord(m1:m2) -> (row e_la in a, column e_lb in b, value e_v).  Only the
+  ! interface rows of a / columns of b take part: V = (Qa(R,:))^H (H(R,C) Qb(C,:)).
+  subroutine icgn_project_entries(ua, ub, m1, m2, e_ord, e_la, e_lb, e_v, v)
+    type(ICGNBlock), intent(in) :: ua, ub
+    integer, intent(in) :: m1, m2
+    integer, intent(in) :: e_ord(:), e_la(:), e_lb(:)
+    complex(dp), intent(in) :: e_v(:)
+    complex(dp), pointer :: v(:,:)
+    complex(dp), parameter :: cone = (1.0_dp, 0.0_dp), czero = (0.0_dp, 0.0_dp)
+    integer :: m, e, nra, ncb
+    integer, allocatable :: rmap(:), cmap(:), ridx(:), cidx(:)
+    complex(dp), allocatable :: hs(:,:), qas(:,:), qbs(:,:), t(:,:)
+
+    allocate(v(ua%nret, ub%nret))
+    v = czero
+    if (m2 < m1) return
+    allocate(rmap(ua%nrow), cmap(ub%nrow), ridx(m2 - m1 + 1), cidx(m2 - m1 + 1))
+    rmap = 0; cmap = 0; nra = 0; ncb = 0
+    do m = m1, m2
+       e = e_ord(m)
+       if (rmap(e_la(e)) == 0) then
+          nra = nra + 1; rmap(e_la(e)) = nra; ridx(nra) = e_la(e)
+       end if
+       if (cmap(e_lb(e)) == 0) then
+          ncb = ncb + 1; cmap(e_lb(e)) = ncb; cidx(ncb) = e_lb(e)
+       end if
+    end do
+    allocate(hs(nra, ncb))
+    hs = czero
+    do m = m1, m2
+       e = e_ord(m)
+       hs(rmap(e_la(e)), cmap(e_lb(e))) = hs(rmap(e_la(e)), cmap(e_lb(e))) + e_v(e)
+    end do
+    allocate(qas(nra, ua%nret), qbs(ncb, ub%nret), t(nra, ub%nret))
+    qas = ua%q(ridx(1:nra), :)
+    qbs = ub%q(cidx(1:ncb), :)
+    t = czero
+    call icgn_zgemm_gen('N', 'N', cone, hs, qbs, czero, t)     ! (nra x ncb)(ncb x nb)
+    call icgn_zgemm_gen('C', 'N', cone, qas, t, czero, v)      ! (na x nra)(nra x nb)
+  end subroutine icgn_project_entries
+
+  ! Make sure the columns of every CSR row are strictly ascending (cheap check
+  ! first; only unsorted rows are insertion-sorted).
+  subroutine icgn_csr_sort_raw(mi, mj, m, n)
+    integer, intent(in) :: n
+    integer, intent(in) :: mi(:)
+    integer, intent(inout) :: mj(:)
+    complex(dp), intent(inout) :: m(:)
+    integer :: r, a, b, j, k, tmpj
+    complex(dp) :: tmpv
+    logical :: ok
+    do r = 1, n
+       a = mi(r); b = mi(r + 1) - 1
+       ok = .true.
+       do j = a + 1, b
+          if (mj(j) <= mj(j - 1)) then
+             ok = .false.; exit
+          end if
+       end do
+       if (ok) cycle
+       do j = a + 1, b
+          tmpj = mj(j); tmpv = m(j); k = j - 1
+          do while (k >= a)
+             if (mj(k) <= tmpj) exit
+             mj(k + 1) = mj(k); m(k + 1) = m(k); k = k - 1
+          end do
+          mj(k + 1) = tmpj; m(k + 1) = tmpv
+       end do
+    end do
+  end subroutine icgn_csr_sort_raw
+
+
+  ! ---------------------------------------------------------------------------
+  ! Generic H_CG assembly of ONE group (no diagonalization).
+  !   hin          : operator to project (any CSR; here always the orbital H)
+  !   hh, lev, g   : unit/row maps of the group (see icgn_hier_map)
+  !   units(1:nu)  : retained basis (q, eval, nret, nrow) of every unit
+  !   tb           : thread budget of this call (1 inside an outer parallel loop)
+  !   apply_filter : drop couplings with icgn_coupling_survives (final level only)
+  ! Output (raw CSR, format 'F', diagonal present, columns ascending):
+  !   rows/cols = retained states of the units concatenated in unit order.
+  ! Diagonal blocks are diag(eval): valid because every unit basis diagonalizes
+  ! H restricted to the unit (true at every level of the nested scheme).
+  ! Parallel over unit pairs; only entries inside the group are scanned.
+  ! ---------------------------------------------------------------------------
+  subroutine icgn_cg_assemble(upt, hin, hh, lev, g, units, nu, tb, apply_filter, &
+       mi, mj, mv, nnz, ierr)
+    type(OUPT), intent(in) :: upt
+    type(CSR), intent(in) :: hin
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: lev, g, nu, tb
+    type(ICGNBlock), intent(in) :: units(:)
+    logical, intent(in) :: apply_filter
+    integer, allocatable, intent(out) :: mi(:), mj(:)
+    complex(dp), allocatable, intent(out) :: mv(:)
+    integer, intent(out) :: nnz, ierr
+    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
+
+    integer :: u, v, i, j, k, p, p1, p2, r, c, nn, ne, e, npair, nth, ur, uc, lr, lc, pos, ia, ib
+    integer, allocatable :: coff(:), slot_of(:,:), pa(:), pb(:)
+    integer, allocatable :: e_la(:), e_lb(:), e_slot(:), p_start(:), p_fill(:), e_ord(:)
+    integer, allocatable :: rowcount(:), next(:)
+    complex(dp), allocatable :: e_v(:)
+    type(ICGNMat), allocatable :: vp(:)
+    integer(8) :: nnz8
+    real(dp) :: elo, ehi
+
+    ierr = 0; nnz = 0
+    allocate(coff(nu + 1))
+    coff(1) = 1
+    do u = 1, nu
+       coff(u + 1) = coff(u) + units(u)%nret
+    end do
+    nn = coff(nu + 1) - 1
+    if (nn < 1) then
+       ierr = 34; write(*,*) '(icgn) assemble: no retained states in group'
+       return
+    end if
+    elo = upt%icgn_core_emin - upt%icgn_bottom_buffer
+    ehi = upt%icgn_core_emax + upt%icgn_top_buffer
+    call icgn_hier_range(hh, lev, g, p1, p2)
+
+    ! ---- pass 1: count inter-unit entries (upper-triangle convention) ------
+    ne = 0
+    do p = p1, p2
+       r = hh%perm(p)
+       call icgn_hier_map(hh, lev, g, r, ur, lr)
+       if (ur < 1) cycle
+       if (units(ur)%nret == 0) cycle
+       do k = hin%Mi(r), hin%Mi(r + 1) - 1
+          c = hin%Mj(k)
+          call icgn_hier_map(hh, lev, g, c, uc, lc)
+          if (uc < 1 .or. uc == ur) cycle
+          if (units(uc)%nret == 0) cycle
+          if (.not. stored_entry(hin%sparse_fmt, r, c)) cycle
+          ne = ne + 1
+       end do
+    end do
+
+    ! ---- pass 2: store entries normalised to H_ab(la,lb), a < b ------------
+    allocate(e_la(max(1, ne)), e_lb(max(1, ne)), e_slot(max(1, ne)), e_v(max(1, ne)))
+    allocate(slot_of(nu, nu), pa(max(1, nu * (nu - 1) / 2)), pb(max(1, nu * (nu - 1) / 2)))
+    slot_of = 0; npair = 0; e = 0
+    do p = p1, p2
+       r = hh%perm(p)
+       call icgn_hier_map(hh, lev, g, r, ur, lr)
+       if (ur < 1) cycle
+       if (units(ur)%nret == 0) cycle
+       do k = hin%Mi(r), hin%Mi(r + 1) - 1
+          c = hin%Mj(k)
+          call icgn_hier_map(hh, lev, g, c, uc, lc)
+          if (uc < 1 .or. uc == ur) cycle
+          if (units(uc)%nret == 0) cycle
+          if (.not. stored_entry(hin%sparse_fmt, r, c)) cycle
+          e = e + 1
+          if (ur < uc) then
+             ia = ur; ib = uc
+             e_la(e) = lr; e_lb(e) = lc; e_v(e) = hin%M(k)
+          else
+             ia = uc; ib = ur
+             e_la(e) = lc; e_lb(e) = lr; e_v(e) = conjg(hin%M(k))
+          end if
+          if (slot_of(ia, ib) == 0) then
+             npair = npair + 1
+             slot_of(ia, ib) = npair; pa(npair) = ia; pb(npair) = ib
+          end if
+          e_slot(e) = slot_of(ia, ib)
+       end do
+    end do
+
+    ! ---- counting sort of the entries by pair ------------------------------
+    allocate(p_start(npair + 1), p_fill(max(1, npair)), e_ord(max(1, ne)))
+    p_start = 0
+    do e = 1, ne
+       p_start(e_slot(e) + 1) = p_start(e_slot(e) + 1) + 1
+    end do
+    do i = 1, npair
+       p_start(i + 1) = p_start(i + 1) + p_start(i)
+    end do
+    p_fill(1:npair) = p_start(1:npair)
+    do e = 1, ne
+       i = e_slot(e)
+       p_fill(i) = p_fill(i) + 1
+       e_ord(p_fill(i)) = e
+    end do
+    deallocate(e_slot, p_fill)
+
+    ! ---- pair projections (each pair owns its V: no locking) ---------------
+    allocate(vp(max(1, npair)))
+    nth = max(1, min(tb, npair))
+    !$omp parallel do default(shared) private(i, j, k, ia, ib) num_threads(nth) &
+    !$omp& schedule(dynamic,1) if(nth > 1)
+    do i = 1, npair
+       ia = pa(i); ib = pb(i)
+       call icgn_project_entries(units(ia), units(ib), p_start(i) + 1, p_start(i + 1), &
+            e_ord, e_la, e_lb, e_v, vp(i)%m)
+       if (apply_filter) then
+          do k = 1, units(ib)%nret
+             do j = 1, units(ia)%nret
+                if (.not. icgn_coupling_survives(vp(i)%m(j, k), units(ia)%eval(j), &
+                     units(ib)%eval(k), upt%icgn_epsilon, elo, ehi)) vp(i)%m(j, k) = czero
+             end do
+          end do
+       end if
+    end do
+    !$omp end parallel do
+    deallocate(e_la, e_lb, e_v, e_ord, p_start)
+
+    ! ---- CSR sizing (both triangles, diagonal always present) ---------------
+    allocate(rowcount(nn))
+    rowcount = 1
+    do i = 1, npair
+       ia = pa(i); ib = pb(i)
+       do k = 1, size(vp(i)%m, 2)
+          do j = 1, size(vp(i)%m, 1)
+             if (abs(vp(i)%m(j, k)) == 0.0_dp) cycle
+             rowcount(coff(ia) + j - 1) = rowcount(coff(ia) + j - 1) + 1
+             rowcount(coff(ib) + k - 1) = rowcount(coff(ib) + k - 1) + 1
+          end do
+       end do
+    end do
+    nnz8 = 0_8
+    do r = 1, nn
+       nnz8 = nnz8 + int(rowcount(r), kind=8)
+    end do
+    if (nnz8 > int(huge(nnz), kind=8)) then
+       write(*,'(a,i0,a)') '(icgn) ERROR: nested H_CG nnz=', nnz8, &
+            ' exceeds default INTEGER capacity; reduce the window or use more cubes'
+       ierr = 12
+       do i = 1, npair
+          if (associated(vp(i)%m)) deallocate(vp(i)%m)
+       end do
+       return
+    end if
+    nnz = int(nnz8)
+    allocate(mi(nn + 1), mj(nnz), mv(nnz), next(nn))
+    mi(1) = 1
+    do r = 1, nn
+       mi(r + 1) = mi(r) + rowcount(r)
+    end do
+    next = mi(1:nn)
+
+    ! ---- emission in (unit, partner-unit) order: every row comes out with
+    ! ascending columns (partners w<u, then the diagonal, then partners v>u). ----
+    do u = 1, nu
+       do j = 1, units(u)%nret
+          r = coff(u) + j - 1
+          pos = next(r)
+          mj(pos) = r
+          mv(pos) = cmplx(units(u)%eval(j), 0.0_dp, kind=dp)
+          next(r) = pos + 1
+       end do
+       do v = u + 1, nu
+          i = slot_of(u, v)
+          if (i == 0) cycle
+          do j = 1, size(vp(i)%m, 1)
+             do k = 1, size(vp(i)%m, 2)
+                if (abs(vp(i)%m(j, k)) == 0.0_dp) cycle
+                r = coff(u) + j - 1
+                pos = next(r)
+                mj(pos) = coff(v) + k - 1
+                mv(pos) = vp(i)%m(j, k)
+                next(r) = pos + 1
+                r = coff(v) + k - 1
+                pos = next(r)
+                mj(pos) = coff(u) + j - 1
+                mv(pos) = conjg(vp(i)%m(j, k))
+                next(r) = pos + 1
+             end do
+          end do
+       end do
+    end do
+    do i = 1, npair
+       if (associated(vp(i)%m)) deallocate(vp(i)%m)
+    end do
+    call icgn_csr_sort_raw(mi, mj, mv, nn)
+    deallocate(vp, rowcount, next, slot_of, pa, pb, coff)
+  end subroutine icgn_cg_assemble
+
+  ! Level 0: diagonalize cube ic (dense H of its own orbitals) and keep the
+  ! window states.  u%q rows follow the cube's slice of perm.
+  subroutine icgn_nested_cube(upt, hh, ic, u, ierr)
+    type(OUPT), intent(in) :: upt
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: ic
+    type(ICGNBlock), intent(out) :: u
+    integer, intent(out) :: ierr
+    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
+    integer :: cs, nn, jr, jc, r, c, k, m
+    real(dp), allocatable :: w(:)
+    complex(dp), allocatable :: h(:,:), z(:,:)
+
+    ierr = 0
+    cs = hh%cstart(ic)
+    nn = hh%cstart(ic + 1) - cs
+    u%nrow = nn; u%nret = 0
+    if (nn == 0) return
+    allocate(h(nn, nn))
+    h = czero
+    do jr = 1, nn
+       r = hh%perm(cs + jr - 1)
+       do k = upt%ham%Mi(r), upt%ham%Mi(r + 1) - 1
+          c = upt%ham%Mj(k)
+          if (hh%cube_of_orb(c) /= ic) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          jc = hh%pos(c) - cs + 1
+          h(jr, jc) = upt%ham%M(k)
+          if (r /= c) h(jc, jr) = conjg(upt%ham%M(k))
+       end do
+    end do
+    call icgn_window_diag(upt, h, w, z, m, ierr)
+    deallocate(h)
+    if (ierr /= 0) return
+    u%nret = m
+    if (m > 0) then
+       allocate(u%eval(m), u%q(nn, m))
+       u%eval = w
+       u%q = z(:, 1:m)
+    end if
+    deallocate(w, z)
+  end subroutine icgn_nested_cube
+
+  ! Merge the units of group g (level lev) into ONE unit:
+  !   H_CG(group) = icgn_cg_assemble, diagonalize (window), Q_group = blockdiag(Q_u) Z.
+  ! Q_group is expressed on the group's own orbitals (perm slice).  The input
+  ! units (their Q) are freed here.
+  subroutine icgn_nested_merge(upt, hh, lev, g, units, nu, tb, outu, ierr)
+    type(OUPT), intent(in) :: upt
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: lev, g, nu, tb
+    type(ICGNBlock), intent(inout) :: units(:)
+    type(ICGNBlock), intent(out) :: outu
+    integer, intent(out) :: ierr
+    complex(dp), parameter :: czero = (0.0_dp, 0.0_dp)
+    integer :: u, i, k, p1, p2, nrow_g, nn, m, nact, ro, c1, c2, nnz
+    integer, allocatable :: mi(:), mj(:), coff(:)
+    complex(dp), allocatable :: mv(:), h(:,:), z(:,:), tmp(:,:)
+    real(dp), allocatable :: w(:)
+
+    ierr = 0
+    call icgn_hier_range(hh, lev, g, p1, p2)
+    nrow_g = p2 - p1 + 1
+    outu%nrow = nrow_g; outu%nret = 0
+    nact = 0
+    do u = 1, nu
+       if (units(u)%nret > 0) nact = nact + 1
+    end do
+    if (nact == 0) return
+    if (nu == 1) then
+       ! A single unit: its basis already is the group basis, nothing to merge.
+       outu%nret = units(1)%nret
+       outu%eval => units(1)%eval
+       outu%q => units(1)%q
+       nullify(units(1)%eval, units(1)%q)
+       units(1)%nret = 0
+       return
+    end if
+
+    call icgn_cg_assemble(upt, upt%ham, hh, lev, g, units, nu, tb, .false., &
+         mi, mj, mv, nnz, ierr)
+    if (ierr /= 0) return
+    nn = size(mi) - 1
+    allocate(h(nn, nn))
+    h = czero
+    do i = 1, nn
+       do k = mi(i), mi(i + 1) - 1
+          h(i, mj(k)) = mv(k)
+       end do
+    end do
+    deallocate(mi, mj, mv)
+    call icgn_window_diag(upt, h, w, z, m, ierr)
+    deallocate(h)
+    if (ierr /= 0) return
+    outu%nret = m
+    if (m > 0) then
+       allocate(coff(nu + 1))
+       coff(1) = 1
+       do u = 1, nu
+          coff(u + 1) = coff(u) + units(u)%nret
+       end do
+       allocate(outu%eval(m), outu%q(nrow_g, m))
+       outu%eval = w
+       outu%q = czero
+       do u = 1, nu
+          if (units(u)%nret == 0) cycle
+          ro = icgn_hier_ustart(hh, lev, g, u) - p1
+          c1 = coff(u); c2 = coff(u + 1) - 1
+          allocate(tmp(units(u)%nrow, m))
+          call icgn_zgemm('N', units(u)%q, z(c1:c2, :), tmp)
+          outu%q(ro + 1:ro + units(u)%nrow, :) = tmp
+          deallocate(tmp)
+       end do
+       deallocate(coff)
+    end if
+    deallocate(w, z)
+    do u = 1, nu
+       call icgn_free_unit(units(u))
+    end do
+  end subroutine icgn_nested_merge
+
+  ! Levels 0+1 for one row: diagonalize its cubes (parallel over cubes when the
+  ! row runs on tb > 1 threads), then merge them into the row unit.
+  subroutine icgn_nested_row(upt, hh, ir, tb, ru, ierr)
+    type(OUPT), intent(in) :: upt
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: ir, tb
+    type(ICGNBlock), intent(out) :: ru
+    integer, intent(out) :: ierr
+    integer :: nx, iu, ic1, ic, nth, cmax
+    type(ICGNBlock), allocatable :: cub(:)
+    integer, allocatable :: ierr_c(:)
+
+    nx = hh%nx
+    ic1 = (ir - 1) * nx + 1
+    allocate(cub(nx), ierr_c(nx))
+    ierr_c = 0
+    cmax = 0
+    do iu = 1, nx
+       ic = ic1 + iu - 1
+       cmax = max(cmax, hh%cstart(ic + 1) - hh%cstart(ic))
+    end do
+    nth = 1
+    if (tb > 1) nth = icgn_outer_threads(nx, min(tb, nx), cmax)
+    !$omp parallel do default(shared) private(iu) num_threads(nth) schedule(dynamic,1) if(nth > 1)
+    do iu = 1, nx
+       call icgn_nested_cube(upt, hh, ic1 + iu - 1, cub(iu), ierr_c(iu))
+    end do
+    !$omp end parallel do
+    ierr = 0
+    do iu = 1, nx
+       if (ierr_c(iu) /= 0) ierr = ierr_c(iu)
+    end do
+    if (ierr == 0) then
+       call icgn_nested_merge(upt, hh, 1, ir, cub, nx, tb, ru, ierr)
+    else
+       ru%nrow = hh%cstart(ic1 + nx) - hh%cstart(ic1)
+    end if
+    do iu = 1, nx
+       call icgn_free_unit(cub(iu))
+    end do
+    deallocate(cub, ierr_c)
+  end subroutine icgn_nested_row
+
+  ! Levels 0-2 for one plane: build its rows (parallel over rows when
+  ! ny >= tb, otherwise rows run one after another and parallelism goes to the
+  ! cubes of each row), then merge the rows into the plane unit.
+  subroutine icgn_nested_plane(upt, hh, ip, tb, pu, ierr)
+    type(OUPT), intent(in) :: upt
+    type(ICGNHier), intent(in) :: hh
+    integer, intent(in) :: ip, tb
+    type(ICGNBlock), intent(out) :: pu
+    integer, intent(out) :: ierr
+    integer :: nx, ny, iu, ir1, ic, nth, cmax
+    type(ICGNBlock), allocatable :: rws(:)
+    integer, allocatable :: ierr_r(:)
+
+    nx = hh%nx; ny = hh%ny
+    ir1 = (ip - 1) * ny + 1
+    allocate(rws(ny), ierr_r(ny))
+    ierr_r = 0
+    cmax = 0
+    do ic = (ip - 1) * nx * ny + 1, ip * nx * ny
+       cmax = max(cmax, hh%cstart(ic + 1) - hh%cstart(ic))
+    end do
+    nth = 1
+    if (tb > 1 .and. ny >= tb) nth = icgn_outer_threads(ny, tb, cmax)
+    if (nth > 1) then
+       !$omp parallel do default(shared) private(iu) num_threads(nth) schedule(dynamic,1)
+       do iu = 1, ny
+          call icgn_nested_row(upt, hh, ir1 + iu - 1, 1, rws(iu), ierr_r(iu))
+       end do
+       !$omp end parallel do
+    else
+       do iu = 1, ny
+          call icgn_nested_row(upt, hh, ir1 + iu - 1, tb, rws(iu), ierr_r(iu))
+          if (ierr_r(iu) /= 0) exit
+       end do
+    end if
+    ierr = 0
+    do iu = 1, ny
+       if (ierr_r(iu) /= 0) ierr = ierr_r(iu)
+    end do
+    if (ierr == 0) then
+       call icgn_nested_merge(upt, hh, 2, ip, rws, ny, tb, pu, ierr)
+    else
+       pu%nrow = hh%cstart(ip * nx * ny + 1) - hh%cstart((ip - 1) * nx * ny + 1)
+    end if
+    call icgn_free_units(rws)
+    deallocate(ierr_r)
+  end subroutine icgn_nested_plane
+
+  ! Driver of the nested CG: cubes -> rows -> planes -> bulk H_CG.
+  ! Fills upt%icgn_ham (H_CG of the plane units, never diagonalized here) and
+  ! upt%icgn_blocks(1:nplanes) (rows, q, eval of every plane: the accumulated Q,
+  ! block-diagonal over planes) so uptight's solve/lift/U_red need no changes.
+  subroutine icgn_nested_run(upt, na, n_orb, offsets, bsize, atom_of, ierr)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: na, n_orb
+    integer, intent(in) :: offsets(:), bsize(:), atom_of(:)
+    integer, intent(out) :: ierr
+    integer :: axes(3), grids(3), nx, ny, nz, nc, np
+    integer :: i, g, a, o, ic, ip, nth_p, nred, nnz, r, k, c, p1, p2, T
+    integer :: status, save_dir, save_nb, cmax, n_empty, pr
+    integer, allocatable :: slab(:,:), part(:), cnt(:), cursor(:), ierr_p(:), mi(:), mj(:)
+    complex(dp), allocatable :: mv(:)
+    type(ICGNHier) :: hh
+    type(ICGNBlock), allocatable :: pu(:)
+    real(dp) :: t_all, t_stage, all_w, cut_w
+    character(len=256) :: msg
+
+    ierr = 0
+    t_all = icgn_wall()
+    axes = upt%icgn_nested_axes
+    grids = upt%icgn_nested_grids
+    do i = 1, 3
+       if (axes(i) < 1 .or. axes(i) > 3) then
+          ierr = 30; write(*,*) '(icgn) nested: nested_axes must be in {1,2,3}'; return
+       end if
+       if (grids(i) < 1) then
+          ierr = 30; write(*,*) '(icgn) nested: nested_grids must be >= 1'; return
+       end if
+    end do
+    if (axes(1) == axes(2) .or. axes(1) == axes(3) .or. axes(2) == axes(3)) then
+       ierr = 30; write(*,*) '(icgn) nested: nested_axes must be a permutation of 1,2,3'; return
+    end if
+    if (.not. associated(upt%basis%coord)) then
+       ierr = 30; write(*,*) '(icgn) nested: basis coordinates missing'; return
+    end if
+    if (size(upt%basis%coord, 2) < na) then
+       ierr = 30; write(*,*) '(icgn) nested: coord size mismatch'; return
+    end if
+    nx = grids(1); ny = grids(2); nz = grids(3)
+    nc = nx * ny * nz
+    np = nz
+    write(msg,'(a,3i4,a,3i4)') '(icgn) nested: axes=', axes, ' grids=', grids
+    call icgn_log_important(upt, trim(msg))
+
+    ! ---- slabs along every axis (layer-aware, balanced; reuses geometry partition)
+    allocate(slab(na, 3), part(na))
+    slab = 0
+    save_dir = upt%icgn_partition_dir; save_nb = upt%icgn_num_blocks
+    do g = 1, 3
+       if (grids(g) == 1) cycle
+       upt%icgn_partition_dir = axes(g)
+       upt%icgn_num_blocks = grids(g)
+       call icgn_geometry_partition(upt, na, bsize, part, status)
+       if (status == 0 .and. upt%icgn_num_blocks /= grids(g)) then
+          status = 31
+          write(*,'(a,i0,a)') '(icgn) nested: nested_grids(', g, ') exceeds the number of atomic layers'
+       end if
+       if (status /= 0) then
+          upt%icgn_partition_dir = save_dir; upt%icgn_num_blocks = save_nb
+          ierr = status
+          return
+       end if
+       slab(:, g) = part
+    end do
+    upt%icgn_partition_dir = save_dir; upt%icgn_num_blocks = save_nb
+
+    ! ---- orbital-level hierarchy maps ---------------------------------------
+    hh%nx = nx; hh%ny = ny; hh%nz = nz
+    allocate(hh%cube_of_orb(n_orb), hh%perm(n_orb), hh%pos(n_orb), hh%cstart(nc + 1))
+    allocate(cnt(nc), cursor(nc))
+    cnt = 0
+    do a = 1, na
+       ic = 1 + slab(a, 1) + nx * slab(a, 2) + nx * ny * slab(a, 3)
+       do o = offsets(a), offsets(a + 1) - 1
+          hh%cube_of_orb(o) = ic
+       end do
+       cnt(ic) = cnt(ic) + bsize(a)
+    end do
+    hh%cstart(1) = 1
+    do ic = 1, nc
+       hh%cstart(ic + 1) = hh%cstart(ic) + cnt(ic)
+    end do
+    cursor = hh%cstart(1:nc)
+    do o = 1, n_orb
+       ic = hh%cube_of_orb(o)
+       hh%perm(cursor(ic)) = o
+       hh%pos(o) = cursor(ic)
+       cursor(ic) = cursor(ic) + 1
+    end do
+    cmax = maxval(cnt)
+    n_empty = count(cnt == 0)
+    deallocate(slab, part, cnt, cursor)
+    if (n_empty > 0) then
+       write(msg,'(a,i0,a,i0)') '(icgn) nested: WARNING empty cubes: ', n_empty, ' of ', nc
+       call icgn_log_important(upt, trim(msg))
+    end if
+
+    ! ---- cubes -> rows -> planes: planes in parallel only if np >= threads ---
+    T = icgn_thread_budget()
+    nth_p = 1
+    if (T > 1 .and. np >= T) nth_p = icgn_outer_threads(np, min(T, np), cmax)
+    allocate(pu(np), ierr_p(np))
+    ierr_p = 0
+    t_stage = icgn_wall()
+    if (nth_p > 1) then
+       !$omp parallel do default(shared) private(ip) num_threads(nth_p) schedule(dynamic,1)
+       do ip = 1, np
+          call icgn_nested_plane(upt, hh, ip, 1, pu(ip), ierr_p(ip))
+       end do
+       !$omp end parallel do
+    else
+       do ip = 1, np
+          call icgn_nested_plane(upt, hh, ip, T, pu(ip), ierr_p(ip))
+          if (ierr_p(ip) /= 0) exit
+       end do
+    end if
+    call icgn_report_time('nested: cubes -> rows -> planes', t_stage)
+    do ip = 1, np
+       if (ierr_p(ip) /= 0) ierr = ierr_p(ip)
+    end do
+    if (ierr /= 0) then
+       call icgn_free_units(pu)
+       return
+    end if
+    nred = 0
+    do ip = 1, np
+       nred = nred + pu(ip)%nret
+    end do
+    if (nred < 1) then
+       ierr = 9; write(*,*) '(icgn) no states retained'
+       call icgn_free_units(pu)
+       return
+    end if
+
+    ! ---- bulk H_CG: planes assembled with the generic routine ----------------
+    t_stage = icgn_wall()
+    call icgn_cg_assemble(upt, upt%ham, hh, 3, 1, pu, np, T, .true., mi, mj, mv, nnz, ierr)
+    if (ierr /= 0) then
+       call icgn_free_units(pu)
+       return
+    end if
+    call icgn_report_time('nested: bulk H_CG (plane pairs)', t_stage)
+    if (associated(upt%icgn_ham%M)) call destroy_matrix(upt%icgn_ham)
+    call create_matrix(upt%icgn_ham, nred, nred, nnz)
+    upt%icgn_ham%sparse_fmt = 'F'
+    upt%icgn_ham%Mi(1:nred + 1) = mi(1:nred + 1)
+    upt%icgn_ham%Mj(1:nnz) = mj(1:nnz)
+    upt%icgn_ham%M(1:nnz) = mv(1:nnz)
+    upt%icgn_ham%nnz = nnz
+    deallocate(mi, mj, mv)
+
+    ! ---- accumulated Q: one block per plane (moved, not copied) -------------
+    allocate(upt%icgn_blocks(np))
+    do ip = 1, np
+       p1 = hh%cstart((ip - 1) * nx * ny + 1)
+       p2 = hh%cstart(ip * nx * ny + 1) - 1
+       upt%icgn_blocks(ip)%nrow = p2 - p1 + 1
+       upt%icgn_blocks(ip)%nret = pu(ip)%nret
+       allocate(upt%icgn_blocks(ip)%rows(p2 - p1 + 1))
+       upt%icgn_blocks(ip)%rows = hh%perm(p1:p2)
+       if (pu(ip)%nret > 0) then
+          upt%icgn_blocks(ip)%eval => pu(ip)%eval
+          upt%icgn_blocks(ip)%q => pu(ip)%q
+          nullify(pu(ip)%eval, pu(ip)%q)
+       end if
+    end do
+    call icgn_free_units(pu)
+
+    ! cut fraction = weight of couplings between different planes
+    all_w = 0.0_dp; cut_w = 0.0_dp
+    do r = 1, n_orb
+       pr = (hh%cube_of_orb(r) - 1) / (nx * ny)
+       do k = upt%ham%Mi(r), upt%ham%Mi(r + 1) - 1
+          c = upt%ham%Mj(k)
+          if (atom_of(r) == atom_of(c)) cycle
+          if (.not. stored_entry(upt%ham%sparse_fmt, r, c)) cycle
+          all_w = all_w + abs(upt%ham%M(k))**2
+          if ((hh%cube_of_orb(c) - 1) / (nx * ny) /= pr) cut_w = cut_w + abs(upt%ham%M(k))**2
+       end do
+    end do
+    if (all_w > 0.0_dp) then
+       upt%icgn_cut_fraction = cut_w / all_w
+    else
+       upt%icgn_cut_fraction = 0.0_dp
+    end if
+    upt%icgn_num_blocks = np
+    upt%icgn_original_dim = n_orb
+    upt%icgn_reduced_dim = nred
+
+    call icgn_build_reduced_U(upt, nred, ierr)
+    if (ierr /= 0) return
+    call icgn_report_time('TOTAL ICGN PREPARATION TIME (nested)', t_all)
+    upt%icgn_ready = .true.
+    call icgn_log_info(upt, 'icgn', n_orb, nred, upt%icgn_num_blocks, upt%icgn_cut_fraction, &
+         upt%icgn_sigma_T2, upt%icgn_pi_converged, .false.)
+  end subroutine icgn_nested_run
+
+  ! Entry point called by icgn_prepare when partition_type = 2.  Nesting is
+  ! flattened for the whole run: exactly one parallel loop level is active, and
+  ! BLAS/LAPACK is threaded only in the serial parts.
+  subroutine icgn_nested_prepare(upt, na, n_orb, offsets, bsize, atom_of, ierr)
+    type(OUPT), intent(inout) :: upt
+    integer, intent(in) :: na, n_orb
+    integer, intent(in) :: offsets(:), bsize(:), atom_of(:)
+    integer, intent(out) :: ierr
+    integer :: saved_levels
+    call icgn_flatten_nesting(saved_levels)
+    call icgn_nested_run(upt, na, n_orb, offsets, bsize, atom_of, ierr)
+    call icgn_restore_nesting(saved_levels)
+  end subroutine icgn_nested_prepare
+
   ! Diagonalize block ib of icgn_blocks.  Thread-safe for distinct ib: it reads
   ! upt%ham and writes only upt%icgn_blocks(ib).  local(r) = position of row r
+
   ! inside its own block, blk_of(r) = block that owns row r (both cover all rows).
   subroutine icgn_diagonalize_block(upt, ib, local, blk_of, ierr)
     type(OUPT), intent(inout) :: upt
