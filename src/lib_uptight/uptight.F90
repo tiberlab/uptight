@@ -54,6 +54,7 @@ module UPTIGHT
   public :: upt_set_defaults, upt_get_hamil, upt_version, upt_alloc_eigv
   public :: upt_configure_coarse_graining, upt_get_coarse_graining_info
   public :: upt_set_coarse_graining_partition, upt_set_coarse_graining_nested
+  public :: upt_set_coarse_graining_nested_tiers
   public :: upt_get_coarse_graining_error
   public :: upt_coarse_graining_swap_out
   public :: upt_configure_icgn, upt_get_icgn_info
@@ -445,15 +446,32 @@ contains
 
   ! Nested CG grid/axes. axes(1:3) in {1,2,3} = x,y,z order (row along axes(1),
   ! plane along axes(1:2)). grids(1:3) > 0. Call after set_coarse_graining_partition
-  ! with ptype=2. Forces fast-path (no core outers, no Neumann).
+  ! with ptype=2.  Per-tier outers / Neumann / window: UPT_set_coarse_graining_nested_tiers.
   subroutine UPT_set_coarse_graining_nested(upt, axes, grids)
     type(OUPT), intent(inout) :: upt
     integer, intent(in) :: axes(3), grids(3)
     upt%icgn_nested_axes = axes
     upt%icgn_nested_grids = grids
-    upt%icgn_add_core_outers = 0
-    upt%icgn_selfenergy_order = -1
   end subroutine UPT_set_coarse_graining_nested
+
+  ! Per-tier parameters of the nested CG; tier 1/2/3 = diagonalization of
+  ! cubes / rows / planes (same order as nested_axes).  Call after
+  ! UPT_configure_coarse_graining (which sets all tiers to its scalar values).
+  subroutine UPT_set_coarse_graining_nested_tiers(upt, core_emin, core_emax, top_buffer, &
+       bottom_buffer, epsilon, add_core_outers, neumann_order, expansion_energy)
+    type(OUPT), intent(inout) :: upt
+    real(dp), intent(in) :: core_emin(3), core_emax(3), top_buffer(3), bottom_buffer(3)
+    real(dp), intent(in) :: epsilon(3), expansion_energy(3)
+    integer, intent(in) :: add_core_outers(3), neumann_order(3)
+    upt%icgn_tier_emin = core_emin
+    upt%icgn_tier_emax = core_emax
+    upt%icgn_tier_top  = top_buffer
+    upt%icgn_tier_bot  = bottom_buffer
+    upt%icgn_tier_eps  = epsilon
+    upt%icgn_tier_E0   = expansion_energy
+    upt%icgn_nested_outers = max(0, add_core_outers)
+    upt%icgn_nested_orders = neumann_order
+  end subroutine UPT_set_coarse_graining_nested_tiers
 
   subroutine UPT_get_coarse_graining_info(upt, ready, original_dim, reduced_dim, nblocks, cut_fraction)
      use coarse_grain, only : icgn_get_info

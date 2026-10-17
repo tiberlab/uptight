@@ -129,6 +129,19 @@ module upt_param
      ! axes order (1/2/3 = x/y/z), e.g. (1,2,3) = x-y-z; grids along those axes
      integer  :: icgn_nested_axes(3) = (/ 1, 2, 3 /)
      integer  :: icgn_nested_grids(3) = (/ 0, 0, 0 /)
+     ! Nested CG per-tier core-state outers / Neumann order, tiers = diagonalization
+     ! of (cubes, rows, planes).  Defaults: window-only (0 / -1).
+     integer  :: icgn_nested_outers(3) = (/ 0, 0, 0 /)
+     integer  :: icgn_nested_orders(3) = (/ -1, -1, -1 /)
+     ! Per-tier energy window / thresholds of the nested CG (same tiers).  They
+     ! default to the scalar icgn_* values (icgn_configure) and are overridden by
+     ! UPT_set_coarse_graining_nested_tiers.
+     REAL ( dp ) :: icgn_tier_emin(3) = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+     REAL ( dp ) :: icgn_tier_emax(3) = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+     REAL ( dp ) :: icgn_tier_top(3)  = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+     REAL ( dp ) :: icgn_tier_bot(3)  = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+     REAL ( dp ) :: icgn_tier_eps(3)  = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
+     REAL ( dp ) :: icgn_tier_E0(3)   = (/ 0.0_dp, 0.0_dp, 0.0_dp /)
  
      REAL ( dp ),   DIMENSION( : ),    POINTER     :: eigen_values
      COMPLEX ( dp ), DIMENSION( :,: ),    POINTER  :: eigen_vectors
@@ -236,6 +249,8 @@ contains
    upt%icgn_layer_tol = 0.0_dp
    upt%icgn_nested_axes = (/ 1, 2, 3 /)
    upt%icgn_nested_grids = (/ 0, 0, 0 /)
+   upt%icgn_nested_outers = (/ 0, 0, 0 /)
+   upt%icgn_nested_orders = (/ -1, -1, -1 /)
    upt%icgn_add_core_outers = 0   ! default: do not add core-state outers
    upt%icgn_selfenergy_order = -1    ! default: no Neumann correction (behaves like plain ICG)
    upt%icgn_E0 = 0.0_dp

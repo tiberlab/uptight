@@ -604,6 +604,30 @@ subroutine upt_set_coarse_graining_nested(handler, ax1, ax2, ax3, g1, g2, g3)
   call upt_set_coarse_graining_nested_f(pUPTs%pUPT, axes, grids)
 end subroutine upt_set_coarse_graining_nested
 
+!!* Per-tier (cubes, rows, planes) parameters of the nested CG: core window,
+!!* buffers, coupling threshold, core-state outers, Neumann order, expansion
+!!* energy. Call after upt_set_coarse_graining (and upt_set_coarse_graining_nested).
+subroutine upt_set_coarse_graining_nested_tiers(handler, core_energy_min, core_energy_max, &
+    top_buffer, bottom_buffer, epsilon, add_core_outers, neumann_order, expansion_energy)
+  use precision, only : dp
+  use uptightAPICommon ! if:mod:use
+  use uptight, only : upt_set_coarse_graining_nested_tiers_f => upt_set_coarse_graining_nested_tiers ! if:mod:use
+  implicit none
+  integer :: handler(DAC_handlerSize) ! if:var:in
+  real(dp) :: core_energy_min(3) ! if:var:in
+  real(dp) :: core_energy_max(3) ! if:var:in
+  real(dp) :: top_buffer(3) ! if:var:in
+  real(dp) :: bottom_buffer(3) ! if:var:in
+  real(dp) :: epsilon(3) ! if:var:in
+  integer :: add_core_outers(3) ! if:var:in
+  integer :: neumann_order(3) ! if:var:in
+  real(dp) :: expansion_energy(3) ! if:var:in
+  type(UPTPointers) :: pUPTs
+  pUPTs = transfer(handler, pUPTs)
+  call upt_set_coarse_graining_nested_tiers_f(pUPTs%pUPT, core_energy_min, core_energy_max, &
+      top_buffer, bottom_buffer, epsilon, add_core_outers, neumann_order, expansion_energy)
+end subroutine upt_set_coarse_graining_nested_tiers
+
 !!* Return coarse-graining reduction statistics after Hamiltonian creation.
 subroutine upt_get_coarse_graining_info(handler, ready, original_dim, reduced_dim, n_blocks, cut_fraction)
   use precision, only : dp

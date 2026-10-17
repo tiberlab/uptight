@@ -290,6 +290,27 @@ extern "C"
 }
 
 
+// Corresponding F77 arguments for upt_set_coarse_graining_nested_tiers:
+// integer, intent(in) :: handler(DAC_handlerSize)
+// real(dp), intent(in) :: core_energy_min(3)
+// real(dp), intent(in) :: core_energy_max(3)
+// real(dp), intent(in) :: top_buffer(3)
+// real(dp), intent(in) :: bottom_buffer(3)
+// real(dp), intent(in) :: epsilon(3)
+// integer, intent(in) :: add_core_outers(3)
+// integer, intent(in) :: neumann_order(3)
+// real(dp), intent(in) :: expansion_energy(3)
+extern "C"
+
+{
+  void upt_set_coarse_graining_nested_tiers_ (int const* handler, f77_double 
+      const* core_energy_min, f77_double const* core_energy_max, f77_double 
+      const* top_buffer, f77_double const* bottom_buffer, f77_double const* 
+      epsilon, int const* add_core_outers, int const* neumann_order, f77_double 
+      const* expansion_energy);
+}
+
+
 // Corresponding F77 arguments for upt_get_coarse_graining_info:
 // integer, intent(in) :: handler(DAC_handlerSize)
 // integer, intent(out) :: ready
