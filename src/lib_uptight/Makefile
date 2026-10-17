@@ -148,10 +148,10 @@ all: PARAMETERIZER
 # UPT_TEST7: test7.o f_exceptions.o $(OBJECTS) 
 #		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
-PARAMETERIZER: parameterizer.o f_exceptions.o $(OBJECTS) 
+PARAMETERIZER: parameterizer.o f_exceptions.o $(OBJECTS)
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB)
 
-test_supercell: test_supercell.o f_exceptions.o $(OBJECTS)
+test_CG_mode: test_CG_mode.o f_exceptions.o $(OBJECTS)
 		$(FC) $(LDFLAGS) -o $@ $^ $(LIBARPACK) $(LFEAST) $(LFLAGS) $(LIBCUDA) $(LIBMKLIB) $(METISLIB)
 
 # pUPT: test8.o f_exceptions.o  $(OBJECTS) 
@@ -233,7 +233,7 @@ $(SOURCES):
 
 .PHONY: clean check
 clean:
-	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT test_coarse_grain
+	rm -f *.a *.o; rm -f *.mod UPT_TEST6 UPT_TEST7 PARAMETERIZER pUPT test_coarse_grain test_CG_mode
 
 check:
 	@echo $(have_cuda)

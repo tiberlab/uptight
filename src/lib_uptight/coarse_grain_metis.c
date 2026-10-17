@@ -1,6 +1,33 @@
 /* Optional METIS bridge.  Keeping METIS types in C avoids ABI differences in
- * idx_t between METIS builds and the Fortran library. */
+ * idx_t between METIS builds and the Fortran library.
+ *
+ * Also provides weak default implementations of the host-log callbacks that
+ * Fortran (coarse_grain / JD) expects.  Inside tiberCAD, UptWrapper.cpp supplies
+ * strong definitions that override these and route into Messages::info. */
+#include <stdio.h>
 #include <stdlib.h>
+
+__attribute__((weak)) void upt_log_message(const char *message, int length)
+{
+  if (message == NULL || length <= 0) {
+    fputs("(icgn)\n", stdout);
+    return;
+  }
+  fputs("(icgn) ", stdout);
+  fwrite(message, 1, (size_t)length, stdout);
+  fputc('\n', stdout);
+}
+
+__attribute__((weak)) void upt_jd_log_message(const char *message, int length)
+{
+  if (message == NULL || length <= 0) {
+    fputs("(jd)\n", stdout);
+    return;
+  }
+  fputs("(jd) ", stdout);
+  fwrite(message, 1, (size_t)length, stdout);
+  fputc('\n', stdout);
+}
 
 #ifdef UPT_HAVE_METIS
 #include <metis.h>

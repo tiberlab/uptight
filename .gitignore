@@ -34,5 +34,5 @@ TEST/INIshell/test_GUI.ini
 COARSE_GRAINING_GUIDE.md
 .freebuff/project-id
 src/lib_uptight/coarse-grain_plan.md
-src/lib_uptight/test_supercell
+src/lib_uptight/test_CG_mode
 *.jl

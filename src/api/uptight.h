@@ -263,14 +263,12 @@ extern "C"
 // Corresponding F77 arguments for upt_set_coarse_graining_partition:
 // integer, intent(in) :: handler(DAC_handlerSize)
 // integer, intent(in) :: partition_type
-// integer, intent(in) :: partition_direction
 // real(dp), intent(in) :: layer_tolerance
 extern "C"
 
 {
   void upt_set_coarse_graining_partition_ (int const* handler, int const& 
-      partition_type, int const& partition_direction, f77_double const& 
-      layer_tolerance);
+      partition_type, f77_double const& layer_tolerance);
 }
 
 

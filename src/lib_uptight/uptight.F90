@@ -431,16 +431,15 @@ contains
   end subroutine UPT_configure_coarse_graining
 
   ! Select the block partition strategy.  ptype: 0 = coupling (METIS/graph),
-  ! 1 = geometry (1D principal layers), 2 = nested (cube→row→plane→bulk).
-  ! pdir: 0 = auto (longest extent), 1/2/3 = x/y/z (geometry only).
-  ! layer_tol: atomic-layer gap tolerance in Angstrom (<= 0 = auto-detect).
+  ! 2 = nested (cube→row→plane→bulk).
+  ! layer_tol: atomic-layer gap tolerance in Angstrom (<= 0 = auto-detect),
+  ! used by the nested slab partition.
   ! Must be called after UPT_configure_coarse_graining.
-  subroutine UPT_set_coarse_graining_partition(upt, ptype, pdir, layer_tol)
+  subroutine UPT_set_coarse_graining_partition(upt, ptype, layer_tol)
     type(OUPT), intent(inout) :: upt
-    integer, intent(in) :: ptype, pdir
+    integer, intent(in) :: ptype
     real(dp), intent(in) :: layer_tol
     upt%icgn_partition_type = ptype
-    upt%icgn_partition_dir = pdir
     upt%icgn_layer_tol = layer_tol
   end subroutine UPT_set_coarse_graining_partition
 

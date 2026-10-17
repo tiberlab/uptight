@@ -567,21 +567,20 @@ subroutine upt_set_coarse_graining(handler, n_blocks, metis_imbalance, &
       power_iteration_max_iterations, power_iteration_tolerance)
 end subroutine upt_set_coarse_graining
 
-!!* Select block partition strategy (0 = coupling, 1 = geometry), direction
-!!* (0 = auto, 1/2/3 = x/y/z) and atomic-layer tolerance in Angstrom (<=0: auto).
+!!* Select block partition strategy (0 = coupling, 2 = nested) and atomic-layer
+!!* tolerance in Angstrom (<=0: auto; used by the nested slab partition).
 !!* Call after upt_set_coarse_graining.
-subroutine upt_set_coarse_graining_partition(handler, partition_type, partition_direction, layer_tolerance)
+subroutine upt_set_coarse_graining_partition(handler, partition_type, layer_tolerance)
   use precision, only : dp
   use uptightAPICommon ! if:mod:use
   use uptight, only : upt_set_coarse_graining_partition_f => upt_set_coarse_graining_partition ! if:mod:use
   implicit none
   integer :: handler(DAC_handlerSize) ! if:var:in
   integer :: partition_type ! if:var:in
-  integer :: partition_direction ! if:var:in
   real(dp) :: layer_tolerance ! if:var:in
   type(UPTPointers) :: pUPTs
   pUPTs = transfer(handler, pUPTs)
-  call upt_set_coarse_graining_partition_f(pUPTs%pUPT, partition_type, partition_direction, layer_tolerance)
+  call upt_set_coarse_graining_partition_f(pUPTs%pUPT, partition_type, layer_tolerance)
 end subroutine upt_set_coarse_graining_partition
 
 !!* Nested CG axes (1/2/3) and grids. Call after partition_type=2.

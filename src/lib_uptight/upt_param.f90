@@ -100,10 +100,11 @@ module upt_param
    integer :: icgn_error
      integer :: icgn_num_blocks, icgn_original_dim, icgn_reduced_dim
      real(dp) :: icgn_emin, icgn_emax, icgn_metis_imbalance, icgn_cut_fraction
-     ! Block partition mode: 0 = coupling (METIS/graph), 1 = geometry (1D PL),
+     ! Block partition mode: 0 = coupling (METIS/graph),
      ! 2 = nested (hierarchical cube→row→plane→bulk)
      integer  :: icgn_partition_type = 0
-     ! Geometry partition direction: 0 = auto (longest extent), 1/2/3 = x/y/z
+     ! Slab-partition axis used internally by the nested CG (set per axis by
+     ! icgn_nested_*): 0 = auto (longest extent), 1/2/3 = x/y/z
      integer  :: icgn_partition_dir = 0
      ! Atomic-layer gap tolerance (Angstrom); <= 0 means auto-detect
      real(dp) :: icgn_layer_tol = 0.0_dp
