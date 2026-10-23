@@ -117,7 +117,8 @@ endif
 coarse_grain_metis.o: coarse_grain_metis.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-coarse_grain.o: lanczos.o JD.o
+coarse_grain.o: upt_param.o sparse_matrix.o mpi_globals.o precision.o
+uptight.o: coarse_grain.o
 
 # lanczos.F90 calls MPI_Bcast/MPI_Allreduce with several buffer types/ranks
 # (no explicit interface). Harmless; silence it for this file only so the
