@@ -8,3 +8,4 @@ src/lib_uptight/PARAMETERIZER
 src/lib_uptight/uptight.a
 src/api/exception_codes.h
 src/api/uptight.h
+src/lib_uptight/test_CG_mode
